@@ -1,0 +1,44 @@
+{
+  "version": 4,
+  "root": "<git-common-dir>/worktree-controller/v1",
+  "lock": {
+    "name": "repo.lock",
+    "authority": "regular readable-writable non-symlink file; every Controller mutation and the Git Finalizer retirement path serialize on it; missing or unusable locks fail closed"
+  },
+  "directories": {
+    "records": "one metadata record JSON per allocation id",
+    "bindings": "one worktree-key binding JSON per governed checkout",
+    "transactions": "nonterminal mutation journals; interrupted atomic temp siblings are never records",
+    "teardown-receipts": "reproducible environment teardown evidence",
+    "completion-receipts": "tracked source cleanup completion evidence",
+    "integration-intents": "durable integration queue intents",
+    "prepared-candidate-receipts": "immutable candidate preparation receipts",
+    "integration-reconciliation-receipts": "integration reconciliation receipts",
+    "lifecycle-events": "durable lifecycle event outbox",
+    "namespace-migrations": "write-once legacy namespace migration receipts, keyed by plan id",
+    "lifecycle-event-acks": "event acknowledgement receipts",
+    "release-intents": "durable release intents",
+    "release-plans": "unified release plans",
+    "publication-receipts": "publication completion receipts",
+    "release-receipts": "formal allocation release receipts",
+    "registration-prune-receipts": "write-once registration-prune/v1 audit receipts; authoritative terminal and recovery proof for registration pruning, not repository identity or lock authority; included byte-for-byte in namespace migration merged digest and move/convergence, but not in the prior GC plan digest or metadata-reference-relocation/v1 cleanup inventory",
+    "branch-retirement-plans": "versioned retirement plans consumed by the Git Finalizer retirement verifier",
+    "branch-retirement-receipts": "independent local/remote retirement results",
+    "reconciliation-receipts": "writer reconciliation receipts",
+    "writer-leases": "exact writer lease documents",
+    "writer-reconciliation-receipts": "writer-only historical budget settlement receipts",
+    "source-cleanup": "per-transaction tracked source evidence trees",
+    "branch-retirement-authorizations": "single-use retirement execution grants and their immutable abandonment evidence"
+  },
+  "single_file": {
+    "repo.json": "repository identity",
+    "publication-lease.json": "single publication lease",
+    "namespace-relocation.json": "fenced layout migration reference evidence"
+  },
+  "consumers": [
+    "worktree-controller itself (exclusive writers)",
+    "scripts/check-writer-rollout (frozen read-only activation gate)",
+    "Git Finalizer retirement verifier (reads branch-retirement-plans under repo.lock)"
+  ],
+  "compatibility": "v4 declares exactly one directory (registration-prune-receipts) already used by 1.9.2; no data moves and all v3 names, file identities and record schemas remain unchanged; v3 readers of existing paths may ignore the extra directory, while exact layout pins must recognize v4 before activation; v3 adds exactly one directory (namespace-migrations) and one documented previous-namespace entry (codex-worktree/v1, migrated only by the namespace-migrate verb); v2 adds exactly one directory (branch-retirement-authorizations); any further layout or schema change requires a new layout version plus that gate, and external consumers pin this section"
+}

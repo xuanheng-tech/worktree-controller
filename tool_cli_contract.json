@@ -1,0 +1,1791 @@
+{
+  "commands": [
+    {
+      "name": "acquire",
+      "operation_class": "git_worktree_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "acquire-across",
+      "operation_class": "git_worktree_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "acquire-when-free",
+      "operation_class": "git_worktree_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "admission-queue",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "adopt",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "adopt-delivered",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "binding-add",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "binding-remove",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "binding-transfer",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "branch-retirement-authorize",
+      "operation_class": "metadata_mutation",
+      "result_contract": "branch-retirement/v5"
+    },
+    {
+      "name": "branch-retirement-complete",
+      "operation_class": "metadata_mutation",
+      "result_contract": "branch-retirement/v5"
+    },
+    {
+      "name": "branch-retirement-executions",
+      "operation_class": "metadata_mutation",
+      "result_contract": "branch-retirement/v5"
+    },
+    {
+      "name": "branch-retirement-plan",
+      "operation_class": "metadata_mutation",
+      "result_contract": "branch-retirement/v1"
+    },
+    {
+      "name": "branch-retirement-record",
+      "operation_class": "metadata_mutation",
+      "result_contract": "branch-retirement/v1"
+    },
+    {
+      "name": "branch-retirement-status",
+      "operation_class": "read_only",
+      "result_contract": "branch-retirement/v1"
+    },
+    {
+      "name": "branch-retirement-verify",
+      "operation_class": "read_only",
+      "result_contract": "branch-retirement/v2"
+    },
+    {
+      "name": "capabilities",
+      "operation_class": "read_only",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "canonical-refresh",
+      "operation_class": "git_worktree_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "canonical-transition",
+      "operation_class": "git_worktree_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "archive-retained",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "close-delivered",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "close-preserved",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "complete-no-change",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "doctor",
+      "operation_class": "read_only",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "execution-admit",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "execution-cancel",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "session-admit",
+      "operation_class": "git_worktree_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "session-bind",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "externalize",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "gc-apply",
+      "operation_class": "git_worktree_mutation",
+      "result_contract": "worktree-governance/v1"
+    },
+    {
+      "name": "gc-plan",
+      "operation_class": "read_only",
+      "result_contract": "worktree-governance/v2"
+    },
+    {
+      "name": "handoff",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "host-execution",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "integration-abandon",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "integration-abort",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "integration-retry",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "integration-claim",
+      "operation_class": "git_worktree_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "integration-enqueue",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "integration-equivalent",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "integration-queue",
+      "operation_class": "read_only",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "integration-recovery-matrix",
+      "operation_class": "read_only",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "integration-resolve",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "integration-refresh",
+      "operation_class": "git_worktree_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "integration-reopen",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "integration-validate",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "lease-abort",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "lease-acquire",
+      "operation_class": "remote_tracking_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "publication-execution-session",
+      "operation_class": "read_only",
+      "result_contract": "integration-publication-session/v1"
+    },
+    {
+      "name": "lease-complete",
+      "operation_class": "remote_tracking_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "lifecycle-event-ack",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "lifecycle-events",
+      "operation_class": "read_only",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "namespace-migrate",
+      "operation_class": "filesystem_mutation",
+      "result_contract": "namespace-migration/v1"
+    },
+    {
+      "name": "namespace-migration-plan",
+      "operation_class": "read_only",
+      "result_contract": "namespace-migration/v1"
+    },
+    {
+      "name": "namespace-migration-receipts",
+      "operation_class": "read_only",
+      "result_contract": "namespace-migration/v1"
+    },
+    {
+      "name": "namespace-migration-verify",
+      "operation_class": "read_only",
+      "result_contract": "namespace-migration/v1"
+    },
+    {
+      "name": "park",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "plan",
+      "operation_class": "read_only",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "quarantine",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "reconcile",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "reconcile-session",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "reconcile-writers",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "recovery-adopt",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "release",
+      "operation_class": "git_worktree_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "release-intent",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "recover-handoff",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "recover-published",
+      "operation_class": "git_worktree_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "reopen",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "resource-clean",
+      "operation_class": "resource_cleanup",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "resource-recover",
+      "operation_class": "filesystem_mutation",
+      "result_contract": "re-preservation-recovery/v1"
+    },
+    {
+      "name": "resource-register",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "resume",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "review",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "status",
+      "operation_class": "read_only",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "write-guard",
+      "operation_class": "read_only",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "writer-lease-acquire",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "writer-lease-release",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "writer-session",
+      "operation_class": "metadata_mutation",
+      "result_contract": "writer-admission/v1"
+    },
+    {
+      "name": "lifecycle-history",
+      "operation_class": "read_only",
+      "result_contract": "closed-lifecycle/v1"
+    },
+    {
+      "name": "release-recovery-inspect",
+      "operation_class": "read_only",
+      "result_contract": "release-recovery-inspection/v1"
+    },
+    {
+      "name": "recovery-guide",
+      "operation_class": "read_only",
+      "result_contract": "worktree-controller/v1"
+    }
+  ],
+  "branch_retirement_version": 1,
+  "branch_retirement_verify_version": 1,
+  "cleanup_hardlink_topology_version": 2,
+  "contract_version": 60,
+  "release_recovery_inspection_version": 1,
+  "release_recovery_inspection_contract": {
+    "contract": "release-recovery-inspection/v1",
+    "producer": "release-recovery-inspect --transaction-id <canonical-uuid> --json",
+    "request_fields": ["target_path", "expected_record_version", "owner_release", "publication_receipt_id", "release_intent_id"],
+    "identity": "exact original journal filename/UUID, supported release schema/phase, repository and ReleasePlan content hash, allocation, path, branch, HEAD and original CAS; referenced publication/intent identities must match",
+    "evidence": "raw SHA-256 and existing paths of the original journal and release plan, read under a shared repository lock",
+    "release_argv": "structured argument list for the existing guarded release, including original --publication-receipt-id and --intent-id when applicable; values are individual arguments, never a shell command",
+    "authority": "release_authorized=false and execution_guards_checked=false; no mutation, receipt creation, recovery execution, live guard preflight or activation exception; original owner/CAS come from the plan, never the released record; missing or inconsistent original evidence is refused"
+  },
+  "rollout_transaction_diagnostics_version": 1,
+  "rollout_transaction_diagnostics_contract": {
+    "contract": "rollout-transaction-diagnostics/v1",
+    "producer": "resource-recover --stage rollout-check --dry-run --json",
+    "field": "decision.transaction_diagnostics",
+    "fields": ["transaction_id", "command", "phase", "error", "recovery_entry"],
+    "error_fields": ["code", "message"],
+    "unavailable_identity": "command, phase and recovery_entry are null when not known; failed staged invocation diagnostics also have null transaction_id",
+    "consumer": "check-writer-rollout adds repository to each transaction_diagnostics row; controller-activate logs these rows before refusal",
+    "classification": "verified terminal evidence first; unfinished release requires the original release request, supported cleanup keeps its exact recovery checks, unknown commands or cleanup contracts remain refused",
+    "authority": "first refused transaction only; recovery_entry is a hint that still needs exact original identity and evidence; the check performs no metadata writes, automatic repair or new activation exception; release dry-run still refuses after checkout removal"
+  },
+  "canonical_transition_version": 1,
+  "canonical_refresh_version": 1,
+  "canonical_refresh_contract": {
+    "contract": "canonical-refresh/v1",
+    "producer": "canonical-refresh [--dry-run]",
+    "applies_to": "an ACTIVE canonical checkout on the policy publication branch that is clean, holds no writer lease, runtime binding or unfinished transaction, and is used by no live process other than the caller's own ancestry",
+    "action": "fetch the publication branch and fast-forward canonical only when its HEAD is an ancestor; the published policy must remain governable; Controller metadata is unchanged",
+    "results": ["CANONICAL_REFRESHED", "CANONICAL_CURRENT", "CANONICAL_REFRESH_READY"],
+    "refusals": ["CANONICAL_NOT_ACTIVE", "CANONICAL_BRANCH", "CANONICAL_DIRTY", "CANONICAL_IN_USE", "NON_FAST_FORWARD", "INTERRUPTED_TRANSACTION", "UNMANAGED_CANONICAL", "INVALID_POLICY"],
+    "frozen": "a HANDOFF_READY canonical keeps the exact canonical-transition flow",
+    "process_diagnostics": {
+      "location": "decision.process_diagnostics on live-process CANONICAL_IN_USE",
+      "fields": ["process_count", "processes", "processes_omitted", "recovery_steps", "retry_argv"],
+      "process_fields": ["pid", "name", "parent_pid", "metadata_status", "parent_name", "matched_paths", "paths_truncated"],
+      "limits": {"processes": 5, "paths_per_process": 3, "path_characters": 512, "name_characters": 64, "stat_characters": 4096},
+      "identity": "bounded current kernel stat metadata; missing, unreadable, malformed or oversized observations use unknown names/status and a null parent PID; parent metadata may independently be unknown",
+      "authority": "advisory only; original process-path evidence keeps the refusal, even if identity disappears; no command arguments, environments, native session mutation or automatic process termination",
+      "retry": "verify exact task/session ownership and other active shared-daemon work; normally close only the completed task-owned session; retry_argv requests guarded dry-run before refresh"
+    }
+  },
+  "canonical_transition_retirement_version": 1,
+  "canonical_transition_contract": {
+    "contract": "canonical-transition/v1",
+    "identity": "exact frozen record CAS, owner, branch, HEAD, old local main and expected remote main",
+    "mutation": "fast-forward local main, checkout with ignored-file overwrite disabled, then activate the canonical control-plane record",
+    "recovery": "retry exact pre-metadata ref or checkout progress; retain the frozen branch and its history evidence",
+    "guards": "clean attached canonical, complete handoff, no lease/binding/open intent, ancestral target, unoccupied main and valid target policy"
+  },
+  "canonical_main_refresh_version": 1,
+  "integration_lineage_admission_version": 1,
+  "integration_keyed_document_scope_version": 1,
+  "integration_keyed_document_scope_contract": {
+    "contract": "integration-keyed-document-scope/v1",
+    "entry_points": "normal enqueue, claim, reconcile and retry scope checks",
+    "identity": "original frozen source commits, scopes and queue sequence; no mutable checkout evidence",
+    "supported_document": "docs/handbook/business-progress.json, quant-platform schema 2, unchanged committed qp-handbook-progress merge profile",
+    "proof": "unique non-ancestor merge base for every frozen source pair; whole-record changed keys must be disjoint across tasks.authority_key and development_lines/modules/decisions.id",
+    "bounds": "at most 8 sources per intent, 2 MiB regular document blobs, 64 KiB attributes blobs",
+    "fail_closed": "shared record, metadata/schema/order changes, broad paths, code overlap, duplicate keys, invalid/missing/oversized Git evidence, ancestry dependency, explicit prerequisite or earlier publishing/recovery/attention state",
+    "authority": "preparation only; all ownership, resource admission, fresh candidate validation, main CAS and serialized publication gates remain"
+  },
+  "integration_lineage_admission_contract": {
+    "contract": "integration-lineage-admission/v1",
+    "entry_point": "integration-claim through the original frozen integration intent",
+    "identity": "unchanged intent, source allocation/handoff/branch/Finalizer/Snapshot, scope and queue sequence",
+    "admission": "a different integration task may share its allocated feature/audit/hotfix/emergency source authority only after the repository producer verifies that exact frozen lineage under its lock; request fingerprints and durable source rows stay unchanged",
+    "idempotency": "an exact repeated claim of an unchanged clean PREPARING_INTEGRATION candidate observes its existing identity without allocating, reserving, emitting events, validating or granting publication authority",
+    "guards": "same-task request drift and unrelated shared-authority requests remain refused; scope fences and resource budgets remain enforced; RESOURCE_WAIT never reports a candidate as claimed"
+  },
+  "canonical_main_refresh_contract": {
+    "contract": "canonical-main-refresh/v1",
+    "entry_point": "canonical-transition with expected branch equal to the policy publication branch (main or master)",
+    "identity": "exact frozen record CAS, owner and handoff HEAD, observed local main HEAD and expected remote main HEAD",
+    "mutation": "validate the immutable published policy, then fast-forward the checked-out main with ignored-file overwrite disabled; append CANONICAL_MAIN_REFRESHED and activate the control-plane record only after exact remote verification",
+    "recovery": "preserve advanced main and unchanged frozen metadata on interruption; retry with the observed local main HEAD, proving frozen HEAD -> observed main -> exact published target ancestry; never rewind main",
+    "retained_evidence": "the original handoff history and Finalizer identity; no extra baseline branch, release receipt or retirement proof",
+    "guards": "all canonical-transition guards remain; unpublished or divergent main, invalid published policy and ignored-file collisions fail closed"
+  },
+  "published_checkout_recovery_version": 1,
+  "capabilities_version": 1,
+  "storage_layout_version": 5,
+  "storage_layout": {
+    "version": 5,
+    "root": "<git-common-dir>/worktree-controller/v1",
+    "lock": {
+      "name": "repo.lock",
+      "authority": "regular readable-writable non-symlink file; every Controller mutation and the Git Finalizer retirement path serialize on it; missing or unusable locks fail closed"
+    },
+    "directories": {
+      "records": "one metadata record JSON per allocation id",
+      "bindings": "one worktree-key binding JSON per governed checkout",
+      "transactions": "nonterminal mutation journals; interrupted atomic temp siblings are never records",
+      "teardown-receipts": "reproducible environment teardown evidence",
+      "completion-receipts": "tracked source cleanup completion evidence",
+      "integration-intents": "durable integration queue intents",
+      "prepared-candidate-receipts": "immutable candidate preparation receipts",
+      "integration-reconciliation-receipts": "integration reconciliation receipts",
+      "lifecycle-events": "durable lifecycle event outbox",
+      "namespace-migrations": "write-once legacy namespace migration receipts, keyed by plan id",
+      "lifecycle-event-acks": "event acknowledgement receipts",
+      "release-intents": "durable release intents",
+      "release-plans": "unified release plans",
+      "publication-receipts": "publication completion receipts",
+      "release-receipts": "formal allocation release receipts",
+      "registration-prune-receipts": "write-once registration-prune/v1 audit receipts; authoritative terminal and recovery proof for registration pruning, not repository identity or lock authority; included byte-for-byte in namespace migration merged digest and move/convergence, but not in the prior GC plan digest or metadata-reference-relocation/v1 cleanup inventory",
+      "branch-retirement-plans": "versioned retirement plans consumed by the Git Finalizer retirement verifier",
+      "branch-retirement-receipts": "independent local/remote retirement results",
+      "reconciliation-receipts": "writer reconciliation receipts",
+      "writer-leases": "exact writer lease documents",
+      "writer-reconciliation-receipts": "writer-only historical budget settlement receipts",
+      "source-cleanup": "per-transaction tracked source evidence trees",
+      "branch-retirement-authorizations": "single-use retirement execution grants and their immutable abandonment evidence",
+      "cleanup-actions": "per-transaction typed and preserved cleanup action evidence; used by earlier v4 runtimes and declared in v5",
+      "cleanup-recoveries": "per-transaction cleanup recovery records and terminal completions; used by earlier v4 runtimes and declared in v5",
+      "native-session-recoveries": "immutable archived native-session binding recovery evidence, one document per allocation record version; used by earlier v4 runtimes and declared in v5",
+      "session-closeouts": "session-closeout/v1 observations keyed by exact holder identity; a document whose holder is provably gone is pruned when another observation is written; used by earlier v4 runtimes and declared in v5",
+      "binding-registrations": "worktree-registration/v1 identity of each linked binding written from v5: allocation, Git administrative directory and token; the same token is written to <git-common-dir>/<admin_dir>/worktree-controller-registration, and a live administrative directory without the matching marker withdraws the binding as BINDING_IDENTITY_DRIFT"
+    },
+    "single_file": {
+      "repo.json": "repository identity",
+      "publication-lease.json": "single publication lease",
+      "namespace-relocation.json": "fenced layout migration reference evidence"
+    },
+    "consumers": [
+      "worktree-controller itself (exclusive writers)",
+      "scripts/check-writer-rollout (frozen read-only activation gate)",
+      "Git Finalizer retirement verifier (reads branch-retirement-plans under repo.lock)"
+    ],
+    "compatibility": "v5 declares four directories already used by earlier v4 runtimes (cleanup-actions, cleanup-recoveries, native-session-recoveries, session-closeouts) and adds exactly one directory (binding-registrations) plus the per-registration Git administrative marker worktree-controller-registration; no data moves and all v4 names, file identities and record and binding schemas remain unchanged; a binding without a registration document keeps its v4 meaning, v4 readers may ignore the added directory, and exact layout pins must recognize v5 before activation; v4 declares exactly one directory (registration-prune-receipts) already used by 1.9.2; no data moves and all v3 names, file identities and record schemas remain unchanged; v3 readers of existing paths may ignore the extra directory, while exact layout pins must recognize v4 before activation; v3 adds exactly one directory (namespace-migrations) and one documented previous-namespace entry (codex-worktree/v1, migrated only by the namespace-migrate verb); v2 adds exactly one directory (branch-retirement-authorizations); any further layout or schema change requires a new layout version plus that gate, and external consumers pin this section"
+  },
+  "branch_retirement_contract": {
+    "contract": "branch-retirement/v5",
+    "version": 5,
+    "authority": "Controller eligibility and immutable plan; Git Finalizer local/remote ref mutation",
+    "plan_schema_version": 1,
+    "consumer_contract": [
+      "the Controller owns eligibility, plan identity, state digest and blocker policy",
+      "a consumer obtains a verdict from branch-retirement-verify or a grant from branch-retirement-authorize",
+      "an authorized run settles through branch-retirement-complete, never through a self-reported summary",
+      "external tools must not copy the canonicalization, digest recipe or blocker list",
+      "the consumer performs the Git compare-and-delete itself; the Controller never writes a ref",
+      "consumer-specific argument and summary vocabulary lives only in the compatibility adapter",
+      "a grant is single-use: verify reports RETIREMENT_AUTHORIZATION_ACTIVE for the granted operation only"
+    ],
+    "identity": {
+      "plan_id": "sha256 over the canonical JSON encoding of the identity fields",
+      "canonicalization": "JSON object with keys sorted, ensure_ascii=false, separators (\",\",\":\"), UTF-8",
+      "identity_fields": [
+        "schema_version",
+        "repository_id",
+        "allocation_id",
+        "release_receipt_id",
+        "branch",
+        "expected_oid",
+        "remote",
+        "remote_ref",
+        "remote_tracking_ref",
+        "integrated_into",
+        "integrated_ref",
+        "expected_integrated_oid",
+        "classification",
+        "registration",
+        "controller_state_digest"
+      ],
+      "optional_identity_fields": ["canonical_transition_evidence"],
+      "optional_identity_semantics": "include an optional field only when present; release-backed plans retain their exact previous identity recipe",
+      "excluded_from_identity": "observed ref states, checkout paths, eligibility and blockers are live observations, not identity"
+    },
+    "state_digest": {
+      "recipe": "sha256 over, in this order: for each authority directory, each relevant *.json sorted by path, the update sequence is relative POSIX path, a NUL byte, the exact file bytes, a NUL byte; then each authority single file bound to the allocation with the same sequence prefixed by its file name; then the literal bytes policy, a NUL byte, and the exact bytes of .agents/worktree-policy.toml, or <default> when that file is absent",
+      "authority_directories": [
+        "records",
+        "bindings",
+        "integration-intents",
+        "release-intents",
+        "release-plans",
+        "release-receipts",
+        "publication-receipts",
+        "reconciliation-receipts",
+        "writer-leases",
+        "transactions"
+      ],
+      "authority_files": [
+        "publication-lease.json"
+      ],
+      "relevance": "a document participates only when it binds the plan allocation or branch: allocation_id match, integration-intent source_allocations or source_branches, release-intent integration_allocation_id, release-plan or release-receipt branch, publication-receipt source_results source_allocation_id, and authority_files by allocation_id",
+      "excluded": "branch-retirement-plans and branch-retirement-receipts never participate, so recording local completion does not invalidate the remote half of the same plan",
+      "policy_authority": "<canonical repository path>/.agents/worktree-policy.toml is the only policy source"
+    },
+    "verify": {
+      "command": "branch-retirement-verify --repo <path> --plan-id <sha256> --operation {local,remote}",
+      "lock": "shared repository lock held for the whole observation; no state is written, so callers run it before taking an exclusive retirement execution lock",
+      "plan_schema_binding": "plan.schema_version is the retirement authority pin; this contract surface is branch_retirement_contract.version",
+      "verdicts": {
+        "RETIREMENT_EXECUTABLE": "the plan's exact expected OID may be CAS-compared now",
+        "RETIREMENT_STALE": "authority or OID movement invalidated the plan; replan instead of mutating",
+        "RETIREMENT_BLOCKED": "occupancy, lease, intent, transaction, ancestry or unattested absence forbids mutation",
+        "RETIREMENT_OPERATION_COMPLETE": "an immutable receipt already records this operation for this plan"
+      },
+      "stale_blockers": [
+        "PLAN_STATE_DRIFT",
+        "LOCAL_OID_DRIFT",
+        "UPSTREAM_OID_DRIFT",
+        "CLASSIFICATION_*"
+      ],
+      "absent_ref": "an unattested absent ref is RETIREMENT_BLOCKED with blocker ABSENT_UNATTESTED until a Finalizer summary proves the idempotent already-absent path and branch-retirement-record files the receipt",
+      "minimum_revalidation": [
+        "plan_id",
+        "operation",
+        "branch",
+        "expected_oid",
+        "expected_integrated_oid",
+        "integrated_ref",
+        "ref_state",
+        "controller_state_digest"
+      ],
+      "remote_semantics": "remote ref_state observes the local remote-tracking ref; the Finalizer remains authoritative for the actual remote through its own fetch and expected-OID compare-and-delete"
+    },
+    "integration_modes": {
+      "automatic": [
+        "ANCESTRY"
+      ],
+      "report_only": [
+        "CHERRY_EQUIVALENT",
+        "MERGE_ONLY",
+        "UNIQUE",
+        "MIXED",
+        "HISTORICAL_UNREGISTERED"
+      ]
+    },
+    "eligible_allocations": {
+      "feature_audit": "released allocation with an immutable release receipt and direct ancestry",
+      "integration": "released allocation whose release plan links to the exact remote-verified publication receipt; repository, allocation, candidate, Finalizer and policy target identities must match",
+      "canonical_transition": "explicit branch selector with exactly one complete CANONICAL_TRANSITIONED event in the currently canonical-bound canonical/control-plane record; exact old HEAD and recorded main-before are ancestors of recorded main-after, itself contained in the current policy publication target on the recorded remote; registration CANONICAL_TRANSITION_BACKED and release_receipt_id null",
+      "integration_evidence_blocker": "INTEGRATION_PUBLICATION_NOT_VERIFIED"
+    },
+    "occupancy_gates": [
+      "no_checkout",
+      "released_allocation_or_active_frozen_canonical_transition_source",
+      "no_binding_or_writer_lease_except_exact_canonical_binding_for_transition_source",
+      "no_runtime_binding",
+      "no_unresolved_intent_or_transaction"
+    ],
+    "completion": "independent idempotent local and remote receipts; never atomic",
+    "capability_binding": "branch_retirement_version stays pinned to plan.schema_version because the deployed Git Finalizer retirement verifier compares that capability against the plan schema; the verify surface is detected through branch_retirement_verify_version and contract_version",
+    "compatibility": [
+      "persisted plan schema stays 1 and v1 plans verify and authorize unchanged under this contract",
+      "transition-backed plans add canonical_transition_evidence to identity only when present; it binds the exact history event sha256, old HEAD, main before/after, remote, old owner and old Finalizer identity; canonical is never released and ordinary unregistered refs remain report-only",
+      "missing, invalid, ambiguous or drifted transition evidence fails closed; existing checkout, lease, runtime, recovery, intent, transaction and expected-OID gates remain mandatory",
+      "branch_retirement_version continues to mirror plan.schema_version for the deployed verifier",
+      "branch-retirement-verify keeps its four verdicts and its eight minimum_revalidation names",
+      "branch-retirement-plan, -status and -record keep their released payload keys",
+      "branch-retirement-record now refuses an operation holding a grant and a completion the Controller cannot observe; a fabricated result was never a valid retirement and no longer files a receipt",
+      "receipts gain provenance and result_contract; persisted receipts without them stay valid history",
+      "a further verdict, identity field, digest recipe or blocker change requires a new retirement contract version and a new contract_version"
+    ],
+    "execution_authorization": {
+      "contract": "branch-retirement-execution/v1",
+      "capability": "branch_retirement_execution_version",
+      "verbs": [
+        "branch-retirement-authorize",
+        "branch-retirement-complete",
+        "branch-retirement-executions"
+      ],
+      "authorization_identity_fields": [
+        "schema_version",
+        "contract",
+        "request_id",
+        "plan_id",
+        "operation",
+        "kind",
+        "repository_id",
+        "allocation_id",
+        "branch",
+        "ref",
+        "expected_oid",
+        "integrated_ref",
+        "expected_integrated_oid",
+        "tracking_ref",
+        "observed",
+        "controller_state_digest",
+        "holder_sha256",
+        "issued_at",
+        "expires_at"
+      ],
+      "canonicalization": "JSON object with keys sorted, ensure_ascii=false, separators (\",\",\":\"), UTF-8",
+      "authorization_id": "sha256 over the canonical JSON encoding of the identity fields",
+      "token": {
+        "type": "string",
+        "sensitive": true,
+        "description": "a 256-bit Controller-generated capability returned only by authorize and compared constant-time at complete or abandon; it is excluded from the identity so it cannot change the authorization address"
+      },
+      "scope": "one plan, one operation, one use",
+      "binding": [
+        "controller_state_digest at issuance, using the frozen v1 recipe unchanged",
+        "an observation vector of the literal Git facts that recipe cannot see: watched ref to OID, checked-out paths, upstream ref and target, classification and blockers",
+        "the compare-and-delete tuple: ref, expected_oid, integrated_ref, expected_integrated_oid, tracking_ref"
+      ],
+      "settlement": "complete takes the exclusive repository lock, re-observes the refs and re-derives the digest, and files a receipt only for exactly one authorized delta: the target ref moved from its expected OID to absent",
+      "abandonment": "the token holder, or a settled dead-holder observation, may close a grant; closing never files a receipt because absence alone does not prove who caused it, and writes immutable evidence instead",
+      "fence": "while a grant is outstanding: a second grant for the same plan and operation is refused, verify reports RETIREMENT_AUTHORIZATION_ACTIVE for the granted operation only, legacy branch-retirement-record refuses that operation, and MetadataStore.write_record refuses to create a new binding for the granted allocation with RETIREMENT_EXECUTION_ACTIVE",
+      "not_claimed": [
+        "a lock held by the caller: the Controller neither accepts nor verifies a caller lock assertion",
+        "prevention of an unauthorized plain-git mutation: it can be refused a receipt, not physically stopped",
+        "the remote operation's server-side fact: the Controller observes its own remote-tracking ref only"
+      ],
+      "result_contract": "retirement-execution-result/v1",
+      "result_schema_version": 1,
+      "result_fields": [
+        "contract",
+        "executor",
+        "expected_integrated_oid",
+        "expected_oid",
+        "kind",
+        "operation",
+        "outcome",
+        "plan_id",
+        "ref",
+        "schema_version"
+      ],
+      "result_optional_fields": [
+        "evidence",
+        "integrated_ref",
+        "performed_at"
+      ],
+      "outcomes": [
+        "EXECUTION_FAILED",
+        "REF_ALREADY_ABSENT",
+        "REF_REMOVED_AT_EXPECTED_OID",
+        "REF_STILL_PRESENT"
+      ],
+      "execution_kinds": [
+        "ATTEST_ABSENT",
+        "CAS_DELETE"
+      ],
+      "grantable_kinds": [
+        "CAS_DELETE"
+      ],
+      "reported_only_kinds": [
+        "ATTEST_ABSENT (a translated legacy consumer claim; never a grant, and refused by a grant settle)"
+      ],
+      "holder": "self, or ancestor:<program> resolved from the caller's own process tree; a detached pid is refused with INVALID_HOLDER because naming somebody else's process proves nothing",
+      "provenance": {
+        "AUTHORIZED_EXECUTION": "settled through a grant and the Controller's own re-observation",
+        "CONTROLLER_OBSERVED": "legacy record where the Controller observed the ref gone and authority intact",
+        "CONSUMER_CLAIM": "receipts filed before this contract; persisted history, never re-creatable"
+      },
+      "authority_recheck": "record re-runs the full governance evaluation and refuses with EXECUTION_GOVERNANCE_MOVED when any authority_blockers entry appeared after the plan; ref-derived codes are expected from a deletion and are not refused",
+      "ref_derived_blockers": [
+        "EXPECTED_OID_MISSING",
+        "INTEGRATION_REF_MISSING",
+        "UPSTREAM_OID_DRIFT",
+        "UPSTREAM_TARGET_MISMATCH"
+      ],
+      "directory": "branch-retirement-authorizations",
+      "grant_document_layout": "<git-common-dir>/worktree-controller/v1/branch-retirement-authorizations/<authorization_id>.json, with immutable <authorization_id>-abandoned.json evidence written beside it; the directory is not in the state digest, so a grant cannot invalidate the plan it authorizes",
+      "fault_points": [
+        "retirement_authorization_issued",
+        "retirement_receipt_written",
+        "retirement_abandon_started",
+        "retirement_abandon_evidence_written"
+      ],
+      "abandonment_authority": "the execution token only; holder liveness is reported by inspect as information because flock dies with the process while the mutation may never have run",
+      "authority_blockers": [
+        "ALLOCATION_BOUND",
+        "ALLOCATION_NOT_RELEASED",
+        "ALLOCATION_RECORD_MISSING",
+        "BRANCH_CHECKED_OUT",
+        "CANONICAL_TRANSITION_ALLOCATION_INVALID",
+        "CANONICAL_TRANSITION_EVIDENCE_AMBIGUOUS",
+        "CANONICAL_TRANSITION_EVIDENCE_INVALID",
+        "CANONICAL_TRANSITION_PUBLICATION_MISMATCH",
+        "CANONICAL_TRANSITION_TARGET_MISMATCH",
+        "INTEGRATION_INTENT_UNRESOLVED",
+        "INTEGRATION_PUBLICATION_NOT_VERIFIED",
+        "PLAN_STATE_DRIFT",
+        "PROTECTED_BRANCH",
+        "PUBLICATION_LEASE_ACTIVE",
+        "RECOVERY_STATE_EXCLUDED",
+        "RELEASE_INTENT_UNRESOLVED",
+        "RUNTIME_BINDING_ACTIVE",
+        "SPECIAL_LIFECYCLE_REF",
+        "TRANSACTION_ACTIVE",
+        "UNSUPPORTED_ALLOCATION_ROLE",
+        "WRITER_LEASE_ACTIVE"
+      ],
+      "fence_scope": "the allocation half of the fence is enforced at the single binding chokepoint; the branch half is prevented by acquire's existing BRANCH_EXISTS rule and detected at settlement by the observation vector, because a metadata record carries no branch name",
+      "verb_layer_blockers": [
+        "RETIREMENT_AUTHORIZATION_ACTIVE"
+      ],
+      "compatibility_error_codes": [
+        "AUTHORIZATION_TOKEN_MISMATCH",
+        "AUTHORIZATION_TOKEN_REQUIRED",
+        "EXECUTION_GOVERNANCE_MOVED",
+        "EXECUTION_OBSERVATION_MISMATCH",
+        "EXECUTION_RESULT_MISMATCH",
+        "FINALIZER_RESULT_MISMATCH",
+        "INVALID_AUTHORIZATION_ID",
+        "INVALID_AUTHORIZATION_TTL",
+        "INVALID_EXECUTION_KIND",
+        "INVALID_EXECUTION_RESULT",
+        "INVALID_FINALIZER_SUMMARY",
+        "INVALID_HOLDER",
+        "INVALID_REQUEST_ID",
+        "RETIREMENT_EXECUTION_ACTIVE",
+        "UNKNOWN_RETIREMENT_AUTHORIZATION"
+      ],
+      "expiry": "expiry means the claim needs verification, never that the work is done: an expired grant still fences occupancy, still requires settle or abandon with the token, and a settlement after expiry is recorded as grant_expired_at_settle rather than refused",
+      "plan_recipe": {
+        "contract": "retirement-execution-recipe/v1",
+        "schema_version": 1,
+        "fields": [
+          "contract",
+          "grant",
+          "operations",
+          "result_contract",
+          "schema_version",
+          "settle"
+        ],
+        "operation_fields": [
+          "expected_integrated_oid",
+          "expected_oid",
+          "integrated_ref",
+          "kind",
+          "mutation",
+          "ref",
+          "tracking_ref"
+        ],
+        "promise": "the recipe is what a grant later binds, so a consumer can prepare from the plan alone; it names no consumer product and carries no digest recipe"
+      }
+    }
+  },
+  "activation_layout_migration": {
+    "entrypoint": "scripts/controller-activate",
+    "previous_layout": "explicit namespace, policy path and installed entrypoint SHA256 bindings",
+    "writer_transition": "schema 1 holder.provider to schema 2 holder.client_id; identity and authority preserved",
+    "blockers": [
+      "unsupported or unverified unfinished transactions",
+      "publication leases",
+      "live evidence bound to previous paths",
+      "layout or entrypoint drift"
+    ],
+    "rollback": "exact receipt and digest; inverse layout and lease conversion without replay",
+    "retirement": "explicit finish-layout after real client acceptance"
+  },
+  "entrypoint": "worktree-controller",
+  "holder_resolver_version": 1,
+  "host_managed_writer_session": {
+    "command": "writer-session host-check <actual-caller-path>",
+    "access_option": "--access read|exec|write; write requires --target <absolute-path>; writer-session check accepts the same options",
+    "context_environment": "CONTROLLER_WRITER_CONTEXT",
+    "mode": "host-managed-v2",
+    "operation_class": "read_only",
+    "required_context_fields": [
+      "holder",
+      "client_id",
+      "session_id",
+      "run_id",
+      "repository_path",
+      "worktree_path",
+      "allocation_id",
+      "lease_id"
+    ],
+    "required_holder_fields": [
+      "pid",
+      "boot_id",
+      "start_ticks"
+    ],
+    "success_code": "WRITE_ALLOWED"
+  },
+  "host_managed_writer_session_version": 2,
+  "host_handoff_continuation_version": 2,
+  "host_handoff_continuation_contract": {
+    "contract": "host-handoff-continuation/v2",
+    "producer": "writer-session host-check <actual-caller-path> | writer-session check <client> <path> <holder> --session-id <id>, each with --access read|exec|write [--target <absolute-path>]",
+    "admission": "CONTINUATION_GRANTED with code HOST_HANDOFF_CONTINUATION; exit 0 only for GRANTED or CONTINUATION_GRANTED",
+    "applies_to": "the exact live holder of the current lease on its own HANDOFF_READY or PRESERVED feature allocation, with no foreign runtime binding and no frozen HEAD drift",
+    "access_classes": ["read", "exec", "write"],
+    "write_targets": "outside Controller governance; another checkout whose writer lease this same live process (PID, boot ID, start ticks) holds and whose feature-write guard allows it; or an ACTIVE integration candidate whose source_allocations include the frozen allocation and whose integration-write guard allows it",
+    "performance": "entitlement checks evaluate the write guard without the full status scan and decode repository metadata once",
+    "handoff_scope": "handoff --scope-changed records the exact paths changed since the publication base for an unscoped feature task; an integration-ready handoff of unscoped changed work succeeds with warning MISSING_HANDOFF_SCOPE because integration-enqueue requires a scope",
+    "rollout_requirements": "a consumer may report required_controller_capabilities {name: minimum}; activation and rollback refuse a target runtime that does not advertise each minimum",
+    "fence": "the frozen checkout, other governed checkouts, other repositories and checks without --access keep the original refusal; leases, bindings and lifecycle are never mutated",
+    "consumer": "a host maps each tool call to one access class and target; authority remains this Controller decision"
+  },
+  "json_envelope": [
+    "tool_version",
+    "schema_version",
+    "command",
+    "repository",
+    "decision",
+    "worktrees",
+    "warnings",
+    "errors"
+  ],
+  "metadata_schema_version": 4,
+  "operation_classes": [
+    "read_only",
+    "metadata_mutation",
+    "git_worktree_mutation",
+    "filesystem_mutation",
+    "resource_cleanup",
+    "remote_tracking_mutation"
+  ],
+  "protected_operations": [
+    "automatic_owner_expiry",
+    "automatic_writer_reconciliation",
+    "branch_or_tag_deletion",
+    "canonical_release",
+    "fetch_outside_publication_lease",
+    "force_worktree_removal",
+    "multiple_main_publication_writers",
+    "unclassified_disposable_cleanup"
+  ],
+  "release_options": [
+    "--intent-id",
+    "--publication-receipt-id",
+    "--teardown-reproducible-venv",
+    "--dry-run"
+  ],
+  "typed_disposable_resource_contract": {
+    "version": 1,
+    "command": "resource-clean",
+    "options": [
+      "--typed",
+      "--dry-run",
+      "--expected-plan-id"
+    ],
+    "paths": {
+      "backend/.venv": "python-venv",
+      "frontend/node_modules": "node-modules",
+      "frontend/dist": "frontend-build-output"
+    },
+    "dry_run_fields": [
+      "resource_type",
+      "path",
+      "classification",
+      "cleanup_action",
+      "blocker"
+    ],
+    "runtime_authority_contract": "allocation-runtime-authority/v1",
+    "runtime_classifications": [
+      "MANAGED_REFERENCE",
+      "OBSERVED_REFERENCE",
+      "MANAGED_VISIBILITY_UNCERTAIN",
+      "HOST_VISIBILITY_GAP"
+    ],
+    "host_visibility_gap": "warning-only-for-authenticated-typed-resources",
+    "ready_with_host_gap": "CLEANUP_READY_WITH_HOST_VISIBILITY_GAP",
+    "plan_evidence_fields": [
+      "runtime_evidence",
+      "warnings",
+      "hardlink_topology"
+    ],
+    "receipt_evidence_fields": [
+      "plan",
+      "runtime_checks",
+      "post_scan",
+      "action_evidence"
+    ],
+    "allocation_release": "separate-guarded-command"
+  },
+  "legacy_preserved_state_cleanup_contract": {
+    "contract": "legacy-preserved-state-cleanup/v1",
+    "preservation_contract": "legacy-preserved-state/v1",
+    "entrypoint": "python -m worktree_controller.preservation",
+    "commands": [
+      "plan",
+      "copy",
+      "verify"
+    ],
+    "command": "resource-clean --typed",
+    "options": [
+      "--preservation-receipt",
+      "--preservation-receipt-sha256"
+    ],
+    "source_path": ".venv",
+    "classification": "exact-preserved",
+    "cleanup_action": "remove-preserved-tree",
+    "ready_code": "CLEANUP_READY_WITH_PRESERVATION",
+    "runtime_authority_contract": "allocation-runtime-authority/v1",
+    "host_visibility_gap": "warning-and-immutable-evidence-without-host-wide-absence-claim",
+    "cleanup_order": [
+      "typed-disposable",
+      "exact-preserved"
+    ],
+    "receipt_evidence_fields": [
+      "plan",
+      "actions",
+      "runtime_checks",
+      "post_scan",
+      "action_evidence"
+    ],
+    "partial_failure": "immutable-receipt-and-retained-transaction-block-release",
+    "allocation_release": "separate-guarded-command-with-destination-reverification"
+  },
+  "tracked_source_preservation_contract": {
+    "contract": "tracked-source-preservation/v1",
+    "entrypoint": "python -m worktree_controller.source_preservation",
+    "commands": [
+      "plan",
+      "copy",
+      "verify"
+    ],
+    "scope": "unstaged modified tracked regular files only",
+    "reconstruction": "base HEAD tree plus exact raw file overlay",
+    "index_action": "none",
+    "cleanup_authorized": false
+  },
+  "tracked_source_cleanup_contract": {
+    "contract": "tracked-source-cleanup/v1",
+    "entrypoint": "python -m worktree_controller.source_cleanup",
+    "commands": [
+      "plan",
+      "execute"
+    ],
+    "scope": "exact receipt-covered modified tracked files to bound HEAD",
+    "execution_precondition": "current preservation receipt, generation, HEAD, index, file and parent identities match",
+    "write_primitive": "verified single-link regular FD only",
+    "partial_failure": "retain immutable evidence and transaction; no replay or release",
+    "no_commit_completion": "current completion references archival evidence; no historical handoff assertion",
+    "index_action": "none",
+    "allocation_release": "separate existing lifecycle with source and generation reverification"
+  },
+  "transaction_conflict_contract": {
+    "contract": "controller-transaction-conflict/v1",
+    "conflict_scope": "nonterminal same-allocation or overlapping resource scopes under the repository mutation lock",
+    "identity": [
+      "repository_id",
+      "allocation_id",
+      "transaction_id",
+      "target_path",
+      "command",
+      "cleanup_plan.contract",
+      "phase"
+    ],
+    "historical_terminal": "exact supported immutable terminal evidence; retained journals may coexist",
+    "unknown_identity_or_lifecycle": "BLOCK"
+  },
+  "tracked_source_no_action_recovery_contract": {
+    "contract": "tracked-source-no-action-recovery/v1",
+    "entrypoint": "python -m worktree_controller.source_recovery",
+    "commands": [
+      "plan",
+      "reconcile"
+    ],
+    "scope": "transaction-scope refusal before tracked source action",
+    "precondition": "empty actions and checks, no action evidence, exact source/index/HEAD/parents/preservation, runtime authority PASS",
+    "state": "STARTED_NO_ACTION_RECOVERABLE",
+    "terminal_attempt_state": "SOURCE_ATTEMPT_SUPERSEDED",
+    "successor": "new single-use attempt identity bound by immutable reconciliation",
+    "old_evidence": "retained byte-identical",
+    "partial_action": "BLOCK"
+  },
+  "schema_version": 1,
+  "session_launcher_entrypoint": "worktree-session",
+  "session_entrypoint": "worktree-session-end",
+  "tool_name": "worktree-controller",
+  "tool_version": "1.30.4",
+  "delivered_closeout_version": 1,
+  "retained_archive_version": 1,
+  "retention_convergence_version": 2,
+  "session_end_selector_version": 1,
+  "session_end_selector_contract": {
+    "entrypoint": "worktree-session-end --path <inside-repository> --client-id <client> --session-id <session> --holder ancestor:<program>|<pid> [--run-id <recorded-run>]",
+    "selection": "writer leases in that repository whose recorded holder equals the resolved live holder exactly, including client and session identity",
+    "action": "release each exact lease, then the unchanged reconcile-session route: ACTIVE feature/audit is retained, HANDOFF_READY gets its release intent",
+    "never": ["other sessions' leases", "hosted children (CONTROLLER_WRITER_MODE/CONTROLLER_WRITER_CONTEXT)", "--owner", "task completion claims"],
+    "exit": "default always 0; use session-closeout/v1 per-allocation outcomes and summary, or --require-complete"
+  },
+  "gc_apply_replay_version": 1,
+  "retention_convergence_contract": {
+    "contract": "retention-convergence/v2",
+    "entrypoint": "reconcile retention",
+    "authority": "repository policy [convergence] delegated to the [reconciler] actor; apply refuses any other actor",
+    "triggers": [
+      "manual",
+      "admission",
+      "background"
+    ],
+    "plan": "default is a read-only report; --apply acts",
+    "candidates": "clean attached feature/audit checkouts in ACTIVE (dormant only), RETAINED, HANDOFF_READY, RELEASE_READY, ARCHIVED or NO_CHANGE_COMPLETED, plus hotfix HANDOFF_READY, without writer lease, live process, binding, publication lease or active integration lineage",
+    "routes": {
+      "close-delivered": "HEAD, base and task commit contained in the publication branch; waits grace_minutes",
+      "complete-no-change": "HEAD equals base; waits grace_minutes",
+      "release-published-handoff": "feature/audit/hotfix frozen handoff equals HEAD and is published; waits grace_minutes; a hotfix with an unregistered .venv waits for its owner attestation",
+      "release-retained-handoff": "policy release_unintegrated_handoffs only: unpublished integration-ready feature/audit/hotfix handoff whose task, handoff and Finalizer identities, local branch and remote-tracking branch all equal HEAD and that no open integration intent references; waits the dynamic idle threshold; integration-enqueue later resolves the source branch from its release receipt while that branch still equals the handoff",
+      "archive-retained": "unfinished commits stay on the retained branch; waits the dynamic idle threshold",
+      "release": "already closed checkout; waits grace_minutes",
+      "park": "dormant ACTIVE feature/audit allocation without lease, process, binding or publication lease; waits idle_hours_max (never shortened by pressure), then follows the fitting route"
+    },
+    "dynamic_threshold": "idle_hours_max while registered <= live + standing_reserve, otherwise max(idle_hours_min, idle_hours_max / pressure^2)",
+    "never": [
+      "dirty checkouts",
+      "detached or locked checkouts",
+      "admission refusal",
+      "task completion claims",
+      "branch or tag deletion"
+    ],
+    "resources": "an unregistered root .venv is registered as reproducible python-venv; release teardown preflight still decides",
+    "physical_removal": "unchanged guarded release and ReleaseReceipt",
+    "admission": "acquire starts a detached pass in its own session and reports CONVERGENCE_SCHEDULED as retention_convergence; it never blocks or slows acquire",
+    "serialization": "applying passes take a non-blocking per-repository host lock; a concurrent pass returns CONVERGENCE_BUSY",
+    "report": "decision.reason and outcome_counts summarize every finding outcome; RELEASED findings carry receipt_id (the ReleaseReceipt) and release_plan_id; ATTENTION_REQUIRED findings carry owner_action",
+    "pass_report": "each applying pass records RUNNING then COMPLETED or FAILED beside the pass lock; a dry run returns it as decision.last_applied_pass, and RUNNING with a free lock reads as INTERRUPTED; it is an observation, never release evidence"
+  },
+  "retained_archive_contract": {
+    "contract": "retained-checkout-archive/v1",
+    "entrypoint": "archive-retained",
+    "plan": "read-only --dry-run binds the exact clean retained checkout, branch, owner and actor",
+    "apply": "requires --plan-id; writes an immutable receipt before CAS transition RETAINED to ARCHIVED",
+    "task_completed": false,
+    "integration_ready": false,
+    "publication_asserted": false,
+    "physical_removal": "separate guarded release/gc-apply; branch and task evidence remain",
+    "compatibility": "ARCHIVED requires retained_archive_version 1; older runtimes fail closed"
+  },
+  "delivered_closeout_contract": {
+    "contract": "delivered-checkout-closeout/v1",
+    "entrypoint": "close-delivered",
+    "plan": "read-only --dry-run binds exact record, HEAD, branch, recorded owner, actor and live publication OID",
+    "apply": "requires --plan-id; writes an immutable closeout receipt before CAS transition RETAINED or legacy PRESERVED to RELEASE_READY",
+    "scope": "clean attached feature/audit checkout with all historical commit evidence in live publication and no lease, runtime, binding, uncleaned resource, frozen handoff or integration obligation",
+    "task_completed": false,
+    "historical_task_evidence": "unchanged; original record retained in the receipt",
+    "physical_removal": "separate existing release/gc-apply, with receipt, runtime and publication revalidation",
+    "compatibility": "RELEASE_READY requires delivered_closeout_version 1; older runtimes fail closed on this lifecycle"
+  },
+  "writer_lease_schema_version": 2,
+  "writer_admission_states": [
+    "GRANTED",
+    "NOT_APPLICABLE",
+    "REFUSED"
+  ],
+  "writer_lease_applicability": {
+    "NOT_APPLICABLE": [
+      "canonical",
+      "control-plane",
+      "integration",
+      "preservation",
+      "publication",
+      "recovery",
+      "verification"
+    ],
+    "REQUIRED": [
+      "audit",
+      "emergency",
+      "feature",
+      "hotfix"
+    ]
+  },
+  "writer_session_actions": [
+    "acquire",
+    "check",
+    "describe",
+    "host-check",
+    "release"
+  ],
+  "writer_session_version": 2,
+  "cleanup_hardlink_topology_contract": {
+    "contract": "cleanup-hardlink-topology/v2",
+    "supported_versions": [
+      1,
+      2
+    ],
+    "expected_mutations": "cleanup-induced-hardlink-mutation/v2",
+    "closed_topology_encoding": "cleanup-hardlink-topology/v1",
+    "outside_scope": "names never searched or modified; exact external link-count remainder",
+    "evidence": "complete in-scope inode/member/content map; pinned shared inode content and metadata before/after each unlink",
+    "observation_scope": "unlink boundary, not global exclusion of external writers",
+    "unsupported_special_nodes": "BLOCK"
+  },
+  "re_preservation_recovery_contract": {
+    "contract": "re-preservation-recovery/v1",
+    "historical_hardlink_cause": "NOT_PROVEN",
+    "old_evidence": "immutable",
+    "completed_action_replay": false,
+    "new_baseline": "new exact full preservation generation",
+    "terminal": "append-only completion; historical journal retained"
+  },
+  "cleanup_resume_attempt_contract": {
+    "contract": "cleanup-resume-attempt/v1",
+    "reconciliation_contract": "started-no-action-recovery/v1",
+    "states": [
+      "ATTEMPT_STARTED",
+      "ACTION_STARTED",
+      "ACTION_COMPLETED",
+      "ATTEMPT_FAILED_BEFORE_ACTION",
+      "PARTIAL_ACTION",
+      "STARTED_NO_ACTION_RECOVERABLE"
+    ],
+    "absent_completion": "immutable underlying refusal; no receipt path constructed",
+    "supersession": "explicit reconcile-attempt, exact filesystem/topology/preservation/runtime validation, new attempt identity",
+    "old_evidence": "immutable; historical refusal not reconstructed"
+  },
+  "typed_cleanup_no_action_contract": {
+    "contract": "typed-cleanup-no-action/v1",
+    "stage": "reconcile-typed",
+    "requires": "exact pending journal, no action evidence, absent receipt or exact pre-action refusal receipt, current scope identity/content, owner/Git/runtime checks",
+    "refusal_receipt": "immutable SHA-256 binding; original failure retained; no action/runtime checkpoint",
+    "external_link_history": "NOT_PROVEN",
+    "terminal": "TYPED_ATTEMPT_SUPERSEDED; original journal unchanged; fresh cleanup required",
+    "automatic_authority": "existing exact approved release intent only"
+  },
+  "metadata_reference_relocation_contract": {
+    "contract": "metadata-reference-relocation/v1",
+    "authority": "explicit governed layout migration only",
+    "binding": [
+      "previous_root",
+      "current_root",
+      "root_device_inode",
+      "relative_evidence_path",
+      "sha256"
+    ],
+    "historical_receipts": "byte-identical; no alias namespace",
+    "admitted_transactions": [
+      "exact terminal evidence",
+      "verified tracked-source no-action baseline"
+    ],
+    "recovery_execution": "installed Controller only; separate append-only reconciliation",
+    "rollback": "blocked after new or changed cleanup evidence; preserve history",
+    "producers": [
+      "activation_layout.LayoutMigration, which renames the whole namespace and carries the record with it",
+      "namespace_migration.migrate_namespace, which merges a per-repository namespace under the destination lock and writes the record only after the previous root is gone"
+    ]
+  },
+  "published_handoff_resource_registration_version": 1,
+  "published_handoff_resource_registration_contract": {
+    "contract": "published-handoff-resource-registration/v1",
+    "command": "resource-register",
+    "target": "HANDOFF_READY hotfix without a pending release intent; existing ignored task-local root .venv only",
+    "owner": "exact recorded owner and record CAS; creator must be handoff-owner-attestation:<owner>, not an asserted original creation command",
+    "identity": "clean attached linked checkout; exact nonempty task/handoff/Finalizer HEAD and record ID; retained branch and original base ancestry; no recovery lineage",
+    "publication": "live policy ls-remote equals tracking ref; exact frozen HEAD and original base are ancestors of publication",
+    "blockers": "writer/publication leases, bindings, managed or observed runtime, scan uncertainty, open integration obligations, unrelated historical source handoff, nonterminal or unknown scoped transactions",
+    "resource": "reproducible on-release python-venv; existing tracking/ignore/type checks and unchanged reproducible teardown preflight",
+    "proof": "append published_handoff_resource_registration to the new DISPOSABLE_REGISTERED history event; preserve old history and frozen fields",
+    "effect": "metadata classification only; no source changes, reopen, cleanup, business completion or new release authority",
+    "release": "existing owner-authorized release rechecks current resource and runtime evidence; automatic convergence roles unchanged"
+  },
+  "typed_cleanup_no_action_version": 1,
+  "typed_cleanup_no_action_receipt_version": 1,
+  "typed_cleanup_verify_boundary_version": 1,
+  "typed_cleanup_verify_boundary_contract": {
+    "boundary": "resource-clean verifies hardlink topology before marking an action STARTED; a topology refusal leaves no action evidence",
+    "legacy_refusal": "a pre-1.28.0 journal whose first action is FAILED_OR_PARTIAL with failure HARDLINK_TOPOLOGY_BLOCKED, later actions PENDING, and only <cleanup-actions>/<transaction>/0000-before.json bound to the plan topology is accepted by reconcile-typed and rollout-check",
+    "receipt": "the refusal receipt may carry exactly one runtime check for the first resource; reconciliation binds the BEFORE receipt as verify_boundary_receipt",
+    "proof": "unchanged typed resource evidence (whole-tree path, device, inode, mode, size and mtime) and exact in-scope inode, member and content topology prove no deletion began",
+    "external_churn": "ctime and nlink drift is accepted only on inodes with links outside the scope before and after; in-scope-only inodes stay exact",
+    "storage_layout_version": 5
+  },
+  "resource_admission_version": 1,
+  "acquire_no_effect_recovery_version": 1,
+  "execution_admission_version": 1,
+  "host_execution_admission_version": 2,
+  "runtime_binding_version": 1,
+  "supported_writer_session_versions": [
+    1,
+    2
+  ],
+  "resource_admission_contract": {
+    "contract": "host-resource-admission/v1",
+    "authority": "shared per-user host ledger; repository ownership remains independent",
+    "checkout_counts": "statistics only across all readable policy schemas",
+    "queue": "durable WAITING without a writer; attempted mutations require terminal evidence; positive no-effect recovery archives the original journal before ordinary re-admission",
+    "release": "runtime clearance settles execution; verified allocation release receipts also reconcile historical writer-only reservations",
+    "writer_ownership": "writer grants do not reserve or bind execution; launchers admit before launch and bind existing runtime occupancy",
+    "diagnostics": "writer_leases_recorded counts ownership; runtime_occupied and the live_executions compatibility alias count runtime-bound allocations, not observed process liveness",
+    "pressure": "filesystem bytes/inodes plus growth/preservation; memory budget and CPU/memory/IO PSI hysteresis",
+    "rollback": "target must support every nonterminal request capability",
+    "host_execution_scope": "admission refuses the home root and its ancestors; historical home-scoped rows close only through typed dead-holder recovery",
+    "host_execution_recovery": "read-only inspect publishes the canonical holder bytes, SHA-256 digest, dead-holder observation and terminal-evidence template; typed clear re-verifies every fact and writes one immutable receipt; a provably absent target releases through the same authority as an orphan"
+  },
+  "governance_version": 2,
+  "doctor_mount_version": 2,
+  "governance_contract": {
+    "contract": "worktree-governance/v2",
+    "gc_plan": "read-only classification of all Git registrations; each candidate independently probes its checkout repo path, .git entry, Git common dir and lock path, reporting UNKNOWN for inaccessible mount evidence rather than inheriting another candidate's mount state; each candidate includes candidate_reason, session, lifecycle_observation, stale_facts, orphan_facts, filesystem_health, namespace_health and blocking_facts; --path with owner release or release intent runs ReleasePlan preflight, while an owner-reviewed physically missing no-change audit can produce a registration-prune plan",
+    "gc_apply": "one reviewed target at a time; rechecks plan identity under the repository lock and routes ordinary checkout removal through release with ReleasePlan and ReleaseReceipt; a target already released by exactly the reviewed ReleasePlan returns that receipt as ALREADY_RELEASED after release re-verifies it, while a release by any other plan stays GC_PLAN_DRIFT naming its receipt; or removes only a missing no-change audit registration through a recoverable registration-prune transaction and receipt",
+    "plan_identity": "ordinary release: SHA-256 of canonical JSON ReleasePlan fields excluding timestamped created_at and plan_id; registration prune: SHA-256 of repository, allocation, missing path, admin key, HEAD, owner, record version and preserving publication ref identity; both require no writer or publication lease",
+    "capacity": "observe only: active and retained counts cover feature/audit linked worktrees and use their policy slot limits; total counts all Git registrations and uses hard_limit; no admission change",
+    "lifecycle_observation": "status and gc-plan report recorded owner, lifecycle, session, runtime_sessions, lease, heartbeat, status, stale_facts, orphan_facts, integrity_facts and advisory_only; orphan_observations reports repository-level findings; host session health is UNKNOWN without independent evidence; lease renewal is not an independent heartbeat and observations change no lifecycle, release eligibility or GC authority",
+    "doctor_mounts": "repo, .git entry, Git common dir, existing lock and lock parent are probed in the caller namespace; current and optional namespace.peer report RW, READ_ONLY or UNKNOWN, plus lock_shape, lock_writable and lock_access_errno; --namespace-pid on doctor, status or gc-plan compares a selected process namespace through its root",
+    "status_diagnosis": "successful status responses include mount_diagnostics and environment_diagnosis; on a status failure the CLI retains the classified error code, and doctor is the detailed mount-evidence entry point",
+    "doctor_diagnosis": "mount_diagnostics.environment and top-level environment_diagnosis have code HEALTHY, MOUNT_NAMESPACE_MISMATCH, FILESYSTEM_PERMISSION or UNKNOWN with evidence in facts; doctor decision.primary_diagnosis is MOUNT_NAMESPACE_MISMATCH, FILESYSTEM_PERMISSION, UNKNOWN, CONTROLLER_LOCK_AUTHORITY, CONTROLLER_METADATA or NONE; only known different RW mount vectors establish mismatch, environment faults take precedence over Controller lock attribution, and no diagnostic infers sandbox source or repairs mounts",
+    "storage": "no new metadata documents or directories; existing release plans, receipts and audit remain authoritative"
+  },
+  "branch_retirement_execution_version": 1,
+  "namespace_migration_version": 1,
+  "namespace_migration_contract": {
+    "status": "stable in 1.11.0; namespace-migration/v1 identity is unchanged and runtime replay and evidence checks are hardened after the 1.8.0 audit; storage-layout/v4 declares the already existing registration-prune receipt directory without moving data; no production namespace migration is implied",
+    "open_defects": [],
+    "preflight": "unfinished journals and transactions in either namespace block the transition; the advisory plan defers that question to the fence rather than queueing behind a writer, and reports preflight as under_fence",
+    "authority_switch": "repo.json is the only file that makes a namespace authoritative, so it lands last by rename; the destination copy is re-digested against the prepared identity before and after the switch",
+    "commands": [
+      "namespace-migration-plan",
+      "namespace-migrate",
+      "namespace-migration-receipts",
+      "namespace-migration-verify"
+    ],
+    "compatibility": "read-only verbs, retirement plans, receipts and every released contract name are unchanged; the legacy namespace is never discovered at runtime, so an unmigrated repository keeps reporting NAMESPACE_UNMANAGED rather than partial state",
+    "contract": "namespace-migration/v1",
+    "critical_section": {
+      "fence": "an exclusive flock on the destination repo.lock, created before any content lands, is held for the whole transition",
+      "legacy_lock": "held exclusively without waiting; a caller that holds it is an activation in flight, and waiting there would invert that flow's lock order, so the migration fails closed with NAMESPACE_BUSY instead",
+      "not_claimed": "the fence serializes Controller and activation writers only; a process that ignores repo.lock is outside this contract",
+      "why_destination": "adopt, acquire and integration-enqueue bootstrap metadata with create=True under that same lock, so a concurrent verb queues instead of minting a second repository identity beside the tree being moved"
+    },
+    "durability": {
+      "legacy_removal": "directories are removed only when empty and the namespace root only after its lock, so unexplained content fails closed with NAMESPACE_RESIDUE",
+      "per_document": "a document moves only while its planned source bytes match; a complete converted lease is published atomically and an interrupted rewrite leaves only ignored scratch; a destination copy is accepted only when it matches the planned target, except an explicitly planned schema rewrite",
+      "prepared_receipt": "write-once before destructive work; records identity, source/current/target manifest, lease conversions and policy move so replay can use the original CAS after later destination writes",
+      "receipts": "write-once 0400 documents under namespace-migrations/, keyed by plan id; a settled receipt makes an exact replay idempotent and an unsettled prepared receipt is reported for recovery",
+      "relocation_record": "metadata-reference-relocation/v1 evidence is written only after the legacy root is gone, which is when the frozen reference resolver requires the previous root to be absent"
+    },
+    "error_codes": [
+      "NAMESPACE_BUSY",
+      "NAMESPACE_CONFLICT",
+      "NAMESPACE_EVIDENCE_INVALID",
+      "NAMESPACE_IDENTITY_MISMATCH",
+      "NAMESPACE_IDENTITY_MISSING",
+      "NAMESPACE_LEASE_INVALID",
+      "NAMESPACE_LOCK_INVALID",
+      "NAMESPACE_LOCK_MISSING",
+      "NAMESPACE_PATH_INVALID",
+      "NAMESPACE_PLAN_DRIFT",
+      "NAMESPACE_POLICY_DRIFT",
+      "NAMESPACE_RELOCATION_PRESENT",
+      "NAMESPACE_RESIDUE",
+      "NAMESPACE_SOURCE_DRIFT",
+      "NAMESPACE_SOURCE_MISSING",
+      "NAMESPACE_UNMANAGED",
+      "NAMESPACE_UNSAFE",
+      "NAMESPACE_UNSUPPORTED"
+    ],
+    "result_codes": [
+      "NAMESPACE_ALREADY_CURRENT",
+      "NAMESPACE_CONVERGED",
+      "NAMESPACE_CONVERGENCE_REQUIRED",
+      "NAMESPACE_MIGRATED",
+      "NAMESPACE_MIGRATION_REQUIRED",
+      "NAMESPACE_RECEIPTS",
+      "NAMESPACE_VERIFIED",
+      "NAMESPACE_VERIFY_FAILED"
+    ],
+    "fault_points": [
+      "namespace_receipt_prepared",
+      "namespace_conversion_temp_partial",
+      "namespace_converted_lease_published",
+      "namespace_rewrite_temp_fsynced",
+      "namespace_destination_rewritten",
+      "namespace_entries_moved",
+      "namespace_switched",
+      "namespace_record_written",
+      "namespace_policy_moved",
+      "namespace_receipt_settled"
+    ],
+    "identity": {
+      "canonicalization": "sha256 over the canonical JSON encoding of these fields, exactly as preservation._sha encodes them",
+      "compare_and_set": "namespace-migrate refuses unless the caller presents the exact observed plan id; a new transition re-derives it inside the fence, while an unsettled transition replays only from its matching prepared witness",
+      "fields": [
+        "contract",
+        "schema_version",
+        "repository_id",
+        "repository_path",
+        "common_dir",
+        "legacy_root",
+        "current_root",
+        "merged_digest",
+        "policy_target",
+        "policy_sha256"
+      ],
+      "plan_id": "SHA-256 of the released identity fields; a prepared receipt preserves the original identity through move, rewrite and later mutable destination writes, and a different requested id is refused"
+    },
+    "previous_namespace": "codex-worktree",
+    "purpose": "the only supported entry for the historical <git-common-dir>/codex-worktree/v1 namespace; callers never copy, edit or delete namespace JSON",
+    "scenarios": {
+      "NAMESPACE_ALREADY_CURRENT": "the legacy namespace is absent and no prepared transition is unsettled; an exact no-op CAS writes no receipt, while a settled transition is reported idempotently through its original receipt",
+      "NAMESPACE_CONFLICT": "both namespaces hold the same path with content that is neither equal nor one document's two schemas; nothing moves and no receipt is written",
+      "NAMESPACE_CONVERGENCE_REQUIRED": "both namespaces hold equivalent content, or the destination holds a document in a form the runtime cannot read; redundant legacy copies clear and the destination is rewritten to the authoritative form",
+      "NAMESPACE_MIGRATION_REQUIRED": "content exists only in the legacy namespace; it moves",
+      "NAMESPACE_UNMANAGED": "neither namespace exists; there is no metadata to migrate"
+    },
+    "recovery": "namespace-migration-plan remains read-only and reports recovery_required plus the original plan id for an unsettled PREPARED receipt; namespace-migrate requires that exact id, checks source and immutable evidence, tolerates post-switch mutable Controller records, and completes relocation evidence and SETTLED receipt without a second transition"
+  },
+  "result_contracts": [
+    "branch-retirement/v1",
+    "branch-retirement/v2",
+    "branch-retirement/v5",
+    "namespace-migration/v1",
+    "re-preservation-recovery/v1",
+    "worktree-controller/v1",
+    "worktree-governance/v1",
+    "worktree-governance/v2",
+    "writer-admission/v1",
+    "closed-lifecycle/v1",
+    "release-recovery-inspection/v1",
+    "integration-publication-session/v1"
+  ],
+  "document_contracts": [
+    "branch-retirement-execution/v1",
+    "branch-retirement/v5",
+    "controller-transaction-conflict/v1",
+    "metadata-reference-relocation/v1",
+    "namespace-migration/v1",
+    "retirement-execution-result/v1",
+    "storage-layout/v1",
+    "integration-publication-session/v1",
+    "no-change-cleanup-closeout/v1"
+  ],
+  "closed_lifecycle_query_version": 1,
+  "closed_lifecycle_query_contract": {
+    "contract": "closed-lifecycle/v1",
+    "query_version": 1,
+    "selectors": [
+      "allocation_id",
+      "authority_key",
+      "task_key",
+      "integration_intent_id",
+      "release_receipt_id"
+    ],
+    "selector_count": 1,
+    "default_limit": 100,
+    "maximum_limit": 1000,
+    "cursor": "exclusive immutable release_receipt_id in ascending lexical order",
+    "sources": [
+      "records",
+      "release-plans",
+      "release-receipts",
+      "release-intents",
+      "integration-intents",
+      "prepared-candidate-receipts",
+      "publication-receipts"
+    ],
+    "live_field": "live_allocations",
+    "historical_field": "closed_releases",
+    "missing_receipt_field": "incomplete_history",
+    "owner_authority": "immutable release plan at closure, never an integration publisher or current checkout owner",
+    "task_authority": "existing release intent, otherwise retained allocation record",
+    "publication_authority": "immutable publication receipt source_results; join source allocation and exact frozen source handoff independently of mutable integration intent",
+    "semantics": "checkout release proves resource closure, not publication or business completion; no history backfill, mutation, remote access, database, or daemon",
+    "unavailable_evidence": "null or INCOMPLETE; contradictory linked identities fail HISTORY_EVIDENCE_CONFLICT",
+    "storage_layout_version": 4
+  },
+  "source_release_summary_version": 1,
+  "source_release_summary_contract": {
+    "version": 1,
+    "field": "source_release_trigger.outcomes",
+    "entrypoints": ["lease-complete", "reconcile receipts"],
+    "preserved_fields": ["created_intent_ids", "skipped", "reconciliation"],
+    "outcome_fields": ["allocation_id", "status", "result", "blocker"],
+    "completed_result": "ALREADY_RELEASED",
+    "completed_evidence": ["release_receipt_id", "plan_id", "intent_id", "proof_status"],
+    "completion_precondition": "unique COMPLETE closed lifecycle evidence matching frozen source branch, handoff and Finalizer identity, current publication association, and no live binding",
+    "nonterminal_recovery_field": "recovery_commands",
+    "semantics": "checkout closure observation only; no new release authority or historical mutation; live release reconciliation retains its original status, result and blocker"
+  },
+  "tracked_source_progress_recovery_version": 1,
+  "tracked_source_progress_recovery_contract": {
+    "contract": "tracked-source-progress-recovery/v1",
+    "entrypoint": "python -m worktree_controller.source_recovery",
+    "commands": [
+      "plan-progress",
+      "reconcile-progress"
+    ],
+    "precondition": "proper recorded restore prefix with a nonempty preserved remainder, complete before/after/check chain, current restored bytes/inodes and preserved remainder, HEAD/index/parents/generation/runtime authority PASS",
+    "terminal_attempt_state": "SOURCE_ATTEMPT_PRESERVED",
+    "started_action": "current baseline match only; historical status remains ACTION_STARTED",
+    "marker": "source-cleanup/<transaction>/progress-reconciliation.json",
+    "source_action": "none",
+    "lifecycle_action": "none",
+    "index_action": "none",
+    "release_authorized": false,
+    "successor_authorized": false,
+    "old_evidence": "retained byte-identical",
+    "rollout": "only verified terminal evidence; unresolved partial attempt remains BLOCK",
+    "rollback": "unaware runtimes remain blocked by existing rollout gate"
+  },
+  "multiple_preservation_cleanup_version": 1,
+  "multiple_preservation_cleanup_contract": {
+    "contract": "legacy-preserved-state-multiple-cleanup/v1",
+    "command": "resource-clean --typed",
+    "primary_options": [
+      "--preservation-receipt",
+      "--preservation-receipt-sha256"
+    ],
+    "additional_options": [
+      "--additional-preservation-receipt",
+      "--additional-preservation-receipt-sha256"
+    ],
+    "input": "primary pair plus equally sized repeatable additional pairs; reject duplicate receipts, overlapping source paths or any invalid coverage",
+    "identity": "all normalized source-relative proof rows and per-resource evidence are bound by plan_id, journal and immutable receipt",
+    "guards": "existing allocation, owner/CAS, Git, all-resource, runtime, lease, binding, retained-ref and source-cleanup gates remain mandatory",
+    "source_verification": "each action rechecks its own coverage and full hardlink topology; only previously COMPLETED source paths may use destination-only coverage and must remain absent",
+    "release": "all actions completed and every preserved source absent with every immutable generation verified against exact allocation identity",
+    "interrupted_recovery": "prepare-multiple with exact original journal/receipt SHA-256; completed prefix and never-started pending suffix only; full original proof set and immutable historical evidence retained",
+    "single_input_compatibility": "existing single receipt contract, plan and receipt shape remain unchanged",
+    "storage_layout_version": 4
+  },
+  "retained_typed_cleanup_version": 1,
+  "aborted_integration_preserved_cleanup_version": 1,
+  "aborted_integration_preserved_cleanup_contract": {
+    "contract": "aborted-integration-preserved-cleanup/v1",
+    "entrypoints": ["integration-abort", "python -m worktree_controller.preservation", "resource-clean --typed", "release", "integration-claim"],
+    "eligible": "unpublished integration allocation in INTEGRATION_ABORTED with exact owner, HEAD, record CAS and retained branch; every removed tree has exact immutable preservation coverage",
+    "quarantine": "direct cleanup stays refused; only the existing explicit owner/CAS integration-abort transition may abort a quarantined candidate, preserving quarantine and failure history",
+    "abort_identity": "new abort history pins receipt ID and raw SHA-256; legacy single exact matching receipt remains supported; missing, changed or ambiguous evidence blocks",
+    "generated_paths": "no Astro or directory-name allowlist; ignored and untracked does not mean disposable; even recognized disposable trees require preservation in this lifecycle",
+    "lease_and_runtime": "any recorded writer lease including expired, publication authority, bindings, managed runtime, uncertain scans and unresolved transactions block; no lease is reclaimed here",
+    "admission": "request identity and reservation stay unchanged until guarded allocation release; only verified release evidence settles the old budget before a changed-source intent can be claimed",
+    "source_identity": "unchanged-source retries keep their existing retry contract; changed sources require their own frozen reviewed intent, never source replacement or queue priority inheritance",
+    "repeat": "consumed live-source preservation inputs remain refused; a fresh empty cleanup plan verifies completed receipts without deletion; guarded release has its existing exact-request replay",
+    "result": "cleanup only; never publication, source adoption, branch retirement or task completion",
+    "storage_layout_version": 5
+  },
+  "multiple_preservation_recovery_version": 1,
+  "multiple_preservation_recovery_contract": {
+    "contract": "multiple-preservation-cleanup-recovery/v1",
+    "stages": ["prepare-multiple", "resume"],
+    "input": "exact original transaction id, journal SHA-256, failed completion receipt SHA-256, owner, path and record CAS",
+    "precondition": "nonempty exact completed action prefix and nonempty never-started pending suffix; all before/after action references and topology transitions verified; no suffix action evidence",
+    "proof_set": "entire original normalized preservation evidence set; no single-receipt downgrade or omitted generation",
+    "historical_metadata": "immutable recovery record freezes the exact allocation owner/CAS/history and complete verified official generation metadata references with raw SHA-256; terminal verification rechecks their unchanged complete set, including older superseded generations",
+    "released_checkout": "absence is accepted only with exact official release plan, receipt and frozen allocation history; live source/root/ancestor and deletion guards remain unchanged",
+    "execution": "existing guarded cleanup runner uses a new transaction UUID for the pending suffix; completed prefix never replayed",
+    "guards": "exact allocation, owner, HEAD, record CAS, branch, root and ancestor identities, preserved generations, all resources, topology, Git, retained refs, runtime, leases, bindings and transaction authority",
+    "terminal": "append-only exact composite of the original completed prefix and successful successor action chain; original journal and failed receipt remain byte-identical",
+    "interrupted_successor": "never replay a started suffix attempt; only exact successful completion may finish a missing terminal receipt",
+    "rollback": "unaware runtimes remain blocked through the retained original multi cleanup journal",
+    "storage_layout_version": 4
+  },
+  "preservation_supersession_version": 1,
+  "preservation_supersession_contract": {
+    "authority": "one exact allocation and owner with verified frozen handoff, formal reopen and new frozen handoff history",
+    "baseline": "same source-relative path and original root/ancestor chain; fully verified current preservation plus actual completed action may cover older generations through the formal lineage",
+    "old_evidence": "every official generation metadata is verified and retained; absence alone grants no cleanup authority"
+  },
+  "retained_typed_cleanup_contract": {
+    "command": "resource-clean --typed",
+    "eligible_lifecycle": "RETAINED",
+    "eligible_roles": [
+      "feature",
+      "audit"
+    ],
+    "preservation_admission": "exact allocation, owner, HEAD and record CAS; retained ref and lineage required",
+    "cleanup_input": "existing primary and paired additional preservation receipt options; no second composition family",
+    "guards": "existing cleanliness, writer, runtime, binding, all-resource, integration and transaction gates remain mandatory",
+    "result": "cleanup only; task completion, archival and physical release remain separate",
+    "archive_evidence": "freeze actual completed cleanup receipt IDs, paths and raw SHA256 values",
+    "release_bridge": "verified archive before-record identity to after-record CAS exactly +1; reverify frozen immutable receipts",
+    "partial_failure": "preserve original journal and immutable receipt; no multi replay or downgrade"
+  },
+  "preservation_leaf_version": 1,
+  "no_change_cleanup_closeout_version": 1,
+  "no_change_cleanup_closeout_contract": {
+    "contract": "no-change-cleanup-closeout/v1",
+    "future_completion": "complete-no-change freezes the exact before-record, complete transition event and successful cleanup receipt ID/path/raw-SHA256 set; one normal +1 transition pins its write-once completion receipt",
+    "recovery_entrypoint": "reconcile no-change-completion",
+    "recovery_inputs": "exact path, owner, original completion CAS, completion receipt ID/raw SHA256 and repeatable paired successful cleanup receipt IDs/raw SHA256; dry-run plus expected-plan-id",
+    "legacy": "one unique old no-change completion and its exact original +1 transition; append-only recovery adds one normal +1 history event, never rewrites old evidence or replays deletion",
+    "replay": "while the checkout remains registered, the same original request returns the same receipt without another CAS transition; changed identity or additional history fails closed; after release use normal release replay or exact lifecycle-history",
+    "release": "reverify every frozen raw byte digest and derive the full original record through exact transitions before applying unchanged exact-CAS cleanup verification",
+    "guards": "all Git, owner, role, lineage, lease, binding, runtime, editable, resource and scoped transaction guards remain mandatory",
+    "storage_layout_version": 4
+  },
+  "preservation_leaf_contract": {
+    "preservation_contract": "legacy-preserved-state/v1",
+    "entrypoint": "python -m worktree_controller.preservation",
+    "source_kinds": [
+      "directory",
+      "regular-file",
+      "literal-symlink"
+    ],
+    "scope": "selected exact ignored source-relative path; no tracked parent or sibling removal",
+    "identity": "original source and full ancestor identities bound to immutable plan and verified immediately before cleanup",
+    "symlink": "preserve literal link text; never follow or remove its destination",
+    "failure": "unsupported callbacks and changed ancestor, source, environment or hardlink identity fail closed",
+    "cleanup_authorized_by_copy": false
+  },
+  "integration_publication_execution_version": 1,
+  "integration_publication_execution_contract": {
+    "contract": "integration-publication-session/v1",
+    "version": 1,
+    "command": "publication-execution-session",
+    "framing": "UTF-8 JSON lines; this command does not emit the ordinary status envelope",
+    "maximum_frame_bytes": 65536,
+    "idle_timeout_seconds": 300,
+    "response_phases": [
+      "verified",
+      "authorized",
+      "completed",
+      "blocked"
+    ],
+    "request_actions": [
+      "authorize",
+      "complete"
+    ],
+    "identity_fields": [
+      "repository_id",
+      "allocation_id",
+      "lease_id",
+      "run_id",
+      "remote",
+      "target_ref",
+      "candidate_oid",
+      "expected_main_oid",
+      "validation_evidence_id",
+      "record_version",
+      "expires_at"
+    ],
+    "authorization_actions": [
+      "PUSH_CANDIDATE",
+      "RECOVER_ALREADY_PUBLISHED"
+    ],
+    "completion_result_fields": [
+      "record_id",
+      "executor",
+      "push_executed",
+      "remote_oid"
+    ],
+    "executor_fields": [
+      "name",
+      "version"
+    ],
+    "lock_owner": "Controller; one exclusive repository lock spans verify, authorize, consumer push and producer completion observation",
+    "completion": "Controller reobserves the exact remote candidate and returns execution evidence; lease-complete persists the existing publication receipt and owns lifecycle/lease/release changes",
+    "recovery": "Reuse the same candidate, lease and run; an already-published candidate is observed without another push, including after lease expiry",
+    "failure": "Missing authority, protocol drift, disconnect, timeout or an unverified remote fails closed; observe the live remote before retrying an interrupted mutation",
+    "threat_model": "Trusted local caller and OS; no claim of protection from arbitrary same-UID process interference"
+  },
+  "integration_retry_version": 1,
+  "integration_retry_contract": {
+    "contract": "integration-retry/v1",
+    "admission": "exact owner, ATTENTION_REQUIRED, aborted candidate with complete release proof, no publication or active authority, unchanged frozen source/scope",
+    "plan": "read-only dry-run plus expected-plan-id CAS binds failed intent, immutable failure evidence, source records, remote-tracking main and queue evidence",
+    "retry": "reuse original intent ID, source, scope and enqueue sequence; increment attempt, clear old candidate validation and re-enter normal preparation, validation and publication",
+    "prerequisite": "one unclaimed later intent with strict source-ancestor proof may inherit the failed parent scheduling position; immutable queue sequences and independent scope remain unchanged; formal prerequisite publication/release precedes retry",
+    "evidence": "append-only intent history retains the full old failure/abort/release evidence and prior candidate identities; no rewrite or second tracker",
+    "storage_layout_version": 4
+  },
+  "integration_conflict_resolution_version": 2,
+  "integration_conflict_resolution_contract": {
+    "contract": "integration-conflict-resolution/v2",
+    "retry": "integration-retry also accepts exact unallocated INTEGRATION_CONFLICT_BLOCKED history; original owner/source/scope/queue and plan CAS remain mandatory",
+    "retried_attempts": "v2 judges the attempt after the last PREPARATION_RETRY_QUEUED: it must be unclaimed, every earlier claimed attempt must have ended in PREPARATION_ABORTED, and only RELEASED earlier candidates may remain",
+    "claim": "integration-claim --intent-id ID --resolve-conflicts verifies an actual single-source conflict, honors queue/capacity and allocates the pinned main with a pending frozen merge identity",
+    "resolution": "caller resolves only frozen scope and commits via Finalizer; integration-resolve requires exact owner/record/head, clean checkout, exact main/source merge parents and unchanged source evidence",
+    "validation": "resolution only binds a new candidate revision; fresh tests, Snapshot, integration-validate, live-main publication CAS and release remain mandatory",
+    "failure": "unknown failures, wrong owner, stale plan, live candidates, source drift, extra parents/commits, dirty checkout and out-of-scope changes fail closed",
+    "storage_layout_version": 4
+  },
+  "exited_holder_release_version": 1,
+  "exited_holder_release_contract": {
+    "contract": "exited-holder-release/v1",
+    "command": "writer-lease-release with the exact recorded holder identity and --lease-id",
+    "applies_to": "a lease whose holder process has exited (for example reaped by a runtime), whose process group has no surviving member and whose checkout no other process (besides the caller and its ancestors) still uses",
+    "result": "WRITER_LEASE_RELEASED with holder_exited true; allocation lifecycle and work are untouched",
+    "refusals": "a missing or different lease ID, a different identity, surviving children or another process in the checkout keep the lease (WRITER_LEASE_MISMATCH)"
+  },
+  "session_admission_version": 1,
+  "session_admission_contract": {
+    "contract": "session-admission/v1",
+    "admit": "session-admit runs plan, acquire and execution-admit in one process for a new feature allocation from the canonical checkout; any other start returns SESSION_ADMISSION_FALLBACK without changes",
+    "bind": "session-bind runs writer-lease-acquire for the exact live holder, the holder-aware write-guard and the runtime binding add in one process; a later Controller or filesystem error attempts to release the granted lease and reports lease_outcome; failed release retains the exact lease and holder identity for recovery",
+    "guards": "each step is the existing command's function with unchanged guards, journals, receipts and record-version CAS; only the intermediate repository status is omitted",
+    "convergence": "the admission-triggered detached retention pass starts after admission and is skipped while a pass runs or within 300 seconds of the last started pass",
+    "fallback": "hosts without this capability, or on SESSION_ADMISSION_FALLBACK, use the individual commands",
+    "storage_layout_version": 4
+  },
+  "archived_codex_binding_recovery_version": 1,
+  "archived_codex_binding_recovery_contract": {
+    "contract": "archived-codex-binding-recovery/v1",
+    "operation": "binding-remove",
+    "opt_in": "--recover-archived-codex-session",
+    "dry_run": true,
+    "requirements": [
+      "exact owner and record CAS",
+      "released writer lease",
+      "native socket peer matches recorded shared daemon",
+      "exact archived thread notLoaded and absent from loaded list",
+      "no remaining checkout references or associated uncertainty"
+    ],
+    "preserves": [
+      "other native threads",
+      "shared daemon",
+      "source files",
+      "lifecycle and owner",
+      "ordinary dead-holder gate"
+    ],
+    "receipt": "immutable native-session-recoveries evidence"
+  },
+  "session_closeout_report_version": 1,
+  "session_closeout_expectations_version": 1,
+  "recovery_guidance_version": 1,
+  "recovery_guidance_contract": {
+    "contract": "recovery-guidance/v1",
+    "entrypoint": "recovery-guide --path <checkout> | --intent-id <original-intent>",
+    "observation": "shared repository lock; exact current allocation/owner/task/authority/path/branch/HEAD/CAS and original intent identity",
+    "authority": "read-only; execution_authority=false, execution_guards_checked=false, mutation_performed=false; no eligibility, business completion or publication assertion",
+    "steps": "next_steps[].argv is a structured argument list for only the next observed formal step; reobserve_after_each_step=true; never predict future CAS or compute a consumer digest",
+    "blocked": "clean unchanged BLOCKED integration -> quarantine -> reobserve QUARANTINED -> formal abort -> guarded release dry-run -> exact cleanup/release proof -> original intent retry dry-run/public plan_id -> normal claim/conflict resolution/fresh validation",
+    "terminal": "a published RELEASED intent requires complete matching immutable release and REMOTE_VERIFIED publication evidence; terminal_status=PUBLISHED_RELEASED offers only lifecycle-history inspection, never retry or business completion; incomplete or drifted evidence stays blocked",
+    "fences": "dirty/unknown files, recorded writer/publication leases, bindings, transaction obligations and source/scope/HEAD drift never authorize cleanup or an alternate request; diagnostic warnings remain observations",
+    "doctor": "PASS proves metadata integrity, not lifecycle or publication eligibility"
+  },
+  "session_closeout_expectations_contract": {
+    "entrypoint": "worktree-session-end with the full client/session/holder/run selector and repeatable --expected-allocation-id <uuid>",
+    "coverage": "inspect all exact-selector and prior observed allocations; expected IDs add proof obligations and never select mutation targets; missing expected IDs settle only through complete matching immutable release proof, otherwise remain pending",
+    "results": "expected_allocations joins allocations and previous_allocations in summary; every pending live row has recovery_argv; task_completed remains false",
+    "safety": "reobserve identity and record CAS; retained checkpoint/handoff observations with a new writer lease cannot report terminal_complete; --check remains read-only and strict exits remain 2 until complete",
+    "compatibility": "additive capability; existing selector, advisory exit, CLI 60 and storage 5 remain compatible"
+  },
+  "hosted_session_closeout_check_version": 1,
+  "checkout_owner_action_version": 1,
+  "task_checkpoint_park_version": 1,
+  "binding_registration_backfill_version": 1,
+  "binding_registration_backfill_contract": {
+    "contract": "binding-registration-backfill/v1",
+    "entrypoint": "reconcile binding-registrations",
+    "dry_run": "--dry-run lists candidates, refused bindings with typed blockers and a plan_id; apply requires --expected-plan-id equal to the current plan",
+    "selection": "live linked bindings without a worktree-registration/v1 document; canonical, orphan and already registered bindings are never touched",
+    "requirements": [
+      "record exists",
+      "administrative directory is a real directory whose name derives the binding key",
+      "no pre-existing registration marker",
+      "Git gitdir pointer names the observed checkout",
+      "Git registration (commondir mtime) is no later than record created_at plus 900 seconds",
+      "record base_commit, when present, is an ancestor of the checkout HEAD"
+    ],
+    "writes": "the existing worktree-registration/v1 marker and binding-registrations document per candidate; no record, binding, lifecycle or history change",
+    "refused": "refused bindings keep their legacy meaning and are reported for owner review",
+    "storage_layout_version": 5
+  },
+  "session_closeout_report_contract": {
+    "contract": "session-closeout/v1",
+    "entrypoint": "worktree-session-end",
+    "prepare": "--check is read-only and requires the exact client/session/holder and optional recorded run",
+    "strict": "--check and --require-complete return 2 unless selection is complete and every allocation reports terminal_complete",
+    "advisory": "default exit remains 0; SESSION_ENDED is not a success assertion",
+    "summary": [
+      "selected",
+      "complete",
+      "pending",
+      "terminal_complete",
+      "task_completed"
+    ],
+    "task_completed": false,
+    "run_identity": "--run-id matches exactly; omission matches only a null run, never a replacement run",
+    "unknown_files": "preserved; dirty or unclassified retained files produce an owner action",
+    "retry": "original selected allocations are persisted as observations before lease release; previous_allocations is read-only and never grants authority; unresolved results remain pending across retries"
+  },
+  "checkout_owner_action_contract": {
+    "contract": "checkout-owner-action/v1",
+    "surfaces": [
+      "status.worktrees[].owner_action_request",
+      "reconcile retention.decision.findings[].owner_action_request",
+      "session-end.allocations[].owner_action"
+    ],
+    "identity": [
+      "allocation_id",
+      "task_key",
+      "authority_key",
+      "owner",
+      "expected_record_version",
+      "path",
+      "branch",
+      "head",
+      "action_id"
+    ],
+    "consumer": "match an existing Task binding, re-observe the full identity and CAS, and restore only that owner through normal Controller admission",
+    "execution_authority": false,
+    "automatic_discard": false
+  },
+  "task_checkpoint_park_contract": {
+    "entrypoint": "park --checkpoint-id <art_sha256|sha256:hex> --checkpoint-head <oid> [--waiting-on <dependency>]",
+    "source": "content-addressed checkpoint persisted by the existing Task; owner attestation, not content verification or task completion",
+    "guards": "exact owner/record CAS/HEAD, no writer lease or binding; ACTIVE or already RETAINED feature/audit only",
+    "retention": "history records the checkpoint reference; status exposes wait_checkpoint while RETAINED",
+    "release": "explicit reviewed archive-retained plan then unchanged guarded release; branches kept, unknown files block",
+    "resume": "the Task restores the exact retained HEAD through controlled admission and revalidates context before a new writer"
+  }
+}

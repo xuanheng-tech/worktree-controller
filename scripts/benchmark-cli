@@ -1,0 +1,990 @@
+#!/usr/bin/env python3
+"""Measure fresh CLI processes against isolated, synthetic governance fixtures."""
+
+import argparse
+import hashlib
+import json
+import os
+import platform
+import signal
+import statistics
+import subprocess
+import sys
+import time
+from contextlib import contextmanager, suppress
+from dataclasses import asdict, replace
+from pathlib import Path
+from uuid import UUID
+
+from worktree_controller.controller import adopt
+from worktree_controller.git_backend import inventory
+from worktree_controller.lifecycle import _release_plan_id
+from worktree_controller.metadata_codec import (
+    prepared_candidate_receipt_to_dict,
+    publication_receipt_to_dict,
+    record_to_dict,
+    release_plan_to_dict,
+    release_receipt_to_dict,
+)
+from worktree_controller.models import (
+    PreparedCandidateReceipt,
+    PublicationReceipt,
+    ReleasePlan,
+    ReleaseReceipt,
+)
+from worktree_controller.store import MetadataStore, new_record, now_iso
+
+FIXTURE_POLICY = """\
+schema_version = 1
+[limits]
+normal_limit = 5
+hard_limit = 6
+[canonical]
+protected = true
+allowed_roles = ["canonical", "control-plane", "integration", "publication", "verification"]
+[slots]
+integration = 1
+feature_or_audit = 3
+emergency = 1
+[review]
+stale_warning_days = 7
+[authority]
+require_adoption = true
+require_task_key = true
+require_authority_key = true
+unique_active_feature_authority = true
+"""
+
+
+def fixture_environment(root):
+    home = root / "home"
+    home.mkdir()
+    return {
+        "PATH": os.defpath,
+        "HOME": str(home),
+        "XDG_STATE_HOME": str(root / "host-state"),
+        "LANG": "C.UTF-8",
+        "PYTHONPYCACHEPREFIX": str(root / "bytecode"),
+        "PYTHONNOUSERSITE": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
+def seed_json(path, payload):
+    # Bulk fixture setup is outside the measurement; this does not benchmark writer durability.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8") as stream:
+        stream.write(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+
+
+def fixture(root, count, *, policy_text=FIXTURE_POLICY):
+    repo = root / f"history-{count}"
+    subprocess.run(["git", "init", "--quiet", "--initial-branch=main", str(repo)], check=True)
+    policy = repo / ".agents/worktree-policy.toml"
+    policy.parent.mkdir()
+    policy.write_text(policy_text, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", str(policy)], check=True)
+    subprocess.run([
+        "git", "-C", str(repo), "-c", "user.name=Benchmark Fixture",
+        "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture",
+    ], check=True)
+    adopt(repo, target=repo, task_key="fixture-control", authority_key="fixture-control",
+          module="benchmark", role="control-plane", owner="fixture-owner", lifecycle="ACTIVE")
+    seed_release_history(root, repo, count)
+    return repo
+
+
+def seed_release_history(root, repo, count):
+    observed = inventory(repo)
+    head = observed.worktrees[0].head
+    tree = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"], text=True).strip()
+    store = MetadataStore(observed.common_dir)
+    repository_id = store.load().repository_id
+    timestamp = now_iso()
+    with store.lock(exclusive=True):
+        for number in range(1, count + 1):
+            allocation, publication, release_id, intent, prepared = (
+                str(UUID(int=number * 5 + offset)) for offset in range(5)
+            )
+            record = replace(new_record(
+                task_key=f"fixture-{number}", authority_key="fixture-history", module="benchmark",
+                role="integration", owner="fixture-owner", lifecycle="RELEASED",
+                base_commit=head, task_commit=head,
+            ), allocation_id=allocation, record_version=3, handoff_commit=head,
+                finalizer_commit=head, finalizer_record_id=f"fixture-finalizer-{number}")
+            # Only this new disposable fixture receives synthetic records; no live ledger is edited.
+            seed_json(store.records_dir / f"{allocation}.json", record_to_dict(record))
+            publication_record = PublicationReceipt(
+                schema_version=2, receipt_id=publication, repository_id=repository_id,
+                allocation_id=allocation, intent_id=intent, target_ref="origin/main",
+                holder="fixture-owner", run_id=f"fixture-{number}", expected_main_oid=head,
+                candidate_oid=head, validation_evidence_id=f"fixture-validation-{number}",
+                finalizer_record_id=record.finalizer_record_id, status="REMOTE_VERIFIED",
+                acquired_at=timestamp, remote_verified_at=timestamp, lease_released_at=timestamp,
+                released_at=None, lease_duration_ms=0, remote_verified_to_released_ms=None,
+                source_results=(),
+            )
+            seed_json(store.publication_receipts_dir / f"{publication}.json",
+                      publication_receipt_to_dict(publication_record))
+            prepared_record = PreparedCandidateReceipt(
+                schema_version=1, receipt_id=prepared, repository_id=repository_id,
+                intent_id=intent, allocation_id=allocation, attempt=1, base_origin_main_oid=head,
+                candidate_oid=head, tree_oid=tree, scope_digest="0" * 64,
+                prepare_identity=hashlib.sha256(f"fixture-prepare-{number}".encode()).hexdigest(),
+                validation_evidence_id=f"fixture-validation-{number}",
+                tests_receipt_id="fixture-tests", snapshot_receipt_id="fixture-snapshot",
+                created_at=timestamp,
+            )
+            seed_json(store.prepared_candidate_receipts_dir / f"{prepared}.json",
+                      prepared_candidate_receipt_to_dict(prepared_record))
+            target = str(root / f"released-{number}")
+            plan = ReleasePlan(
+                schema_version=1, plan_id="0" * 64, repository_id=repository_id,
+                allocation_id=allocation, release_intent_id=None, target_path=target,
+                branch=f"fixture/{number}", expected_head=head, expected_record_version=2,
+                owner="fixture-owner", authority_key="fixture-history", role="integration",
+                lifecycle="PUBLISHED", trigger="manual", publication_receipt_id=publication,
+                resource_actions=(), created_at=timestamp,
+            )
+            identity = release_plan_to_dict(plan)
+            identity.pop("plan_id")
+            plan = replace(plan, plan_id=_release_plan_id(identity))
+            seed_json(store.release_plans_dir / f"{plan.plan_id}.json", release_plan_to_dict(plan))
+            release_record = ReleaseReceipt(
+                schema_version=1, receipt_id=release_id, plan_id=plan.plan_id,
+                repository_id=repository_id, allocation_id=allocation, release_intent_id=None,
+                target_path=target, branch=f"fixture/{number}", released_head=head,
+                expected_record_version=2, released_record_version=3, trigger="manual",
+                resource_receipt_ids=(), result="RELEASED", released_at=timestamp,
+            )
+            seed_json(store.release_receipts_dir / f"{release_id}.json",
+                      release_receipt_to_dict(release_record))
+
+
+def timed_process(arguments, timing, timeout, *, env=None):
+    started = time.perf_counter()
+    with subprocess.Popen(
+        ["/usr/bin/time", "-q", "-f", "%M", "-o", str(timing), *arguments],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, env=env,
+    ) as process:
+        try:
+            output, error = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise
+    elapsed = time.perf_counter() - started
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid CLI JSON (exit={process.returncode}): "
+                         f"{error.decode(errors='replace')[:1000]}") from exc
+    return process.returncode, payload, {
+        "seconds": elapsed, "peak_rss_kib": int(timing.read_text().strip()),
+        "stdout_bytes": len(output), "stderr": error.decode(errors="replace"),
+    }
+
+
+def measure(controller, command, repo, timing, timeout):
+    arguments = [str(controller), command, "--repo", str(repo), "--json"]
+    if command == "lifecycle-history":
+        arguments += ["--authority-key", "fixture-history", "--limit", "10"]
+    code, payload, measurement = timed_process(arguments, timing, timeout)
+    if code or payload["errors"] or payload["warnings"]:
+        raise ValueError(f"invalid fixture for {command}: {payload['errors'] + payload['warnings']}")
+    if command == "doctor" and payload["decision"]["code"] != "PASS":
+        raise ValueError(f"doctor rejected fixture: {payload['decision']}")
+    payload.pop("tool_version")
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    measurement.pop("stderr")
+    return {**measurement, "payload_sha256": digest}
+
+
+ADMISSION_POLICY = FIXTURE_POLICY.replace("schema_version = 1", "schema_version = 7").replace(
+    "integration = 1", "integration_prepare_limit = 1\nrecovery_reserve = 1\nretained = 3"
+) + """
+[publication]
+main_publish_limit = 1
+remote = "origin"
+branch = "main"
+[release]
+automatic_feature_audit = false
+automatic_integration_continuation = false
+preserved_auto_release = false
+intent_ttl_seconds = 3600
+[admission]
+strategy = "resource-budget-v1"
+checkout_growth_bytes = 1024
+checkout_growth_inodes = 10
+[reconciler]
+enabled = true
+actor = "fixture-reconciler"
+allow_legacy_adoption = false
+"""
+ADMISSION_CASES = ("available", "memory-recovery", "identity-recovery")
+
+
+def profile_cli(arguments, output):
+    import cProfile
+    import pstats
+
+    from worktree_controller import cli
+
+    profiler = cProfile.Profile()
+    result = profiler.runcall(cli.main, arguments)
+    stats = pstats.Stats(profiler).stats
+    functions = [{"file": Path(file).name, "function": name, "calls": nc,
+        "self_seconds": tt, "cumulative_seconds": ct}
+        for (file, _line, name), (_cc, nc, tt, ct, _callers) in stats.items()]
+    loads = [f for f in functions if f["file"] == "store.py" and f["function"] == "_load_unlocked"]
+    profile = {"metadata_snapshot_loads": sum(f["calls"] for f in loads),
+        "metadata_snapshot_seconds": sum(f["cumulative_seconds"] for f in loads),
+        "metadata_decoders": {f["function"]: f["calls"] for f in functions
+            if f["file"] == "metadata_codec.py" and f["function"].endswith("_from_dict")},
+        "top_cumulative": sorted(functions, key=lambda f: f["cumulative_seconds"], reverse=True)[:30]}
+    Path(output).write_text(json.dumps(profile, indent=2))
+    return result
+
+
+def writer_profile_worker(config_path):
+    from worktree_controller import __version__
+
+    config = json.loads(Path(config_path).read_text())
+    if config["version"] != f"worktree-controller {__version__}":
+        raise ValueError("selected interpreter imports a different Controller version")
+    # No fixture probes or authority checks are replaced in this diagnostic process.
+    return profile_cli(config["arguments"], config["output"])
+
+
+def admission_worker(config_path):
+    # This fresh process imports the selected installed package, not checkout sources.
+    from worktree_controller import __version__, cli, environment, resource_admission
+    from worktree_controller.models import ControllerError
+
+    config = json.loads(Path(config_path).read_text())
+    if config["version"] != f"worktree-controller {__version__}":
+        raise ValueError("selected interpreter imports a different Controller version")
+    resource_admission.pressure = lambda: {
+        "available_memory_bytes": config["memory"], "observed_at_ns": 1,
+        "psi_avg10": {"cpu": 0.0, "io": 0.0, "memory": 0.0},
+    }
+    original_recovery = resource_admission._reconcile_execution
+    original_evidence = environment.runtime_authority_evidence
+    observations, refusals = {}, []
+
+    def evidence(target, *, holders=()):
+        value = original_evidence(target, holders=holders)
+        observations[str(target)] = value
+        return value
+
+    def recover(row, *, apply):
+        try:
+            return original_recovery(row, apply=apply)
+        except (ControllerError, OSError) as exc:
+            refusals.append({"code": getattr(exc, "code", "FILESYSTEM_ERROR"), "message": str(exc),
+                "request_id": resource_admission.fingerprint(row["request"]),
+                "runtime_evidence": observations.get(row["request"]["target_path"])})
+            raise
+
+    environment.runtime_authority_evidence = evidence
+    resource_admission._reconcile_execution = recover
+    try:
+        if config.get("profile"):
+            return profile_cli(config["arguments"], Path(config_path).with_name("profile.json"))
+        return cli.main(config["arguments"])
+    finally:
+        if refusals:
+            Path(config_path).with_name("recovery-refusals.json").write_text(json.dumps(refusals, indent=2))
+
+
+def admission_fixture(root, count, case, *, repo_count=0):
+    from worktree_controller import lifecycle, session_admission
+    from worktree_controller import resource_admission as resources
+    from worktree_controller.writer_lease import RUNTIME_BINDING_PREFIX, describe_holder
+
+    root.mkdir()
+    env = fixture_environment(root)
+    env["PYTHONPYCACHEPREFIX"] = str(root.parent / "bytecode")
+    old_env, old_pressure = dict(os.environ), resources.pressure
+    os.environ.clear()
+    os.environ.update(env)
+    resources.pressure = lambda: {
+        "available_memory_bytes": 10**12, "observed_at_ns": 1,
+        "psi_avg10": {"cpu": 0.0, "io": 0.0, "memory": 0.0},
+    }
+    processes = []
+    try:
+        repo = fixture(root, 0, policy_text=ADMISSION_POLICY)
+        observed = inventory(repo)
+        store = MetadataStore(observed.common_dir)
+
+        def allocate(task):
+            return lifecycle.acquire(repo, task_key=task, authority_key=task, module="benchmark",
+                role="feature", owner="fixture-owner", branch=f"fixture/{task}",
+                base_ref="HEAD", target=root / task, scope_paths=("fixture.txt",),
+                observe=False)["decision"]
+
+        def bind(allocation, session, run, memory):
+            path = Path(allocation["path"])
+            admitted = resources.admit_execution(repo, target=path, owner="fixture-owner",
+                client_id="fixture", session_id=session, run_id=run, memory_bytes=memory)["decision"]
+            if admitted["code"] != "RESOURCE_AVAILABLE":
+                raise ValueError(f"fixture admission failed: {admitted}")
+            process = subprocess.Popen(["sleep", "600"], cwd=path, start_new_session=True)
+            processes.append(process)
+            session_admission.bind_session(repo, target=path, task_key=allocation["task_key"],
+                authority_key=allocation["task_key"], owner="fixture-owner", client_id="fixture",
+                holder_pid=process.pid, session_id=session, run_id=run)
+            return process, admitted["request_ids"][0]
+
+        guard = allocate("guard")
+        # Acquire's decision omits task identity; keep fixture inputs explicit.
+        guard["task_key"] = "guard"
+        _live, guard_key = bind(guard, "guard", "guard", 1)
+        target = allocate("target")
+        target["task_key"] = "target"
+        old_key = None
+        if case == "identity-recovery":
+            dead, old_key = bind(target, "target", "old", resources.DEFAULT_EXECUTION_MEMORY)
+        else:
+            dead = subprocess.Popen(["sleep", "600"], cwd=root, start_new_session=True)
+            processes.append(dead)
+        holder = describe_holder(dead.pid, client_id="fixture", session_id="history", run_id="old")
+        ledger = resources.AdmissionLedger()
+        history_keys = []
+        with ledger.locked():
+            state = ledger.read()
+            for number in range(count + (case == "memory-recovery")):
+                path = root / f"finished-{number}"
+                path.mkdir()
+                session = f"finished-{number}"
+                memory = resources.DEFAULT_EXECUTION_MEMORY if number == count else 1
+                request = resources.execution_request(None, "host:" + str(os.getuid()), None,
+                    path, client_id="fixture", session_id=session, run_id="old", memory_bytes=memory)
+                info = path.stat()
+                request.update(owner=os.getuid(), path_identity=[info.st_dev, info.st_ino])
+                recorded_holder = asdict(replace(holder, session_id=session))
+                binding = RUNTIME_BINDING_PREFIX + json.dumps({"holder": recorded_holder,
+                    "lease_id": None, "kind": "command"}, sort_keys=True, separators=(",", ":"))
+                key = resources.fingerprint(request)
+                # Synthetic lost-exit rows exist only in this new isolated ledger.
+                state["requests"][key] = {"request": request, "state": "ALLOCATED",
+                    "created_at_ns": 1, "updated_at_ns": 1, "holder": recorded_holder,
+                    "lease_id": None, "runtime_bindings": [binding],
+                    "history": [{"state": "ALLOCATED", "at_ns": 1}]}
+                history_keys.append(key)
+            ledger._save(state)
+        dead.terminate()
+        dead.wait(timeout=5)
+        # Seed large repository history after the live/dead writer setup, outside timing.
+        seed_release_history(root, repo, repo_count)
+        snapshot = store.load()
+        return {"repo": repo, "target": target, "guard": guard,
+            "target_record": snapshot.records[target["allocation_id"]],
+            "history_records": {key: value for key, value in snapshot.records.items()
+                if value.lifecycle == "RELEASED"},
+            "history_proofs": {name: getattr(snapshot, name) for name in (
+                "publication_receipts", "prepared_candidate_receipts", "release_plans", "release_receipts")},
+            "guard_record": snapshot.records[guard["allocation_id"]],
+            "guard_lease": snapshot.writer_leases[guard["allocation_id"]],
+            "guard_row": ledger.read()["requests"][guard_key], "guard_key": guard_key,
+            "old_key": old_key, "history_keys": history_keys, "ledger": ledger,
+            "store": store, "processes": processes, "env": env,
+            "memory": resources.MIN_AVAILABLE_MEMORY + resources.DEFAULT_EXECUTION_MEMORY
+                if case == "memory-recovery" else 10**12}
+    except BaseException:
+        stop_processes(processes)
+        raise
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
+        resources.pressure = old_pressure
+
+
+def stop_processes(processes):
+    for process in processes:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def controller_identity(controller):
+    identity = {"path": str(controller), "version": subprocess.check_output(
+        [str(controller), "--version"], text=True).strip(),
+        "entrypoint_sha256": hashlib.sha256(controller.read_bytes()).hexdigest()}
+    interpreter = controller.read_text().splitlines()[0].removeprefix("#!")
+    if not Path(interpreter).is_absolute() or not Path(interpreter).is_file():
+        raise ValueError("benchmark needs an installed Python entry point with an absolute shebang")
+    probe = """
+import hashlib, json
+from pathlib import Path
+import worktree_controller
+root = Path(worktree_controller.__file__).parent
+files = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+         for p in sorted(root.rglob('*')) if p.is_file() and p.suffix in {'.py', '.json'}}
+print(json.dumps({'package_path': str(root), 'package_sha256':
+    hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()}))
+"""
+    identity.update(json.loads(subprocess.check_output([interpreter, "-c", probe], text=True)))
+    return identity
+
+
+WRITER_CASES = {
+    "active-write": ("GRANTED", "WRITE_ALLOWED"),
+    "handoff-read": ("CONTINUATION_GRANTED", "HOST_HANDOFF_CONTINUATION"),
+    "frozen-write": ("REFUSED", "BLOCK_FEATURE_WRITE_LIFECYCLE"),
+    "foreign-session": ("REFUSED", "WRITER_LEASE_MISMATCH"),
+}
+
+
+def writer_controller_identity(controller):
+    identity = controller_identity(controller)
+    payload = json.loads(subprocess.check_output([str(controller), "capabilities", "--json"], text=True))
+    capabilities = payload["decision"]
+    if payload["errors"] or capabilities.get("host_handoff_continuation_version", 0) < 2:
+        raise ValueError("writer-check requires host_handoff_continuation_version >= 2")
+    identity["writer_contract"] = {key: capabilities[key] for key in (
+        "contract_version", "storage_layout_version", "host_handoff_continuation_version")}
+    return identity
+
+
+def writer_metadata(state):
+    roots = {"repository": state["store"].root, "host": Path(state["env"]["XDG_STATE_HOME"])}
+    return {f"{label}/{path.relative_to(root)}": hashlib.sha256(path.read_bytes()).hexdigest()
+            for label, root in roots.items() for path in sorted(root.rglob("*.json"))}
+
+
+@contextmanager
+def writer_fixture(root, count):
+    from worktree_controller import lifecycle, resource_admission, writer_lease
+
+    root.mkdir()
+    env = fixture_environment(root)
+    env["PYTHONPYCACHEPREFIX"] = str(root.parent / "bytecode")
+    old_env, old_pressure = dict(os.environ), resource_admission.pressure
+    os.environ.clear()
+    os.environ.update(env)
+    resource_admission.pressure = lambda: {
+        "available_memory_bytes": 10**12, "observed_at_ns": 1,
+        "psi_avg10": {"cpu": 0.0, "io": 0.0, "memory": 0.0},
+    }
+    targets = []
+    try:
+        repo = fixture(root, 0, policy_text=ADMISSION_POLICY)
+        store = MetadataStore(inventory(repo).common_dir)
+        holder = writer_lease.describe_holder(os.getpid(), client_id="benchmark",
+            session_id="writer-check", run_id="benchmark")
+        for name in ("active", "frozen"):
+            target = lifecycle.acquire(repo, task_key=name, authority_key=name, module="benchmark",
+                role="feature", owner="fixture-owner", branch=f"fixture/{name}", base_ref="HEAD",
+                target=root / name, scope_paths=("fixture.txt",), observe=False)["decision"]
+            targets.append(target)
+            writer_lease.acquire_writer_lease(repo, target=Path(target["path"]),
+                client_id=holder.client_id, holder_pid=holder.pid, session_id=holder.session_id,
+                run_id=holder.run_id, holder=holder, ttl_seconds=3600)
+        frozen = targets[1]
+        lifecycle.handoff(repo, target=Path(frozen["path"]), expected_record_version=1,
+            kind="integration-ready", commit=frozen["head"], finalizer_record_id="fixture-finalizer")
+        seed_release_history(root, repo, count)
+        snapshot = store.load()
+        state = {"repo": repo, "store": store, "env": env, "holder": holder, "targets": targets,
+            "records": {t["allocation_id"]: snapshot.records[t["allocation_id"]] for t in targets},
+            "leases": {t["allocation_id"]: snapshot.writer_leases[t["allocation_id"]] for t in targets}}
+        state["metadata"] = writer_metadata(state)
+        seed_json(root / "metadata-before.json", state["metadata"])
+        seed_json(root / "holder.json", asdict(holder))
+        yield state
+    finally:
+        try:
+            closed = []
+            for target in reversed(targets):
+                path = Path(target["path"])
+                record = store.load().records[target["allocation_id"]]
+                lease = store.load().writer_leases.get(record.allocation_id)
+                if lease is not None:
+                    writer_lease.release_writer_lease(repo, target=path, holder=holder, lease_id=lease.lease_id)
+                if record.lifecycle == "HANDOFF_READY":
+                    lifecycle.reopen(repo, target=path, expected_record_version=record.record_version,
+                        owner="fixture-owner")
+                    record = store.load().records[record.allocation_id]
+                completed = lifecycle.complete_no_change(repo, target=path,
+                    expected_record_version=record.record_version, owner="fixture-owner")["decision"]
+                released = lifecycle.release(repo, target=path, expected_record_version=completed["record_version"],
+                    owner_release="fixture-owner")["decision"]
+                if released["code"] != "RELEASED" or path.exists():
+                    raise ValueError("writer fixture checkout was not released")
+                closed.append({"allocation_id": record.allocation_id,
+                    "completion_receipt_id": completed["completion_receipt_id"],
+                    "release_receipt_id": released["release_receipt_id"]})
+            if targets:
+                if store.load().writer_leases or len(inventory(repo).worktrees) != 1:
+                    raise ValueError("writer fixture left leases or linked checkouts")
+                seed_json(root / "fixture-cleanup.json", {"status": "PASS", "closed": closed,
+                    "writer_leases": 0, "linked_checkouts": 0})
+        finally:
+            os.environ.clear()
+            os.environ.update(old_env)
+            resource_admission.pressure = old_pressure
+
+
+def verify_writer_check(state, case, payload, code):
+    admission, decision_code = WRITER_CASES[case]
+    decision = payload.get("decision", {})
+    expected_exit = 2 if admission == "REFUSED" else 0
+    target = state["targets"][0 if case == "active-write" else 1]
+    record = state["records"][target["allocation_id"]]
+    lifecycle = "ACTIVE" if case == "active-write" else "HANDOFF_READY"
+    request = {"authority_key": record.authority_key, "operation": "feature-write",
+        "owner": record.owner, "path": target["path"], "task_key": record.task_key}
+    if (payload.get("command") != "writer-session" or payload.get("errors") or code != expected_exit
+            or decision.get("admission") != admission or decision.get("code") != decision_code
+            or record.lifecycle != lifecycle
+            or (case != "foreign-session" and decision.get("allocation_id") != target["allocation_id"])
+            or (case in {"active-write", "handoff-read"} and decision.get("lifecycle") != lifecycle)
+            or (case in {"active-write", "frozen-write"} and decision.get("request") != request)):
+        raise ValueError(f"writer check returned unexpected authority for {case}: {payload}")
+    if writer_metadata(state) != state["metadata"]:
+        raise ValueError("writer check changed repository or host metadata")
+    if (Path(target["path"]) / "fixture.txt").exists():
+        raise ValueError("writer check created its write target")
+    return {"admission": admission, "code": decision_code, "exit_code": code,
+        "allocation_id": target["allocation_id"], "lease_id": state["leases"][target["allocation_id"]].lease_id,
+        "lifecycle": lifecycle, "holder": asdict(state["holder"]), "scope_paths": list(record.scope_paths),
+        "metadata_unchanged": True, "write_target_absent": True}
+
+
+def measure_writer_check(controller, state, case, action, output, timeout, *, profile=False):
+    output.parent.mkdir(parents=True, exist_ok=True)
+    target = state["targets"][0 if case == "active-write" else 1]
+    path, holder = Path(target["path"]), state["holder"]
+    env = dict(state["env"])
+    session = "foreign-session" if case == "foreign-session" else holder.session_id
+    if action == "check":
+        arguments = ["check", holder.client_id, str(path), str(holder.pid),
+            "--session-id", session, "--run-id", holder.run_id]
+    elif action == "host-check":
+        lease = state["leases"][target["allocation_id"]]
+        context = {"holder": {k: getattr(holder, k) for k in ("pid", "boot_id", "start_ticks")},
+            "client_id": holder.client_id, "session_id": session, "run_id": holder.run_id,
+            "repository_path": str(state["repo"]), "worktree_path": str(path),
+            "allocation_id": target["allocation_id"], "lease_id": lease.lease_id}
+        env.update(CONTROLLER_WRITER_MODE="host-managed-v2", CONTROLLER_WRITER_CONTEXT=json.dumps(context))
+        arguments = ["host-check", str(path)]
+    else:
+        raise ValueError("writer action must be check or host-check")
+    arguments += ["--access", "write" if case.endswith("write") else "read"]
+    if case.endswith("write"):
+        arguments += ["--target", str(path / "fixture.txt")]
+    command = [str(controller), "writer-session", *arguments]
+    if profile:
+        interpreter = controller.read_text().splitlines()[0].removeprefix("#!")
+        if not Path(interpreter).is_absolute() or not Path(interpreter).is_file():
+            raise ValueError("writer profile needs an installed Python entry point with an absolute shebang")
+        config = output.with_suffix(".worker.json")
+        seed_json(config, {"arguments": ["writer-session", *arguments],
+            "version": subprocess.check_output([str(controller), "--version"], text=True, env=env).strip(),
+            "output": str(output.with_suffix(".profile.json"))})
+        command = [interpreter, str(Path(__file__).resolve()), "--writer-profile-worker", str(config)]
+    code, payload, measured = timed_process(command,
+        output.with_suffix(".rss"), timeout, env=env)
+    seed_json(output, {"arguments": arguments, "exit_code": code, "payload": payload,
+        "stderr": measured["stderr"]})
+    if measured.pop("stderr"):
+        raise ValueError("writer check wrote unexpected stderr; see retained call output")
+    proof = verify_writer_check(state, case, payload, code)
+    diagnostic = {"profile": json.loads(output.with_suffix(".profile.json").read_text())} if profile else {}
+    normalized = {key: value for key, value in payload.items() if key != "tool_version"}
+    return {**measured, **diagnostic, "verification": proof, "output": str(output),
+        "payload_sha256": hashlib.sha256(json.dumps(normalized, sort_keys=True).encode()).hexdigest()}
+
+
+def run_writer_checks(controllers, arguments, root, results):
+    identities = {label: writer_controller_identity(binary) for label, binary in controllers.items()}
+    results.update(controllers=identities, status="RUNNING", fixture_cleanup=[],
+        benchmark_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        measurement_note="Fresh installed writer-session CLI processes and a real live parent holder. "
+            "Synthetic release history, lease/handoff setup, metadata hashes, authority verification and "
+            "guarded fixture cleanup are outside timings. First calls are not storage-cold. "
+            "No memory or process-visibility probes are replaced in the measured CLI. "
+            "Optional profile diagnostics use extra fresh processes and are excluded from medians.")
+    results["namespaces"] = {name: os.readlink(f"/proc/self/ns/{name}") for name in ("pid", "mnt", "user")}
+    (root / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+    for count in dict.fromkeys(arguments.sizes):
+        fixture_root = root / f"writer-{count}"
+        with writer_fixture(fixture_root, count) as state:
+            for case in WRITER_CASES:
+                for action in ("check", "host-check"):
+                    rows = {label: {"label": label, "history_size": count, "command": action,
+                        "case": case, "first_call": None, "samples": []} for label in controllers}
+                    labels = list(controllers)
+                    expected_payload = None
+                    for sample in range(arguments.repeats + 1):
+                        for label in (labels if sample % 2 == 0 else list(reversed(labels))):
+                            output = fixture_root / "calls" / f"{labels.index(label)}-{case}-{action}-{sample}.json"
+                            value = measure_writer_check(controllers[label], state, case, action, output, arguments.timeout)
+                            if expected_payload is None:
+                                expected_payload = value["payload_sha256"]
+                            elif value["payload_sha256"] != expected_payload:
+                                raise ValueError(f"writer CLI output changed for {label}: {case}, {action}, history={count}")
+                            if sample == 0:
+                                rows[label]["first_call"] = value
+                            else:
+                                rows[label]["samples"].append(value)
+                    for label, row in rows.items():
+                        if arguments.profile:
+                            output = fixture_root / "calls" / f"{labels.index(label)}-{case}-{action}-profile.json"
+                            row["profile_diagnostic"] = measure_writer_check(controllers[label], state,
+                                case, action, output, arguments.timeout, profile=True)
+                            if row["profile_diagnostic"]["payload_sha256"] != expected_payload:
+                                raise ValueError(f"writer profile output changed for {label}: {case}, {action}, history={count}")
+                        row["median_seconds"] = statistics.median(s["seconds"] for s in row["samples"])
+                        row["median_peak_rss_kib"] = statistics.median(s["peak_rss_kib"] for s in row["samples"])
+                        results["measurements"].append(row)
+                        print(json.dumps(row, sort_keys=True), flush=True)
+                    (root / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+        cleanup = json.loads((fixture_root / "fixture-cleanup.json").read_text())
+        results["fixture_cleanup"].append({"history_size": count, **cleanup})
+        (root / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+    if identities != {label: writer_controller_identity(binary) for label, binary in controllers.items()}:
+        raise ValueError("selected Controller entry point or installed package changed during the run")
+    results["status"] = "PASS"
+    (root / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+
+
+def verify_admission(fixture_state, case, payload, code):
+    if (fixture_state["repo"].parent / "recovery-refusals.json").exists():
+        raise ValueError("execution recovery refused; this is not a successful timing")
+    snapshot = fixture_state["store"].load()
+    rows = fixture_state["ledger"].read()["requests"]
+    guard = fixture_state["guard"]["allocation_id"]
+    if (snapshot.records[guard] != fixture_state["guard_record"]
+            or snapshot.writer_leases.get(guard) != fixture_state["guard_lease"]
+            or rows[fixture_state["guard_key"]] != fixture_state["guard_row"]
+            or snapshot.publication_lease is not None or snapshot.integration_intents):
+        raise ValueError("admission changed live writer or publication authority")
+    if ({key: value for key, value in snapshot.records.items() if value.lifecycle == "RELEASED"}
+            != fixture_state["history_records"] or any(getattr(snapshot, name) != before
+                for name, before in fixture_state["history_proofs"].items())):
+        raise ValueError("admission changed closed repository history")
+    history = [rows[key]["state"] for key in fixture_state["history_keys"]]
+    if any(state not in {"ALLOCATED", "RELEASED"} for state in history):
+        raise ValueError("finished history has an unexpected state")
+    target = snapshot.records[fixture_state["target"]["allocation_id"]]
+    if target.scope_paths != fixture_state.get("target_scope", ("fixture.txt",)):
+        raise ValueError("admission changed the scope fence")
+    if case == "identity-recovery":
+        if (code != 2 or [error["code"] for error in payload["errors"]] != ["EXECUTION_AUTHORITY_CHANGED"]
+                or target.lifecycle != "RETAINED" or target.external_bindings
+                or target.allocation_id in snapshot.writer_leases
+                or rows[fixture_state["old_key"]]["state"] != "RELEASED"):
+            raise ValueError(f"old-run recovery did not retain the task behind its resume guard: "
+                f"exit={code}, errors={payload['errors']}, lifecycle={target.lifecycle}, "
+                f"bindings={len(target.external_bindings)}, "
+                f"lease={target.allocation_id in snapshot.writer_leases}, "
+                f"old_state={rows[fixture_state['old_key']]['state']}")
+    elif code or payload["errors"] or payload["decision"]["code"] != "RESOURCE_AVAILABLE":
+        raise ValueError(f"admission did not succeed: {payload}")
+    if case != "available" and any(state != "RELEASED" for state in history):
+        raise ValueError("recovery left provably finished reservations")
+    if payload["warnings"]:
+        raise ValueError("admission returned warnings")
+    return {"live_writer_unchanged": True, "scope_unchanged": True,
+        "publication_unchanged": True, "repository_history_unchanged": True,
+        "finished_allocated": history.count("ALLOCATED"),
+        "finished_released": history.count("RELEASED"), "resume_guard": case == "identity-recovery"}
+
+
+def measure_admission(controller, version, root, count, case, timeout, *,
+                      repo_count=0, mode="execution-admit", profile=False):
+    from worktree_controller.store import decode_cache
+
+    # Only fixture setup/postchecks share decodes; the timed installed worker is a fresh process.
+    with decode_cache():
+        return _measure_admission(controller, version, root, count, case, timeout,
+            repo_count=repo_count, mode=mode, profile=profile)
+
+
+def _measure_admission(controller, version, root, count, case, timeout, *,
+                       repo_count, mode, profile):
+    from worktree_controller import lifecycle
+    from worktree_controller import resource_admission as resources
+
+    interpreter = controller.read_text().splitlines()[0].removeprefix("#!")
+    if not Path(interpreter).is_absolute() or not Path(interpreter).is_file():
+        raise ValueError("execution-admit needs an installed Python entry point with an absolute shebang")
+    fixture_state = admission_fixture(root, count, case, repo_count=repo_count)
+    try:
+        arguments = ["execution-admit", "--repo", str(fixture_state["repo"]),
+            "--path", fixture_state["target"]["path"], "--owner", "fixture-owner",
+            "--client-id", "fixture", "--session-id", "target", "--run-id", "new", "--json"]
+        if mode == "session-admit":
+            arguments = [mode, "--repo", str(fixture_state["repo"]),
+                "--task-key", "new-session", "--authority-key", "new-session", "--module", "benchmark",
+                "--owner", "fixture-owner", "--branch", "fixture/new-session", "--base-ref", "HEAD",
+                "--client-id", "fixture", "--session-id", "target", "--run-id", "new", "--json"]
+            if case == "memory-recovery":
+                # Checkout plan must pass before execution admission reaches its memory wait.
+                fixture_state["memory"] += count + 1
+        config = root / "worker.json"
+        config.write_text(json.dumps({"arguments": arguments, "memory": fixture_state["memory"],
+            "version": version, "profile": profile}))
+        command = [interpreter, str(Path(__file__).resolve()), "--admission-worker", str(config)]
+        code, payload, measured = timed_process(command, root / "rss.txt", timeout, env=fixture_state["env"])
+        seed_json(root / "first-result.json", {"exit_code": code, "payload": payload, **measured})
+        initial_profile = {"profile": json.loads((root / "profile.json").read_text())} if profile else {}
+        # Untimed recovery/idempotence checks must not overwrite the initial call's profile.
+        config.write_text(json.dumps({"arguments": arguments, "memory": fixture_state["memory"],
+            "version": version}))
+        if measured.pop("stderr"):
+            raise ValueError("admission worker wrote unexpected stderr")
+        if mode == "session-admit":
+            if code or payload["errors"] or payload["warnings"] or payload["decision"]["code"] != "SESSION_ADMITTED":
+                raise ValueError(f"session admission did not succeed: {payload}")
+            allocation = payload["decision"]["allocation"]
+            path = Path(allocation["path"])
+            if not path.is_relative_to(root):
+                raise ValueError("session checkout escaped its isolated fixture")
+            original = fixture_state["target_record"]
+            snapshot = fixture_state["store"].load()
+            if snapshot.records[original.allocation_id] != original:
+                raise ValueError("session admission changed an existing target")
+            fixture_state["target"] = allocation
+            fixture_state["target_scope"] = ()
+            record = snapshot.records[allocation["allocation_id"]]
+            if (record.task_key, record.authority_key, record.owner, record.role, record.lifecycle) != (
+                    "new-session", "new-session", "fixture-owner", "feature", "ACTIVE"):
+                raise ValueError("session allocation has the wrong authority")
+            # A repeated session start must fall back without creating another allocation/budget.
+            before = snapshot, fixture_state["ledger"].read()
+            config.write_text(json.dumps({"arguments": arguments, "memory": fixture_state["memory"],
+                "version": version}))
+            repeat_code, repeated, extra = timed_process(command, root / "rss-session-repeat.txt", timeout,
+                env=fixture_state["env"])
+            after = fixture_state["store"].load(), fixture_state["ledger"].read()
+            if (repeat_code or repeated["errors"] or repeated["warnings"] or extra["stderr"]
+                    or repeated["decision"].get("code") != "SESSION_ADMISSION_FALLBACK"
+                    or repeated["decision"].get("changed") is not False
+                    or repeated["decision"].get("allocation_id") != allocation["allocation_id"]
+                    or before != after):
+                raise ValueError("repeated session start changed its allocation or budgets")
+            payload = {**payload, "decision": payload["decision"]["execution"]}
+            arguments = ["execution-admit", "--repo", str(fixture_state["repo"]),
+                "--path", str(path), "--owner", "fixture-owner", "--client-id", "fixture",
+                "--session-id", "target", "--run-id", "new", "--json"]
+            config.write_text(json.dumps({"arguments": arguments, "memory": fixture_state["memory"],
+                "version": version}))
+        try:
+            proof = verify_admission(fixture_state, case, payload, code)
+        except ValueError:
+            config.write_text(json.dumps({"arguments": ["admission-queue", "--repo", str(fixture_state["repo"]),
+                "--json"], "memory": fixture_state["memory"], "version": version}))
+            inspected_code, inspected, _ = timed_process(command, root / "rss-inspect.txt", timeout,
+                env=fixture_state["env"])
+            seed_json(root / "refusal-inspect.json", {"exit_code": inspected_code, "payload": inspected})
+            raise
+        if case == "identity-recovery":
+            record = fixture_state["store"].load().records[fixture_state["target"]["allocation_id"]]
+            lifecycle.resume(fixture_state["repo"], target=Path(fixture_state["target"]["path"]),
+                expected_record_version=record.record_version, owner="fixture-owner")
+            code, payload, _ = timed_process(command, root / "rss-check.txt", timeout, env=fixture_state["env"])
+            verify_admission(fixture_state, "available", payload, code)
+        key = payload["decision"]["request_ids"][0]
+        rows = fixture_state["ledger"].read()["requests"]
+        before = rows[key]
+        expected_memory = resources.DEFAULT_EXECUTION_MEMORY + sum(
+            rows[history_key]["request"]["memory_bytes"]
+            for history_key in fixture_state["history_keys"]
+            if rows[history_key]["state"] == "ALLOCATED")
+        if before["state"] != "RESERVED" or payload["decision"]["outstanding_memory_bytes"] != expected_memory:
+            raise ValueError("admission granted an incorrect memory budget")
+        code, repeated, _ = timed_process(command, root / "rss-check.txt", timeout, env=fixture_state["env"])
+        verify_admission(fixture_state, "available", repeated, code)
+        rows = fixture_state["ledger"].read()["requests"]
+        if (repeated["decision"]["request_ids"] != [key] or rows[key]["state"] != "RESERVED"
+                or rows[key]["history"] != before["history"]
+                or repeated["decision"]["outstanding_memory_bytes"] != expected_memory):
+            raise ValueError("repeated admission changed request identity or double-counted its budget")
+        session_proof = {}
+        if mode == "session-admit":
+            from worktree_controller import session_admission
+            from worktree_controller.writer_lease import describe_holder, runtime_binding
+
+            target = fixture_state["target"]
+            process = subprocess.Popen(["sleep", "600"], cwd=target["path"], start_new_session=True)
+            fixture_state["processes"].append(process)
+            binding_arguments = ["session-bind", "--repo", str(fixture_state["repo"]),
+                "--path", target["path"], "--task-key", "new-session", "--authority-key", "new-session",
+                "--owner", "fixture-owner", "--client-id", "fixture", "--session-id", "target",
+                "--run-id", "new", "--holder-pid", str(process.pid), "--json"]
+            config.write_text(json.dumps({"arguments": binding_arguments, "memory": fixture_state["memory"],
+                "version": version}))
+            before_binding = fixture_state["ledger"].read()["requests"]
+            bind_code, bound, extra = timed_process(command, root / "rss-bind.txt", timeout, env=fixture_state["env"])
+            snapshot = fixture_state["store"].load()
+            holder = describe_holder(process.pid, client_id="fixture", session_id="target", run_id="new")
+            lease = snapshot.writer_leases[target["allocation_id"]]
+            record = snapshot.records[target["allocation_id"]]
+            expected_binding = session_admission.runtime_binding_value(asdict(holder), lease.lease_id, "agent")
+            bound_rows = fixture_state["ledger"].read()["requests"]
+            bound_row = bound_rows[key]
+            if (bind_code or bound["errors"] or bound["warnings"] or extra["stderr"]
+                    or bound["decision"]["code"] != "SESSION_BOUND" or bound["decision"]["write_guard"] != "WRITE_ALLOWED"
+                    or lease.holder != holder or record.external_bindings != (expected_binding,)
+                    or runtime_binding(expected_binding) != (holder, lease.lease_id)
+                    or bound_row["state"] != "ALLOCATED" or bound_row["lease_id"] != lease.lease_id
+                    or bound_row["holder"] != asdict(holder)
+                    or bound_row["request"] != before_binding[key]["request"]
+                    or set(bound_rows) != set(before_binding)
+                    or any(bound_rows[k] != row for k, row in before_binding.items() if k != key)):
+                raise ValueError("session bind did not grant its exact live holder and lease")
+            verify_admission(fixture_state, case, payload, code)
+            session_proof = {"session_fallback_unchanged": True, "live_holder_bound": True,
+                "writer_lease_verified": True, "write_guard_allowed": True, "bind_request_unchanged": True}
+        return {**measured, **initial_profile,
+            "verification": {**proof, **session_proof, "request_idempotent": True,
+                "budget_verified": True, "post_resume_available": case == "identity-recovery"}}
+    finally:
+        stop_processes(fixture_state["processes"])
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--work-dir", type=Path, required=True, help="new output directory; never reused")
+    parser.add_argument("--controller", action="append", required=True, metavar="LABEL=ABSOLUTE_PATH")
+    parser.add_argument("--sizes", type=int, nargs="+")
+    parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument("--timeout", type=float, default=60)
+    parser.add_argument("--mode", choices=("queries", "execution-admit", "session-admit", "writer-check"), default="queries")
+    parser.add_argument("--repo-sizes", type=int, nargs="+", default=[0],
+        help="closed repository releases, independently of --sizes lost-exit host history")
+    parser.add_argument("--profile", action="store_true", help="extra diagnostic calls excluded from medians")
+    parser.add_argument("--admission-cases", choices=ADMISSION_CASES, nargs="+")
+    arguments = parser.parse_args()
+    if arguments.sizes is None:
+        arguments.sizes = ([0, 100, 1000, 5000] if arguments.mode == "queries" else
+            [0, 1000, 5000] if arguments.mode == "writer-check" else [0, 100, 1000])
+    if arguments.admission_cases is None:
+        arguments.admission_cases = ADMISSION_CASES[:2] if arguments.mode == "session-admit" else ADMISSION_CASES
+    if arguments.mode == "session-admit" and "identity-recovery" in arguments.admission_cases:
+        parser.error("session-admit creates new allocations; use execution-admit for identity-recovery")
+    if arguments.mode in {"queries", "writer-check"} and arguments.repo_sizes != [0]:
+        parser.error("--repo-sizes requires an admission mode")
+    if arguments.mode == "queries" and arguments.profile:
+        parser.error("--profile requires an admission or writer-check mode")
+    root = arguments.work_dir.absolute()
+    if root.exists() or root.is_symlink():
+        parser.error("--work-dir must not exist; existing outputs are preserved")
+    if sys.platform != "linux" or not Path("/usr/bin/time").is_file():
+        parser.error("benchmark requires Linux and GNU /usr/bin/time")
+    if (arguments.repeats < 1 or arguments.timeout <= 0
+            or any(n < 0 for n in (*arguments.sizes, *arguments.repo_sizes))):
+        parser.error("invalid sizes, repeats or timeout")
+    controllers = {}
+    for specification in arguments.controller:
+        label, separator, binary = specification.partition("=")
+        path = Path(binary)
+        if (not separator or not label or label in controllers or not path.is_absolute()
+                or not path.is_file() or not os.access(path, os.X_OK)):
+            parser.error("controllers need unique labels and existing absolute executable paths")
+        controllers[label] = path
+    root.mkdir(parents=True)
+    environment = fixture_environment(root)
+    os.environ.clear()
+    os.environ.update(environment)
+    results = {"schema_version": 1, "created_at": now_iso(), "python": platform.python_version(),
+               "platform": platform.platform(), "machine": platform.machine(),
+               "cache_note": "Every invocation is a fresh process. First calls follow fixture creation; "
+                             "repeats use warm OS caches and task-local bytecode caches. "
+                             "Storage-cold caches are not forced.",
+               "controllers": {}, "measurements": []}
+    for label, binary in controllers.items():
+        results["controllers"][label] = {"path": str(binary), "version": subprocess.check_output(
+            [str(binary), "--version"], text=True).strip()}
+    if arguments.mode == "writer-check":
+        run_writer_checks(controllers, arguments, root, results)
+        return
+    if arguments.mode in {"execution-admit", "session-admit"}:
+        results["controllers"] = {label: controller_identity(binary) for label, binary in controllers.items()}
+        results["status"] = "RUNNING"
+        results["namespaces"] = {name: os.readlink(f"/proc/self/ns/{name}") for name in ("pid", "mnt", "user")}
+        results["measurement_note"] = ("Fresh installed Python CLI.main processes with fixed memory/PSI probes. "
+            "Each measured invocation starts with a new fixture and lost-exit host reservations; "
+            "setup, postchecks, idempotent replay and guarded resume are outside the timing. "
+            "Session fallback and live-holder binding checks are also untimed. "
+            "Identity recovery measures its expected resume refusal, not a new writer grant. "
+            "Optional profile diagnostics use extra fixtures and are excluded from medians.")
+        (root / "results.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+        for repo_size in dict.fromkeys(arguments.repo_sizes):
+            for size in dict.fromkeys(arguments.sizes):
+                for case in dict.fromkeys(arguments.admission_cases):
+                    rows = {label: {"label": label, "history_size": size, "repo_history_size": repo_size,
+                        "command": arguments.mode, "case": case, "first_call": None, "samples": []}
+                        for label in controllers}
+                    for sample in range(arguments.repeats + 1):
+                        labels = list(controllers)
+                        for label in labels if sample % 2 == 0 else list(reversed(labels)):
+                            sample_root = root / f"admit-{len(results['measurements'])}-{sample}-{labels.index(label)}"
+                            value = measure_admission(controllers[label], results["controllers"][label]["version"],
+                                sample_root, size, case, arguments.timeout, repo_count=repo_size, mode=arguments.mode)
+                            if sample == 0:
+                                rows[label]["first_call"] = value
+                            else:
+                                rows[label]["samples"].append(value)
+                    for label, row in rows.items():
+                        if arguments.profile:
+                            profile_root = root / f"profile-{len(results['measurements'])}"
+                            row["profile_diagnostic"] = measure_admission(controllers[label],
+                                results["controllers"][label]["version"], profile_root, size, case,
+                                arguments.timeout, repo_count=repo_size, mode=arguments.mode, profile=True)
+                        row["median_seconds"] = statistics.median(s["seconds"] for s in row["samples"])
+                        row["median_peak_rss_kib"] = statistics.median(s["peak_rss_kib"] for s in row["samples"])
+                        results["measurements"].append(row)
+                        print(json.dumps(row, sort_keys=True), flush=True)
+                    (root / "results.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+        if results["controllers"] != {label: controller_identity(binary) for label, binary in controllers.items()}:
+            raise ValueError("selected Controller entry point or installed package changed during the run")
+        results["status"] = "PASS"
+        (root / "results.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+        return
+    for size in dict.fromkeys(arguments.sizes):
+        repo = fixture(root, size)
+        for command in ("status", "doctor", "lifecycle-history"):
+            rows = {label: {"label": label, "history_size": size, "command": command,
+                           "first_call": None, "samples": []} for label in controllers}
+            labels = list(controllers)
+            expected_payload = None
+            for sample in range(arguments.repeats + 1):
+                # Alternate order so one version does not always benefit from the other's reads.
+                order = labels if sample % 2 == 0 else list(reversed(labels))
+                for label in order:
+                    measurement = measure(controllers[label], command, repo, root / "rss.txt", arguments.timeout)
+                    if expected_payload is None:
+                        expected_payload = measurement["payload_sha256"]
+                    elif measurement["payload_sha256"] != expected_payload:
+                        raise ValueError(f"CLI output changed for {label}: {command}, history={size}")
+                    if sample == 0:
+                        rows[label]["first_call"] = measurement
+                    else:
+                        rows[label]["samples"].append(measurement)
+            for row in rows.values():
+                row["median_seconds"] = statistics.median(s["seconds"] for s in row["samples"])
+                row["median_peak_rss_kib"] = statistics.median(s["peak_rss_kib"] for s in row["samples"])
+                row["stdout_bytes"] = [s["stdout_bytes"] for s in row["samples"]]
+                results["measurements"].append(row)
+                print(json.dumps(row, sort_keys=True), flush=True)
+            (root / "results.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["--admission-worker"]:
+        raise SystemExit(admission_worker(sys.argv[2]))
+    if sys.argv[1:2] == ["--writer-profile-worker"]:
+        raise SystemExit(writer_profile_worker(sys.argv[2]))
+    main()

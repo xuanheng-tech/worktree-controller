@@ -1,0 +1,11 @@
+# Defaults for Agent Workspace's controller_integrate tool (`just integrate`).
+# Command-line options override these; unknown keys are refused.
+
+[tests]
+project = "."
+command = "bash scripts/check-shards"
+
+[canonical]
+# Ask `canonical-refresh` to fast-forward the canonical checkout after publication;
+# it only acts on an ACTIVE, clean, unused canonical and reports why not otherwise.
+refresh_after_publish = true

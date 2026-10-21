@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Version-pinning entry point for the Controller and its session-end command.
+
+Installed as ``~/.local/bin/worktree-controller`` and
+``~/.local/bin/worktree-session-end``. It resolves the active runtime once, to
+a concrete versioned path, and execs it. One invocation therefore runs entirely on
+one Controller version: an activation that lands mid-command cannot split it, and a
+command already running finishes on the version it started with.
+
+This is a launcher, not an authority. It holds no lock, keeps no state, starts no
+daemon, and makes no admission decision. When no active pointer is installed it
+falls back to the ordinary tool entry point, so it is safe to deploy before any
+version has been staged.
+"""
+
+import os
+import sys
+from pathlib import Path
+
+ACTIVE = Path.home() / ".local/share/worktree-controller/active"
+FALLBACK = Path.home() / ".local/share/uv/tools/worktree-controller/bin"
+
+
+def resolve(name: str) -> Path:
+    if ACTIVE.exists() or ACTIVE.is_symlink():
+        # resolve() collapses the pointer to one real directory before anything is
+        # executed, so a concurrent repoint cannot be observed by this process.
+        candidate = ACTIVE.resolve(strict=True) / "bin" / name
+        if os.access(candidate, os.X_OK):
+            return candidate
+        raise OSError("active Controller runtime does not contain the requested entry point")
+    return FALLBACK / name
+
+
+def main(argv: list[str]) -> int:
+    name = Path(argv[0]).name
+    if name not in {"worktree-controller", "worktree-session", "worktree-session-end"}:
+        print(f"unsupported Controller entry point: {name}", file=sys.stderr)
+        return 2
+    try:
+        target = resolve(name)
+    except OSError as exc:
+        print(f"Controller runtime is unavailable: {exc}", file=sys.stderr)
+        return 127
+    if not os.access(target, os.X_OK):
+        print(f"Controller runtime is unavailable: {target}", file=sys.stderr)
+        return 127
+    os.execv(str(target), [str(target), *argv[1:]])
+    return 127
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

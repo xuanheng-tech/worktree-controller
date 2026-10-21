@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Run the test suite in parallel, isolated shards from this checkout, plus ruff.
+#
+# Each shard gets its own HOME and basetemp and the same fixture environment as
+# scripts/check-project; shards are balanced by collected test count. This is the
+# fast developer/integration gate. scripts/check-project remains the full release
+# gate (build, installed smoke and serial tests).
+#
+# Usage: scripts/check-shards [SHARDS]   (default 4; outputs under $SHARD_ROOT or /tmp)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+shards="${1:-4}"
+if [[ ! "$shards" =~ ^[1-9][0-9]*$ ]] || (( ${#shards} > 2 || shards > 64 )); then
+  echo 'SHARDS must be an integer between 1 and 64' >&2
+  exit 2
+fi
+out="$(mktemp -d "${SHARD_ROOT:-/tmp}/wcs.XXXXXX")"
+pids=()
+finish() {
+  local status=$?
+  trap - EXIT INT TERM
+  for pid in "${pids[@]}"; do
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  done
+  if (( ${#pids[@]} > 0 )); then
+    sleep 1
+    for pid in "${pids[@]}"; do kill -KILL -- "-$pid" 2>/dev/null || true; done
+  fi
+  for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+  if (( status == 0 )); then
+    chmod -R u+rwX "$out" 2>/dev/null || true
+    rm -rf -- "$out"
+  else
+    echo "Shard checks failed; outputs retained at $out" >&2
+  fi
+  exit "$status"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+uvc="$(uv cache dir)"
+fixture=(env -i PATH="$PATH" LANG=C.UTF-8 PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 UV_OFFLINE=1 UV_CACHE_DIR="$uvc" GIT_CONFIG_NOSYSTEM=1
+  GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 NO_PROXY='*' no_proxy='*')
+mkdir -p "$out/collection/home"
+# The shards run .venv directly; a stale environment would turn missing locked
+# dependencies into test failures (or hide removed ones). The project itself is
+# imported from src, so only its locked dependencies are compared.
+if ! "${fixture[@]}" HOME="$out/collection/home" uv sync --locked --check --no-install-project \
+  --inexact > "$out/environment.log" 2>&1; then
+  cat "$out/environment.log" >&2
+  echo 'The checkout .venv does not match uv.lock; run: uv sync --locked' >&2
+  exit 1
+fi
+if ! "${fixture[@]}" HOME="$out/collection/home" .venv/bin/python -m pytest -q \
+  --collect-only -p no:cacheprovider tests > "$out/collection.log" 2>&1; then
+  cat "$out/collection.log" >&2
+  exit 1
+fi
+grep '::' "$out/collection.log" | cut -d: -f1 | sort | uniq -c | sort -rn > "$out/counts"
+.venv/bin/python - "$out/counts" "$out" "$shards" <<'PY'
+import sys
+count = int(sys.argv[3])
+loads, groups = [0] * count, [[] for _ in range(count)]
+for line in open(sys.argv[1]):
+    tests, name = line.split()
+    i = loads.index(min(loads)); groups[i].append(name); loads[i] += int(tests)
+for i, names in enumerate(groups):
+    open(f"{sys.argv[2]}/shard{i}", "w").write("\n".join(names))
+PY
+for ((i = 0; i < shards; i++)); do
+  mapfile -t files < "$out/shard$i"
+  # Passing no paths to pytest would run the entire suite again.
+  if (( ${#files[@]} == 0 )); then continue; fi
+  mkdir -p "$out/$i/home"
+  setsid "${fixture[@]}" HOME="$out/$i/home" \
+    .venv/bin/python -m pytest -q --tb=short -p no:cacheprovider --basetemp "$out/$i/pt" \
+    --junitxml "$out/$i.xml" "${files[@]}" \
+    > "$out/$i.log" 2>&1 &
+  pids+=($!)
+done
+status=0
+for pid in "${pids[@]}"; do wait "$pid" || status=1; done
+pids=()
+if ! .venv/bin/python - "$out" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+root = Path(sys.argv[1])
+expected = sum(int(line.split()[0]) for line in (root / "counts").read_text().splitlines())
+observed = sum(len(ET.parse(path).findall(".//testcase")) for path in root.glob("*.xml"))
+if observed != expected:
+    raise SystemExit(f"Shard test count mismatch: collected {expected}, executed {observed}")
+PY
+then status=1; fi
+.venv/bin/ruff check --no-cache src tests scripts/controller-activate scripts/check-writer-rollout \
+  scripts/check-project scripts/benchmark-cli scripts/check-cross-tool || status=1
+for ((i = 0; i < shards; i++)); do
+  if [[ ! -f "$out/$i.log" ]]; then continue; fi
+  echo "shard $i: $(tail -n 1 "$out/$i.log")"
+  if (( status != 0 )); then tail -n 40 "$out/$i.log"; fi
+done
+exit "$status"

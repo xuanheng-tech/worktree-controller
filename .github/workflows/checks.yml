@@ -1,0 +1,38 @@
+name: Project checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Existing commit or tag to validate; empty uses the workflow commit
+        required: false
+        type: string
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    env:
+      UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/project-python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2, Node 20
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source_ref || github.sha }}
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0, Node 20
+        with:
+          version: "0.11.15"
+          python-version: "3.12"
+          enable-cache: false
+      - name: Install Python
+        run: uv python install 3.12
+      - name: Validate tests, CLI contract and distributions
+        run: |
+          checks_parent="$RUNNER_TEMP/project-check-output"
+          mkdir -p "$checks_parent"
+          uv run --locked --python 3.12 --no-env-file python scripts/check-project \
+            --work-dir "$checks_parent/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"

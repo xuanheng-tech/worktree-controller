@@ -1,0 +1,491 @@
+#!/usr/bin/env python3
+"""Read-only rollout gate, run from the reviewed frozen candidate before activation.
+
+A running executor is not evidence of danger. What matters is whether every effective
+Controller caller can keep working across the switch, so this blocks on compatibility
+and on work that is genuinely in flight, never on a process count. Live writer leases are
+still reported, as inventory, so an operator can see what will survive.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+from pathlib import Path
+
+ARTIFACTS = ("controller-runtime",)
+PINNED_ENTRY_POINTS = ("worktree-controller", "worktree-session", "worktree-session-end")
+STRICT_HOLDER_FIELDS = ("client_id", "pid", "boot_id", "start_ticks")
+
+
+def own_processes():
+    for process in Path("/proc").iterdir():
+        if not process.name.isdecimal():
+            continue
+        try:
+            if process.stat().st_uid != os.getuid():
+                continue
+            yield process, (process / "comm").read_text().strip()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError:
+            yield process, None
+
+
+def controller_invocations(blockers, live_invocations):
+    """Report running Controller commands as inventory; never block on a count.
+
+    The pinned entry point resolves the active symlink once per invocation and
+    ``switch`` repoints it with an atomic replace, so a command already running
+    finishes on the version it started and only later invocations see the target.
+    A genuinely in-flight mutation is fenced separately by its exclusive
+    repository lock (``CONTROLLER_MUTATION_IN_FLIGHT``), and a layout cutover
+    keeps its own exclusive-lock fence in ``LayoutMigration``, so the number of
+    live invocations is not evidence of danger. An unobservable process still
+    blocks: without its identity the gate cannot prove the switch is safe.
+    """
+    for process, comm in own_processes():
+        if comm is None:
+            blockers.append(f"PROCESS_SCAN_UNAVAILABLE:{process.name}")
+            continue
+        if comm == "worktree-controller"[:15]:
+            live_invocations.append({"pid": process.name})
+
+
+def entrypoints_pinned(source, home, blockers):
+    expected = (source / "controller-runtime").read_bytes()
+    for name in PINNED_ENTRY_POINTS:
+        installed = home / ".local/bin" / name
+        try:
+            if not (os.access(installed, os.X_OK) and installed.read_bytes() == expected):
+                blockers.append(f"CONTROLLER_ENTRYPOINT_NOT_PINNED:{name}")
+        except OSError:
+            blockers.append(f"CONTROLLER_ENTRYPOINT_NOT_PINNED:{name}")
+
+
+def staged_runtime(home, version, blockers):
+    """The target must already be installed and runnable beside the active one."""
+    if version is None:
+        return None
+    staged = (
+        home
+        / ".local/share/worktree-controller/versions"
+        / version
+        / "worktree-controller/bin/worktree-controller"
+    )
+    if not os.access(staged, os.X_OK):
+        blockers.append(f"STAGED_RUNTIME_MISSING:{version}")
+        return None
+    try:
+        reported = subprocess.run(
+            [str(staged), "--version"], capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        blockers.append(f"STAGED_RUNTIME_MISSING:{version}")
+        return None
+    if reported.returncode or not reported.stdout.strip().startswith("worktree-controller "):
+        blockers.append(f"STAGED_RUNTIME_MISMATCH:{version}")
+        return None
+    return reported.stdout.strip()
+
+
+def metadata_path(repository, blockers):
+    """Resolve shared governance state for ordinary and linked/separate-dir checkouts."""
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "--no-optional-locks",
+                "-C",
+                str(repository),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        if result.returncode or not result.stdout.strip():
+            raise ValueError("Git common directory unavailable")
+        common = Path(os.fsdecode(result.stdout.rstrip(b"\n"))).resolve(strict=True)
+        return common / "worktree-controller/v1"
+    except (OSError, ValueError, subprocess.SubprocessError):
+        blockers.append(f"GOVERNED_REPOSITORY_UNAVAILABLE:{repository.name}")
+        return None
+
+
+def metadata_quiet(
+    repository, blockers, *, runtime=None, receipt=None, receipt_sha=None, diagnostics=None,
+):
+    """Refuse while a Controller mutation is inside its critical section."""
+    common = metadata_path(repository, blockers)
+    if common is None:
+        return
+    if not common.is_dir():
+        blockers.append(f"GOVERNANCE_NAMESPACE_UNAVAILABLE:{repository.name}")
+        return
+    lock = common / "repo.lock"
+    try:
+        import fcntl
+        import os as _os
+        import stat as _stat
+
+        lock_info = _os.lstat(lock)
+    except FileNotFoundError:
+        # M1 authority: an initialized namespace without its arbiter blocks,
+        # because the runtime refuses every mutation in exactly this state.
+        blockers.append(f"REPOSITORY_LOCK_MISSING:{repository.name}")
+        return
+    except OSError:
+        blockers.append(f"REPOSITORY_LOCK_UNUSABLE:{repository.name}")
+        return
+    if not _stat.S_ISREG(lock_info.st_mode):
+        blockers.append(f"REPOSITORY_LOCK_UNUSABLE:{repository.name}")
+    else:
+        try:
+            with lock.open("rb") as handle:
+                try:
+                    # Probe for an exclusive (mutation) holder. A shared flock is
+                    # compatible with this shared probe, so read-only accounting
+                    # and observation -- which since 1.28.1 leave repository
+                    # metadata unchanged under a shared lock -- no longer
+                    # masquerade as an in-flight mutation. A genuine mutation
+                    # holds the exclusive lock and fails this probe.
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    blockers.append(f"CONTROLLER_MUTATION_IN_FLIGHT:{repository.name}")
+                    # A live mutation's intermediate journal is not interrupted
+                    # recovery evidence. Retry the entire gate after quiescence.
+                    return
+        except OSError:
+            blockers.append(f"CONTROLLER_MUTATION_IN_FLIGHT:{repository.name}")
+            return
+
+    def _journal_names(directory):
+        # Same predicate as worktree_controller.transaction_scope.is_atomic_temp:
+        # interrupted _atomic_json writes (.<name>.<8>.tmp) never became records.
+        return {
+            path.stem
+            for path in directory.iterdir()
+            if not (path.name.startswith(".") and path.name.endswith(".tmp"))
+        }
+
+    transactions = common / "transactions"
+    journal_names = _journal_names(transactions) if transactions.is_dir() else set()
+    compatible = not journal_names
+    checked_names = set()
+    changed = False
+    details = []
+    error = {"code": "ROLLOUT_CHECK_UNAVAILABLE", "message": "staged runtime unavailable"}
+    if journal_names and runtime is not None:
+        command = [
+            str(runtime),
+            "resource-recover",
+            "--repo",
+            str(repository),
+            "--stage",
+            "rollout-check",
+            "--dry-run",
+            "--json",
+        ]
+        if receipt is not None and receipt_sha:
+            command += [
+                "--preservation-receipt",
+                str(receipt),
+                "--preservation-receipt-sha256",
+                receipt_sha,
+            ]
+        try:
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=300, check=False
+            )
+            payload = json.loads(result.stdout)
+            decision = payload["decision"]
+            if not isinstance(decision, dict):
+                raise ValueError("staged rollout check returned an invalid decision")
+            reported = decision.get("transaction_diagnostics", [])
+            if isinstance(reported, list):
+                details = [
+                    {key: row.get(key) for key in (
+                        "transaction_id", "command", "phase", "error", "recovery_entry",
+                    )}
+                    for row in reported
+                    if (isinstance(row, dict) and isinstance(row.get("error"), dict)
+                        and isinstance(row["error"].get("code"), str)
+                        and isinstance(row["error"].get("message"), str))
+                ]
+            errors = payload.get("errors", [])
+            error = {"code": "ROLLOUT_CHECK_INCOMPATIBLE",
+                     "message": "staged check did not verify exactly the pending transaction set"}
+            if isinstance(errors, list):
+                for row in errors:
+                    if (isinstance(row, dict) and isinstance(row.get("code"), str)
+                            and isinstance(row.get("message"), str)):
+                        error = {"code": row["code"], "message": row["message"]}
+                        break
+            compatible = (
+                result.returncode == 0
+                and decision.get("dry_run") is True
+                and decision.get("code") == "ROLLOUT_RECOVERY_COMPATIBLE"
+                and errors == []
+                and reported == []
+            )
+            if compatible:
+                rows = decision["transactions"]
+                if not isinstance(rows, list) or any(
+                    not isinstance(row, dict)
+                    or not isinstance(row.get("transaction_id"), str)
+                    or not row["transaction_id"]
+                    for row in rows
+                ):
+                    raise ValueError("staged rollout check returned invalid transaction identities")
+                checked_names = {row["transaction_id"] for row in rows}
+                if len(checked_names) != len(rows):
+                    raise ValueError("staged rollout check returned duplicate transaction identities")
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
+            compatible = False
+            error = {"code": "ROLLOUT_CHECK_FAILED", "message": str(exc)}
+    if compatible:
+        try:
+            if transactions.is_dir():
+                current_names = _journal_names(transactions)
+            elif transactions.exists() or transactions.is_symlink():
+                raise ValueError("transaction directory is not a directory")
+            else:
+                current_names = set()
+            compatible = journal_names == checked_names == current_names
+            # Membership drift grants another full gate attempt, never readiness.
+            # A staged result must match one observed boundary; an unrelated set
+            # or an unsuccessful check is still an unfinished-transaction refusal.
+            changed = journal_names != current_names and checked_names in (
+                journal_names, current_names,
+            )
+            if changed:
+                error = {"code": "ROLLOUT_TRANSACTION_SET_CHANGED",
+                         "message": "transaction membership changed; rerun the complete rollout gate"}
+        except (OSError, ValueError) as exc:
+            compatible = False
+            error = {"code": "ROLLOUT_CHECK_FAILED", "message": str(exc)}
+    if not compatible:
+        kind = "CONTROLLER_TRANSACTION_SET_CHANGED" if changed else "CONTROLLER_TRANSACTION_UNFINISHED"
+        blockers.append(f"{kind}:{repository.name}")
+        if diagnostics is not None:
+            if not details:
+                details = [{"transaction_id": None, "command": None, "phase": None,
+                            "recovery_entry": None, "error": error}]
+            diagnostics.extend({"repository": str(repository), **row} for row in details)
+    if (common / "publication-lease.json").is_file():
+        blockers.append(f"PUBLICATION_LEASE_HELD:{repository.name}")
+
+
+def holder_is_live(holder):
+    try:
+        raw = Path(f"/proc/{holder['pid']}/stat").read_text(encoding="utf-8")
+        ticks = int(raw[raw.rfind(")") + 2 :].split()[19])
+    except (OSError, ValueError, IndexError, KeyError, TypeError):
+        return False
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return ticks == holder.get("start_ticks") and boot == holder.get("boot_id")
+
+
+def terminal_allocations(common):
+    """Allocations that can never take a writer again, read from the same metadata."""
+    records = common / "records"
+    terminal = set()
+    if not records.is_dir():
+        return terminal
+    for entry in sorted(records.glob("*.json")):
+        try:
+            record = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if record.get("lifecycle") == "RELEASED":
+            terminal.add(entry.stem)
+    return terminal
+
+
+def surviving_writers(repository, blockers, surviving, stranded):
+    """Every lease a live session still needs must survive the contract change."""
+    common = metadata_path(repository, blockers)
+    if common is None:
+        return
+    leases = common / "writer-leases"
+    if not leases.is_dir():
+        return
+    finished = terminal_allocations(common)
+    known = {path.stem for path in (common / "records").glob("*.json")}
+    for entry in sorted(leases.glob("*.json")):
+        try:
+            lease = json.loads(entry.read_text(encoding="utf-8"))
+            holder = lease["holder"]
+        except (OSError, ValueError, KeyError):
+            blockers.append(f"LEASE_IDENTITY_UNREADABLE:{repository.name}:{entry.stem}")
+            continue
+        if any(holder.get(field) in (None, "") for field in STRICT_HOLDER_FIELDS):
+            blockers.append(f"LEASE_IDENTITY_INCOMPLETE:{repository.name}:{entry.stem}")
+            continue
+        if entry.stem in finished or entry.stem not in known:
+            # The allocation is over. A lease that belongs to no live allocation
+            # cannot lock a running task out of anything, so it is residue to report,
+            # never a reason to refuse the switch. A holder that is still alive says
+            # nothing here: it is running some other task, not this one.
+            stranded.append(
+                {
+                    "repository": repository.name,
+                    "allocation_id": entry.stem,
+                    "client_id": holder["client_id"],
+                }
+            )
+            continue
+        if not holder_is_live(holder):
+            continue
+        surviving.append(
+            {
+                "repository": repository.name,
+                "allocation_id": entry.stem,
+                "client_id": holder["client_id"],
+                "pid": holder["pid"],
+            }
+        )
+        if lease.get("schema_version") != 2:
+            blockers.append(f"SURVIVING_WRITER_UNVERIFIABLE:{repository.name}:{entry.stem}")
+
+
+def consumer_capability(command, blockers):
+    """Every external host advertises the same session contract explicitly."""
+    try:
+        result = subprocess.run(
+            [str(command), "--writer-session-capabilities"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        expected = {
+            "writer_session_version": 2,
+            "holder_aware_write_guard": True,
+            "host_managed_writer_session_version": 2,
+        }
+        capability = json.loads(result.stdout)
+        if (
+            result.returncode or not isinstance(capability, dict)
+            or any(type(capability.get(key)) is not type(value) or capability[key] != value
+                   for key, value in expected.items())
+            or type(capability.get("active_writer_sessions")) is not int
+            or capability["active_writer_sessions"] < 0
+        ):
+            blockers.append(f"CONSUMER_INCOMPATIBLE:{command}")
+            return None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        blockers.append(f"CONSUMER_CAPABILITY_UNAVAILABLE:{command}")
+        return None
+    if capability["active_writer_sessions"]:
+        protocols = capability.get("active_writer_session_versions")
+        # The new runtime verifies both complete v1 and v2 host contexts. A host
+        # must report its actual surviving sessions, not just its newest API.
+        if (
+            capability.get("controller_activation_compatible") is not True
+            or not isinstance(protocols, list) or not protocols
+            or any(type(version) is not int or version not in {1, 2} for version in protocols)
+        ):
+            blockers.append(f"CONSUMER_SESSION_ACTIVE:{command}:{capability['active_writer_sessions']}")
+    return capability
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--home", type=Path, default=Path.home())
+    parser.add_argument(
+        "--consumer", type=Path, action="append", default=[],
+        help="deployed host capability command; repeat for every external consumer",
+    )
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        action="append",
+        default=[],
+        help="governed repository to check; repeatable and required",
+    )
+    parser.add_argument("--target-version", help="staged Controller version to activate")
+    parser.add_argument("--recovery-preservation-receipt", type=Path)
+    parser.add_argument("--recovery-preservation-receipt-sha256")
+    args = parser.parse_args()
+    source = Path(__file__).resolve().parent
+    blockers: list[str] = []
+    surviving: list[dict] = []
+    stranded: list[dict] = []
+    transaction_diagnostics: list[dict] = []
+    live_invocations: list[dict] = []
+
+    identities = {}
+    for name in ARTIFACTS:
+        expected = (source / name).read_bytes()
+        installed = args.home / "bin" / name
+        try:
+            matches = os.access(installed, os.X_OK) and installed.read_bytes() == expected
+        except OSError:
+            matches = False
+        identities[name] = hashlib.sha256(expected).hexdigest()
+        if not matches:
+            blockers.append(f"ENTRYPOINT_NOT_DEPLOYED:{name}")
+
+    entrypoints_pinned(source, args.home, blockers)
+    staged = staged_runtime(args.home, args.target_version, blockers)
+    controller_invocations(blockers, live_invocations)
+    capabilities = {str(command): consumer_capability(command, blockers) for command in args.consumer}
+
+    if not args.repo:
+        blockers.append("GOVERNED_REPOSITORY_REQUIRED")
+    for repository in args.repo:
+        resolved = repository.expanduser()
+        if not (resolved / ".git").exists():
+            blockers.append(f"GOVERNED_REPOSITORY_UNAVAILABLE:{resolved.name}")
+            continue
+        runtime = (
+            (
+                args.home
+                / ".local/share/worktree-controller/versions"
+                / args.target_version
+                / "worktree-controller/bin/worktree-controller"
+            )
+            if staged
+            else None
+        )
+        metadata_quiet(
+            resolved,
+            blockers,
+            runtime=runtime,
+            receipt=args.recovery_preservation_receipt,
+            receipt_sha=args.recovery_preservation_receipt_sha256,
+            diagnostics=transaction_diagnostics,
+        )
+        surviving_writers(resolved, blockers, surviving, stranded)
+
+    print(
+        json.dumps(
+            {
+                "decision": "BLOCKED" if blockers else "CLIENTS_READY",
+                "blockers": sorted(blockers),
+                "transaction_diagnostics": transaction_diagnostics,
+                "entrypoint_sha256": identities,
+                "staged_runtime": staged,
+                "consumer_capabilities": capabilities,
+                "stranded_entitlement": stranded,
+                "surviving_writers": surviving,
+                "live_controller_invocations": live_invocations,
+                "prerequisites": [
+                    "every external host must be supplied through --consumer",
+                    "only explicit compatible session identities survive activation",
+                ],
+            },
+            sort_keys=True,
+        )
+    )
+    return 2 if blockers else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

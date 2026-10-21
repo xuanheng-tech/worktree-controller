@@ -1,0 +1,1302 @@
+#!/usr/bin/env python3
+"""Stage, activate and roll back the Controller without draining executor sessions.
+
+Installing and activating are separate. ``stage`` builds one more versioned runtime
+beside the ones already installed and changes nothing about who is in charge.
+``activate`` runs the rollout gate, takes a short lock, repoints one symlink, and
+releases it. The lock is held for the switch only, never for a session's lifetime.
+
+The pinning entry point resolves that symlink once per invocation, so a Controller
+command already running finishes on the version it started with and the next command
+picks up the new one. There is no daemon, no database, no second authority, and at no
+point do two Controller versions serve the same command.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from contextlib import contextmanager, suppress
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from worktree_controller.activation_layout import (
+    LayoutError,
+    LayoutMigration,
+    digest,
+    owned,
+    replace_file,
+)
+
+# The repository and the governed set are overridable so the rolling-upgrade
+# simulation can drive this exact tool against a throwaway installation. Nothing
+# else about the contract changes with them.
+CONTROLLER_REPO = Path(
+    os.environ.get("CONTROLLER_ROLLOUT_REPO", str(Path(__file__).resolve().parent.parent))
+)
+GIT_SOURCE = os.environ.get("CONTROLLER_ROLLOUT_GIT_SOURCE", "")
+DEFAULT_INDEX = os.environ.get("CONTROLLER_ROLLOUT_INDEX", "")
+ROOT = Path.home() / ".local/share/worktree-controller"
+VERSIONS = ROOT / "versions"
+ACTIVE = ROOT / "active"
+ACTIVATION_LOCK = ROOT / "activation.lock"
+LOG_DIR = Path.home() / ".local/state/worktree-controller-rollout"
+SKILL_SOURCE = "skills/worktree-lifecycle"
+SKILL_TARGET = Path.home() / ".agents/skills/worktree-lifecycle"
+LOOPBACK = {"NO_PROXY": "127.0.0.1,localhost,::1", "no_proxy": "127.0.0.1,localhost,::1"}
+GOVERNED = tuple(
+    Path(entry) for entry in os.environ.get("CONTROLLER_ROLLOUT_GOVERNED", "").split(":") if entry
+)
+TOOLCHAIN_COMPATIBILITY = (
+    Path(os.environ["CONTROLLER_ROLLOUT_TOOLCHAIN_COMPATIBILITY"])
+    if os.environ.get("CONTROLLER_ROLLOUT_TOOLCHAIN_COMPATIBILITY")
+    else None
+)
+
+_log_handle = None
+TEMP_HELPER = (
+    Path(os.environ["CONTROLLER_ROLLOUT_TEMP_HELPER"])
+    if os.environ.get("CONTROLLER_ROLLOUT_TEMP_HELPER")
+    else None
+)
+_created_temp_dirs: set[Path] = set()
+
+
+class Abort(Exception):
+    pass
+
+
+class ToolchainRefused(Abort):
+    pass
+
+
+class RolloutBlocked(Abort):
+    def __init__(self, blockers: list[str]) -> None:
+        super().__init__("rollout gate did not return CLIENTS_READY; activation is refused")
+        self.blockers = blockers
+
+
+def log(message: str) -> None:
+    line = f"{datetime.now().astimezone().isoformat(timespec='seconds')} {message}"
+    print(line, flush=True)
+    if _log_handle is not None:
+        _log_handle.write(line + "\n")
+        _log_handle.flush()
+
+
+def temporary_directory(prefix: str) -> Path:
+    """Create a task-owned temporary directory, optionally through a site helper.
+
+    The optional helper answers with a JSON record, so the path is read from that
+    record rather than from the raw output.
+    """
+    if TEMP_HELPER is None:
+        directory = Path(tempfile.mkdtemp(prefix=f"{prefix}-"))
+        _created_temp_dirs.add(directory)
+        return directory
+    reply = run([TEMP_HELPER, "create", prefix], timeout=120).stdout
+    try:
+        record = json.loads(reply.strip().splitlines()[-1])
+        created = record["path"]
+    except (ValueError, KeyError, IndexError) as failure:
+        raise Abort(f"temporary directory helper returned no usable path: {failure}") from None
+    if not isinstance(created, str) or not created.startswith("/tmp/"):
+        raise Abort(f"temporary directory helper returned an unexpected path: {created!r}")
+    directory = Path(created)
+    if not directory.is_dir():
+        raise Abort(f"temporary directory was not created: {directory}")
+    return directory
+
+
+def cleanup_temporary_directory(directory: Path) -> None:
+    if TEMP_HELPER is not None:
+        run([TEMP_HELPER, "cleanup", str(directory)], timeout=120)
+    elif directory in _created_temp_dirs:
+        shutil.rmtree(directory)
+        _created_temp_dirs.remove(directory)
+
+
+def run(command, *, timeout=900, check=True, process_group=False):
+    parts = [str(part) for part in command]
+    options = dict(
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, **LOOPBACK, "GIT_NO_REPLACE_OBJECTS": "1"},
+    )
+    if process_group:
+        with subprocess.Popen(parts, start_new_session=True, **options) as process:
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except BaseException:
+                # Only this invocation's new process group is ours to terminate.
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+                raise
+            result = subprocess.CompletedProcess(parts, process.returncode, stdout, stderr)
+    else:
+        result = subprocess.run(parts, timeout=timeout, check=False, **options)
+    if check and result.returncode:
+        raise Abort(
+            f"command failed ({result.returncode}): {' '.join(map(str, command))}\n"
+            f"{result.stderr.strip()}"
+        )
+    return result
+
+
+def git_bytes(*arguments: str, timeout=120, repo: Path | None = None) -> bytes:
+    return subprocess.run(
+        ["git", "-C", str(repo if repo is not None else CONTROLLER_REPO), *arguments],
+        capture_output=True,
+        check=True,
+        timeout=timeout,
+        env={**os.environ, **LOOPBACK, "GIT_NO_REPLACE_OBJECTS": "1"},
+    ).stdout
+
+
+def frozen_source(work: Path, oid: str) -> Path:
+    kind = run(["git", "-C", CONTROLLER_REPO, "cat-file", "-t", oid]).stdout.strip()
+    if kind != "commit":
+        raise Abort(f"{oid} is not a commit in {CONTROLLER_REPO}")
+    source = work / "frozen"
+    source.mkdir(parents=True)
+    archive = git_bytes("archive", oid, timeout=300)
+    subprocess.run(["tar", "-x", "-C", str(source)], input=archive, check=True, timeout=300)
+    return source
+
+
+def release_contract_blob(oid: str) -> bytes:
+    return git_bytes("show", f"{oid}:tool_cli_contract.json")
+
+
+def release_contract(oid: str) -> dict:
+    contract = json.loads(release_contract_blob(oid))
+    if not isinstance(contract, dict):
+        raise Abort("frozen release contract is not an object")
+    return contract
+
+
+def verify_release_dimensions(oid: str, reported: str, payload: dict, package: Path) -> None:
+    """Bind software, CLI, capabilities, and storage claims to the frozen commit."""
+    frozen_contract = release_contract_blob(oid)
+    contract = json.loads(frozen_contract)
+    if not isinstance(contract, dict):
+        raise Abort("frozen release contract is not an object")
+    if reported != f"worktree-controller {contract.get('tool_version')}":
+        raise Abort("runtime software version differs from the frozen release contract")
+    if not isinstance(payload, dict):
+        raise Abort("runtime capabilities response is not an object")
+    decision = payload.get("decision")
+    if (
+        payload.get("errors") != []
+        or payload.get("tool_version") != contract["tool_version"]
+        or not isinstance(decision, dict)
+        or decision.get("code") != "CAPABILITIES"
+    ):
+        raise Abort("runtime capabilities response differs from the frozen release contract")
+    if type(contract.get("contract_version")) is not int:
+        raise Abort("frozen CLI contract version is invalid")
+    if contract["contract_version"] >= 36:
+        for key in ("capabilities_version", "storage_layout_version"):
+            if type(contract.get(key)) is not int:
+                raise Abort(f"frozen {key} is missing or invalid")
+        layout = contract.get("storage_layout")
+        if not isinstance(layout, dict) or contract["storage_layout_version"] != layout.get(
+            "version"
+        ):
+            raise Abort("frozen storage layout declarations disagree")
+        installed_contract = package / "tool_cli_contract.json"
+        if not installed_contract.is_file() or installed_contract.read_bytes() != frozen_contract:
+            raise Abort("installed release contract differs from the frozen commit")
+    for key, value in contract.items():
+        if key in {"tool_version", "schema_version", "metadata_schema_version"}:
+            continue
+        if key.endswith(("_version", "_versions")):
+            if key not in decision and contract["contract_version"] < 36:
+                continue  # Earlier releases did not advertise every contract dimension.
+            observed = decision.get(key)
+            if type(observed) is not type(value) or observed != value:
+                raise Abort(f"runtime {key} differs from the frozen release contract")
+
+
+def verify_release_lineage(previous_oid: str, target_oid: str) -> None:
+    if previous_oid == target_oid:
+        raise Abort("target runtime is already active")
+    ancestry = run(
+        ["git", "-C", CONTROLLER_REPO, "merge-base", "--is-ancestor", previous_oid, target_oid],
+        timeout=60,
+        check=False,
+    )
+    if ancestry.returncode:
+        raise Abort("target release is not a descendant of the active runtime")
+    verify_release_progression(previous_oid, target_oid)
+
+
+def verify_rollback_lineage(previous_oid: str, target_oid: str) -> None:
+    if previous_oid == target_oid:
+        raise Abort("target runtime is already active")
+    ancestry = run(
+        ["git", "-C", CONTROLLER_REPO, "merge-base", "--is-ancestor", target_oid, previous_oid],
+        timeout=60,
+        check=False,
+    )
+    if ancestry.returncode:
+        raise Abort("rollback target is not an ancestor of the active runtime")
+
+
+def verify_release_progression(previous_oid: str, target_oid: str) -> None:
+    previous = release_contract(previous_oid)
+    target = release_contract(target_oid)
+    try:
+        previous_version = tuple(int(part) for part in previous["tool_version"].split("."))
+        target_version = tuple(int(part) for part in target["tool_version"].split("."))
+    except (KeyError, AttributeError, ValueError):
+        raise Abort("release software version is not numeric") from None
+    if len(previous_version) != 3 or len(target_version) != 3 or target_version <= previous_version:
+        raise Abort("target software version does not advance from the active runtime")
+    for key, value in previous.items():
+        if key.endswith("_version") and type(value) is int:
+            successor = target.get(key)
+            if type(successor) is not int or successor < value:
+                raise Abort(f"target release drops or regresses {key}")
+    old_layout = previous.get("storage_layout")
+    new_layout = target.get("storage_layout")
+    if (
+        not isinstance(old_layout, dict)
+        or not isinstance(new_layout, dict)
+        or type(old_layout.get("version")) is not int
+        or type(new_layout.get("version")) is not int
+        or new_layout["version"] < old_layout["version"]
+    ):
+        raise Abort("target release drops or regresses storage layout version")
+
+
+def verify_runtime(runtime: Path, oid: str, *, entrypoint: str = "worktree-controller") -> str:
+    if Path(entrypoint).name != entrypoint:
+        raise Abort("runtime entry point must be an exact basename")
+    binary = runtime / "bin" / entrypoint
+    if not os.access(binary, os.X_OK):
+        raise Abort(f"staged runtime has no executable Controller: {binary}")
+    reported = run([binary, "--version"], timeout=60).stdout.strip()
+    names = run(
+        [
+            "git",
+            "-C",
+            CONTROLLER_REPO,
+            "ls-tree",
+            "-r",
+            "--name-only",
+            oid,
+            "src/worktree_controller",
+        ],
+        timeout=120,
+    ).stdout.split()
+    if not names:
+        raise Abort("frozen commit lists no controller modules")
+    site = list((runtime / "lib").glob("python3.*/site-packages/worktree_controller"))
+    if len(site) != 1:
+        raise Abort("staged controller package directory is ambiguous or missing")
+    payload = json.loads(run([binary, "capabilities", "--json"], timeout=60).stdout)
+    verify_release_dimensions(oid, reported, payload, site[0])
+    mismatched = []
+    for name in names:
+        blob = git_bytes("show", f"{oid}:{name}")
+        target = site[0] / Path(name).name
+        if (
+            not target.is_file()
+            or hashlib.sha256(target.read_bytes()).digest() != hashlib.sha256(blob).digest()
+        ):
+            mismatched.append(name)
+    if mismatched:
+        raise Abort(f"staged source differs from {oid}: {', '.join(mismatched)}")
+    receipt = runtime / "uv-receipt.toml"
+    text = receipt.read_text(encoding="utf-8") if receipt.is_file() else ""
+    if f"rev={oid}" not in text or GIT_SOURCE not in text:
+        raise Abort("staged receipt does not record the governed git source pinned to this commit")
+    return reported
+
+
+def reviewed_toolchain_requirements(catalog: Path) -> tuple[dict, str, str]:
+    """Read the declared owner's published canonical catalog without changing any refs."""
+    if not catalog.is_absolute():
+        raise ToolchainRefused("TOOLCHAIN_CATALOG_INVALID: catalog path must be absolute")
+    try:
+        catalog = catalog.resolve(strict=True)
+        raw = catalog.read_bytes()
+        repo = Path(run(
+            ["git", "-C", catalog.parent, "rev-parse", "--show-toplevel"], timeout=30
+        ).stdout.strip())
+        branch = run(["git", "-C", repo, "branch", "--show-current"], timeout=30).stdout.strip()
+        registrations = run(
+            ["git", "-C", repo, "worktree", "list", "--porcelain", "-z"], timeout=30
+        ).stdout
+        if (
+            branch not in {"main", "master"}
+            or registrations.split("\0", 1)[0] != f"worktree {repo}"
+        ):
+            raise ToolchainRefused(
+                "TOOLCHAIN_CATALOG_UNPUBLISHED: use the owner's canonical main or master"
+            )
+        head = run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip()
+        committed = git_bytes(
+            "show", f"{head}:{catalog.relative_to(repo).as_posix()}", repo=repo, timeout=30
+        )
+        if committed != raw:
+            raise ToolchainRefused(
+                "TOOLCHAIN_CATALOG_UNPUBLISHED: catalog differs from its committed owner source"
+            )
+        remote = run(
+            ["git", "-C", repo, "ls-remote", "--exit-code", "--refs", "origin", f"refs/heads/{branch}"],
+            timeout=30,
+        ).stdout.strip()
+        if remote != f"{head}\trefs/heads/{branch}":
+            raise ToolchainRefused("TOOLCHAIN_CATALOG_UNPUBLISHED: owner HEAD differs from live origin main")
+        if (
+            catalog.read_bytes() != raw
+            or run(["git", "-C", repo, "rev-parse", "HEAD"], timeout=30).stdout.strip() != head
+        ):
+            raise ToolchainRefused("TOOLCHAIN_CATALOG_CHANGED: owner catalog changed during observation")
+
+        def unique_object(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ToolchainRefused("TOOLCHAIN_CATALOG_INVALID: duplicate JSON field")
+                value[key] = item
+            return value
+
+        document = json.loads(raw, object_pairs_hook=unique_object)
+    except ToolchainRefused:
+        raise
+    except Abort:
+        raise ToolchainRefused(
+            "TOOLCHAIN_CATALOG_UNAVAILABLE: published owner catalog could not be verified"
+        ) from None
+    except json.JSONDecodeError:
+        raise ToolchainRefused("TOOLCHAIN_CATALOG_INVALID: malformed JSON") from None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise ToolchainRefused(
+            "TOOLCHAIN_CATALOG_UNAVAILABLE: published owner catalog could not be read"
+        ) from None
+    if (
+        not isinstance(document, dict)
+        or type(document.get("schema_version")) is not int
+        or document["schema_version"] != 1
+        or type(document.get("toolchain_contract_version")) is not int
+        or document["toolchain_contract_version"] != 6
+    ):
+        raise ToolchainRefused("TOOLCHAIN_CATALOG_INVALID: unsupported catalog schema or toolchain contract")
+    runtimes = document.get("runtime_requirements")
+    requirements = runtimes.get("worktree-controller") if isinstance(runtimes, dict) else None
+    if not isinstance(requirements, dict) or set(requirements) != {
+        "cli_contract_versions", "storage_layout_versions", "capability_versions"
+    }:
+        raise ToolchainRefused("TOOLCHAIN_CATALOG_INVALID: missing or malformed Controller requirements")
+    for name in ("cli_contract_versions", "storage_layout_versions"):
+        values = requirements[name]
+        if (
+            not isinstance(values, list)
+            or not values
+            or any(type(v) is not int or v <= 0 for v in values)
+            or len(set(values)) != len(values)
+        ):
+            raise ToolchainRefused(f"TOOLCHAIN_CATALOG_INVALID: invalid {name}")
+    capabilities = requirements["capability_versions"]
+    if not isinstance(capabilities, dict) or "capabilities_version" not in capabilities:
+        raise ToolchainRefused("TOOLCHAIN_CATALOG_INVALID: missing capability version bindings")
+    if any(
+        not re.fullmatch(r"[a-z][a-z0-9_]*_version", name) or type(v) is not int or v <= 0
+        for name, v in capabilities.items()
+    ):
+        raise ToolchainRefused("TOOLCHAIN_CATALOG_INVALID: invalid capability version binding")
+    return requirements, head, hashlib.sha256(raw).hexdigest()
+
+
+def verify_toolchain_compatibility(runtime: Path) -> None:
+    if TOOLCHAIN_COMPATIBILITY is None:
+        return  # Independent sites need not install a cross-tool workflow.
+    requirements, owner_head, catalog_sha = reviewed_toolchain_requirements(TOOLCHAIN_COMPATIBILITY)
+    try:
+        contract = release_contract(runtime.parent.name)
+        payload = json.loads(run(
+            [runtime / "bin/worktree-controller", "capabilities", "--json"], timeout=30
+        ).stdout)
+    except (Abort, OSError, ValueError, subprocess.SubprocessError):
+        raise ToolchainRefused("TOOLCHAIN_RUNTIME_UNAVAILABLE: staged evidence could not be read") from None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("errors") != []
+        or not isinstance(payload.get("decision"), dict)
+        or payload["decision"].get("code") != "CAPABILITIES"
+        or payload.get("tool_version") != contract.get("tool_version")
+    ):
+        raise ToolchainRefused(
+            "TOOLCHAIN_RUNTIME_INVALID: staged capability evidence differs from its frozen release"
+        )
+    capabilities = payload["decision"]
+    for name in dict.fromkeys((
+        "contract_version", "storage_layout_version", *requirements["capability_versions"]
+    )):
+        observed = capabilities.get(name)
+        if type(observed) is not int or type(contract.get(name)) is not int or observed != contract[name]:
+            raise ToolchainRefused(f"TOOLCHAIN_RUNTIME_INVALID: staged/frozen {name} differs")
+    for name, allowed_key in (
+        ("contract_version", "cli_contract_versions"),
+        ("storage_layout_version", "storage_layout_versions"),
+    ):
+        if capabilities[name] not in requirements[allowed_key]:
+            raise ToolchainRefused(f"TOOLCHAIN_RUNTIME_UNREVIEWED: unreviewed {name}: {capabilities[name]}")
+    for name, expected in requirements["capability_versions"].items():
+        if capabilities[name] != expected:
+            raise ToolchainRefused(
+                f"TOOLCHAIN_RUNTIME_UNREVIEWED: {name} expected {expected}, observed {capabilities[name]}"
+            )
+    log(
+        f"toolchain compatibility passed: CLI {capabilities['contract_version']}, "
+        f"storage {capabilities['storage_layout_version']}, owner {owner_head}, catalog sha256 {catalog_sha}"
+    )
+
+
+def runtime_path(oid: str) -> Path:
+    """Where one staged version lives.
+
+    A tool environment records absolute interpreter paths, so it is installed at its
+    final location and never moved afterwards. Staging is made safe by the fact that
+    it never touches the active pointer: an interrupted stage simply fails
+    verification and is restaged.
+    """
+    return VERSIONS / oid / "worktree-controller"
+
+
+def stage(oid: str) -> Path:
+    if not GIT_SOURCE:
+        raise Abort("stage requires CONTROLLER_ROLLOUT_GIT_SOURCE")
+    runtime = runtime_path(oid)
+    if (runtime / "bin/worktree-controller").exists():
+        log(f"already staged: {runtime}")
+        return runtime
+    VERSIONS.mkdir(parents=True, exist_ok=True)
+    os.environ["UV_TOOL_DIR"] = str(VERSIONS / oid)
+    log(f"staging {oid} beside the active runtime; nothing is activated by this step")
+    install = ["uv", "tool", "install", "--force"]
+    if DEFAULT_INDEX:
+        install += ["--default-index", DEFAULT_INDEX]
+    result = run(
+        [*install, f"git+{GIT_SOURCE}@{oid}"],
+        check=False,
+        timeout=900,
+    )
+    for stream in (result.stdout, result.stderr):
+        for line in stream.splitlines():
+            if line.strip():
+                log("  uv: " + line.rstrip())
+    if result.returncode:
+        raise Abort(f"staging installer failed with exit {result.returncode}")
+    log(f"staged runtime: {runtime}")
+    return runtime
+
+
+def active_version() -> str | None:
+    try:
+        return ACTIVE.resolve(strict=True).parent.name
+    except OSError:
+        return None
+
+
+def skill_active_pin(oid: str) -> Path:
+    if len(oid) != 40 or any(c not in "0123456789abcdef" for c in oid):
+        raise Abort("sync-skill requires the full active commit OID")
+    if not ACTIVE.is_symlink():
+        raise Abort("sync-skill requires the existing pinned active runtime")
+    runtime = ACTIVE.resolve(strict=True)
+    if runtime.parent.name != oid or runtime != runtime_path(oid).resolve(strict=True):
+        raise Abort("active runtime changed or differs from the requested Skill source")
+    return runtime
+
+
+def frozen_skill(oid: str) -> dict[str, bytes]:
+    tree = run(
+        ["git", "-C", CONTROLLER_REPO, "ls-tree", "-r", "-z", oid, "--", SKILL_SOURCE],
+        timeout=60,
+    ).stdout
+    entries = {}
+    for row in tree.split("\0"):
+        if not row:
+            continue
+        identity, name = row.split("\t", 1)
+        mode, kind, blob = identity.split()
+        if mode != "100644" or kind != "blob" or not name.startswith(SKILL_SOURCE + "/"):
+            raise Abort("frozen Skill contains an unsupported entry")
+        relative = name.removeprefix(SKILL_SOURCE + "/")
+        if relative not in {"SKILL.md", "agents/openai.yaml"}:
+            raise Abort("sync-skill only supports the reviewed Skill and companion paths")
+        entries[relative] = blob
+    if set(entries) != {"SKILL.md", "agents/openai.yaml"}:
+        raise Abort("frozen Skill payload is missing a reviewed path")
+    return {name: git_bytes("cat-file", "blob", blob, timeout=60) for name, blob in entries.items()}
+
+
+def installed_skill() -> tuple[dict[str, bytes], int]:
+    for directory in (SKILL_TARGET.parent.parent, SKILL_TARGET.parent, SKILL_TARGET):
+        owned(directory, directory=True)
+    expected = {"SKILL.md", "agents", "agents/openai.yaml"}
+    paths = list(SKILL_TARGET.rglob("*"))
+    if {str(path.relative_to(SKILL_TARGET)) for path in paths} != expected:
+        raise Abort("installed Skill has unknown or missing paths")
+    # Classify the entire installation before reading any file contents.
+    for path in paths:
+        owned(path, directory=path.relative_to(SKILL_TARGET) == Path("agents"))
+    payload = {name: (SKILL_TARGET / name).read_bytes()
+               for name in ("SKILL.md", "agents/openai.yaml")}
+    return payload, owned(SKILL_TARGET / "SKILL.md").st_mode & 0o777
+
+
+def committed_skill_origin(oid: str, raw: bytes, payload: dict[str, bytes]) -> str:
+    if raw == payload["SKILL.md"]:
+        return oid
+    ancestors = run(
+        ["git", "-C", CONTROLLER_REPO, "rev-list", "--full-history", oid,
+         "--", f"{SKILL_SOURCE}/SKILL.md"],
+        timeout=60,
+    ).stdout.splitlines()
+    for ancestor in ancestors:
+        tree = run(
+            ["git", "-C", CONTROLLER_REPO, "ls-tree", ancestor,
+             "--", f"{SKILL_SOURCE}/SKILL.md"],
+            timeout=60,
+        ).stdout.split()
+        if len(tree) != 4 or tree[:2] != ["100644", "blob"]:
+            continue
+        previous = git_bytes("cat-file", "blob", tree[2], timeout=60)
+        if previous == raw:
+            run(["git", "-C", CONTROLLER_REPO, "merge-base", "--is-ancestor", ancestor, oid],
+                timeout=60)
+            return ancestor
+    raise Abort("installed Skill differs from every committed active ancestor")
+
+
+def rollback_skill_origin(oid: str, previous: str, before: dict, payload: dict) -> str:
+    if (len(previous) != 40 or any(c not in "0123456789abcdef" for c in previous)
+            or previous == oid):
+        raise Abort("Skill rollback requires a full, different previous commit OID")
+    ancestry = run(
+        ["git", "-C", CONTROLLER_REPO, "merge-base", "--is-ancestor", oid, previous],
+        timeout=60, check=False,
+    )
+    if ancestry.returncode:
+        raise Abort("Skill rollback source must be a descendant of the active commit")
+    verify_runtime(runtime_path(previous), previous)
+    previous_payload = frozen_skill(previous)
+    if before == payload:
+        return oid
+    if before != previous_payload:
+        raise Abort("installed Skill differs from the exact rollback source")
+    return previous
+
+
+def sync_skill(oid: str, *, dry_run: bool = False, rollback_from: str | None = None) -> dict:
+    if not GIT_SOURCE:
+        raise Abort("sync-skill requires CONTROLLER_ROLLOUT_GIT_SOURCE")
+    runtime = skill_active_pin(oid)
+    verify_runtime(runtime, oid)
+    payload = frozen_skill(oid)
+    before, mode = installed_skill()
+    if before["agents/openai.yaml"] != payload["agents/openai.yaml"]:
+        raise Abort("installed Skill companion differs from the active commit")
+    origin = (committed_skill_origin(oid, before["SKILL.md"], payload) if rollback_from is None
+              else rollback_skill_origin(oid, rollback_from, before, payload))
+    receipt = {
+        "contract": "active-skill-sync/v1",
+        "source_repository": str(CONTROLLER_REPO.resolve(strict=True)),
+        "source_commit": oid,
+        "active_runtime": str(runtime),
+        "installed_source_commit": origin,
+        "before_sha256": digest(before["SKILL.md"]),
+        "after_sha256": digest(payload["SKILL.md"]),
+        "companion_sha256": digest(payload["agents/openai.yaml"]),
+    }
+    if rollback_from is not None:
+        receipt["rollback_from_commit"] = rollback_from
+    with activation_lock():
+        if skill_active_pin(oid) != runtime or installed_skill() != (before, mode):
+            raise Abort("installed Skill changed since preflight")
+        changed = before != payload
+        result = "SKILL_SYNCED" if changed else "SKILL_ALREADY_CURRENT"
+        if dry_run:
+            return {**receipt, "result": "SKILL_SYNC_READY" if changed else result}
+        receipt = {**receipt, "result": result}
+        target = SKILL_TARGET / "SKILL.md"
+        receipt_path = LOG_DIR / f"skill-sync-{datetime.now().strftime('%Y%m%dT%H%M%S%f')}.json"
+        receipt_bytes = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode()
+        receipt_attempted = False
+        try:
+            if changed:
+                replace_file(target, payload["SKILL.md"], mode)
+            if skill_active_pin(oid) != runtime or installed_skill() != (payload, mode):
+                raise Abort("Skill verification failed after replacement")
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            owned(LOG_DIR, directory=True)
+            if receipt_path.exists() or receipt_path.is_symlink():
+                raise Abort("Skill sync receipt path already exists")
+            receipt_attempted = True
+            replace_file(receipt_path, receipt_bytes)
+        except BaseException:
+            for directory in (SKILL_TARGET.parent.parent, SKILL_TARGET.parent, SKILL_TARGET):
+                owned(directory, directory=True)
+            current_mode = owned(target).st_mode & 0o777
+            current = target.read_bytes()
+            if changed and current == payload["SKILL.md"] and current_mode == mode:
+                replace_file(target, before["SKILL.md"], mode)
+            elif current != before["SKILL.md"] or current_mode != mode:
+                raise Abort("unexpected installed Skill drift blocks automatic restoration") from None
+            if (receipt_attempted and receipt_path.is_file() and not receipt_path.is_symlink()
+                and receipt_path.read_bytes() == receipt_bytes):
+                receipt_path.unlink()
+            raise
+    return {**receipt, "receipt": str(receipt_path)}
+
+
+@contextmanager
+def activation_lock():
+    ROOT.mkdir(parents=True, exist_ok=True)
+    ACTIVATION_LOCK.touch(exist_ok=True)
+    with ACTIVATION_LOCK.open("r+b") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise Abort("another activation holds the lock") from None
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def switch(
+    runtime: Path, *, expected: Path | None = None, locked: bool = False, bootstrap: bool = False
+) -> None:
+    """Repoint the active pointer with the same CAS under the activation lock."""
+    if not locked:
+        with activation_lock():
+            return switch(runtime, expected=expected, locked=True, bootstrap=bootstrap)
+    if bootstrap and (ACTIVE.exists() or ACTIVE.is_symlink()):
+        raise Abort("bootstrap requires an absent active pointer")
+    if expected is not None and ACTIVE.resolve(strict=True) != expected.resolve(strict=True):
+        raise Abort("active runtime changed since preflight; activation is refused")
+    verify_toolchain_compatibility(runtime)
+    verify_resource_compatibility(runtime)
+    pending = ROOT / ".active.pending"
+    if pending.is_symlink() or pending.exists():
+        pending.unlink()
+    pending.symlink_to(runtime)
+    os.replace(pending, ACTIVE)
+    log(f"active runtime is now {runtime}")
+
+
+def bootstrap_runtime(source: Path, runtime: Path, oid: str, consumers: list[Path]) -> None:
+    """First activation uses the same gate, with an absent-pointer CAS.
+
+    Neutral entry points and initialized governance must already pass preflight.
+    A failed read-only smoke restores absence only while this exact pin is active.
+    """
+    if ACTIVE.exists() or ACTIVE.is_symlink():
+        raise Abort("bootstrap requires an absent active pointer; use activate for upgrades")
+    preflight(source, consumers, oid)
+    switch(runtime, bootstrap=True)
+    try:
+        post_activation_check(runtime, oid)
+    except (Abort, OSError, subprocess.SubprocessError, ValueError):
+        with activation_lock():
+            if not ACTIVE.is_symlink() or ACTIVE.resolve(strict=True) != runtime.resolve(
+                strict=True
+            ):
+                raise Abort("active runtime drift blocks bootstrap restoration") from None
+            ACTIVE.unlink()
+        log("bootstrap verification failed; restored the absent active pointer")
+        raise
+
+
+def verify_resource_compatibility(runtime: Path) -> None:
+    """A binary downgrade cannot strand current budgets or never-launched requests."""
+    from worktree_controller.resource_admission import AdmissionLedger
+
+    ledger = AdmissionLedger()
+    if not ledger.path.exists():
+        return
+    with ledger.locked():
+        rows = [row for row in ledger.read()["requests"].values()
+                if row["state"] not in {"RELEASED", "CANCELLED"}]
+        if not rows:
+            return
+        required = {"resource_admission_version": 1}
+        if any(
+            row["state"] == "RESERVED"
+            and row.get("transaction_id")
+            and any(
+                isinstance(event, dict)
+                and event.get("terminal_evidence") == "ACQUIRE_NO_EFFECT_SUPERSEDED"
+                and event.get("transaction_id") == row["transaction_id"]
+                for event in row.get("history", ())
+            )
+            for row in rows
+        ):
+            required["acquire_no_effect_recovery_version"] = 1
+        if any(row["request"].get("kind") == "execution" for row in rows):
+            required["execution_admission_version"] = 1
+        if any(row["request"].get("kind") == "execution" and row["request"].get("allocation_id") is None for row in rows):
+            required["host_execution_admission_version"] = 1
+        payload = json.loads(run([runtime / "bin/worktree-controller", "capabilities", "--json"], timeout=30).stdout)
+        observed = payload.get("decision", {})
+        if payload.get("errors") or any(type(observed.get(key)) is not int or observed[key] < value
+                                        for key, value in required.items()):
+            raise Abort("target runtime cannot preserve current resource requests; reconcile or use a compatible version")
+
+
+def verify_consumer_requirements(
+    payload: dict, consumers: list[Path], oid: str, *, timeout: float, process_group: bool
+) -> None:
+    """Keep current host minimums even when the target's frozen gate predates them."""
+    reported = payload.get("consumer_capabilities", {})
+    requirements = {}
+    blockers = []
+    for consumer in consumers:
+        capability = reported.get(str(consumer)) if isinstance(reported, dict) else None
+        if not isinstance(capability, dict):
+            blockers.append(f"CONSUMER_REQUIREMENT_UNVERIFIABLE:{consumer}")
+            continue
+        required = capability.get("required_controller_capabilities")
+        if required is None:
+            continue
+        if not isinstance(required, dict) or any(
+            not isinstance(name, str) or type(version) is not int or version < 1
+            for name, version in required.items()
+        ):
+            blockers.append(f"CONSUMER_REQUIREMENT_INVALID:{consumer}")
+        elif required:
+            requirements[str(consumer)] = required
+    if blockers:
+        for blocker in blockers:
+            log(f"  blocker: {blocker}")
+        raise RolloutBlocked(blockers)
+    if not requirements:
+        return
+
+    available = None
+    try:
+        result = run(
+            [runtime_path(oid) / "bin/worktree-controller", "capabilities", "--json"],
+            timeout=min(30, timeout), check=False, process_group=process_group,
+        )
+        response = json.loads(result.stdout)
+        if not result.returncode and isinstance(response, dict) and not response.get("errors"):
+            decision = response.get("decision")
+            if isinstance(decision, dict):
+                available = decision
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    for consumer, required in requirements.items():
+        if available is None:
+            blockers.append(f"CONSUMER_REQUIREMENT_UNVERIFIABLE:{consumer}")
+            continue
+        for name, version in sorted(required.items()):
+            observed = available.get(name)
+            if type(observed) is not int or observed < version:
+                blockers.append(f"CONSUMER_REQUIRES_CAPABILITY:{consumer}:{name}>={version}")
+    if blockers:
+        for blocker in blockers:
+            log(f"  blocker: {blocker}")
+        raise RolloutBlocked(blockers)
+
+
+def preflight(
+    source: Path,
+    consumers: list[Path],
+    oid: str,
+    receipt: Path | None = None,
+    receipt_sha: str | None = None,
+    *,
+    timeout: float = 300,
+    process_group: bool = False,
+) -> dict:
+    started = time.monotonic()
+    script = source / "scripts/check-writer-rollout"
+    command = [sys.executable, script, "--target-version", oid]
+    for consumer in consumers:
+        command += ["--consumer", str(consumer)]
+    if receipt is not None and receipt_sha:
+        command += [
+            "--recovery-preservation-receipt",
+            str(receipt),
+            "--recovery-preservation-receipt-sha256",
+            receipt_sha,
+        ]
+    for repository in GOVERNED:
+        command += ["--repo", str(repository)]
+    result = run(command, timeout=timeout, check=False, process_group=process_group)
+    try:
+        payload = json.loads(result.stdout)
+    except ValueError:
+        raise Abort(
+            f"rollout gate produced no decision:\n{result.stdout}\n{result.stderr}"
+        ) from None
+    if not isinstance(payload, dict):
+        raise Abort("rollout gate produced an invalid decision")
+    blockers = payload.get("blockers", [])
+    if not isinstance(blockers, list) or any(not isinstance(x, str) or not x for x in blockers):
+        raise Abort("rollout gate produced invalid blockers")
+    log(f"rollout gate: {payload.get('decision', '<missing>')}")
+    for blocker in blockers:
+        log(f"  blocker: {blocker}")
+    diagnostics = payload.get("transaction_diagnostics", [])
+    if isinstance(diagnostics, list):
+        for diagnostic in diagnostics:
+            if isinstance(diagnostic, dict):
+                log("  transaction diagnostic: " + json.dumps(diagnostic, sort_keys=True))
+    log(f"  surviving writers: {payload.get('surviving_writers')}")
+    if payload.get("decision") == "CLIENTS_READY" and not result.returncode and not blockers:
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(command, timeout)
+        verify_consumer_requirements(
+            payload, consumers, oid, timeout=remaining, process_group=process_group
+        )
+        return payload
+    if payload.get("decision") == "BLOCKED" and result.returncode == 2 and blockers:
+        raise RolloutBlocked(blockers)
+    raise Abort("rollout gate did not return CLIENTS_READY; activation is refused")
+
+
+def temporary_rollout_blocker(blocker: str) -> bool:
+    kind, _, identity = blocker.partition(":")
+    if kind == "LIVE_CONTROLLER_INVOCATION":
+        return identity.isdecimal() and int(identity) > 0
+    return kind in {
+        "CONTROLLER_MUTATION_IN_FLIGHT", "CONTROLLER_TRANSACTION_SET_CHANGED",
+    } and bool(identity)
+
+
+def wait_for_preflight(
+    source: Path,
+    consumers: list[Path],
+    oid: str,
+    previous_runtime: Path,
+    wait_ready_seconds: int,
+    receipt: Path | None = None,
+    receipt_sha: str | None = None,
+) -> dict:
+    deadline = time.monotonic() + wait_ready_seconds
+    attempt = 0
+
+    def unchanged_pointer() -> None:
+        if ACTIVE.resolve(strict=True) != previous_runtime:
+            raise Abort("active pointer changed while waiting for rollout readiness")
+
+    def timed_out() -> Abort:
+        return Abort(f"rollout readiness wait timed out after {wait_ready_seconds}s; activation is refused")
+
+    while True:
+        unchanged_pointer()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise timed_out()
+        attempt += 1
+        log(f"rollout readiness attempt {attempt}; remaining budget {remaining:.1f}s")
+        try:
+            payload = preflight(
+                source, consumers, oid, receipt, receipt_sha,
+                timeout=min(300, remaining), process_group=True,
+            )
+        except RolloutBlocked as failure:
+            if not all(temporary_rollout_blocker(x) for x in failure.blockers):
+                raise
+            unchanged_pointer()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise timed_out() from failure
+            log("waiting for temporary rollout blockers before repeating the complete gate")
+            time.sleep(min(2, remaining))
+        except subprocess.TimeoutExpired as failure:
+            unchanged_pointer()
+            if remaining <= 300:
+                raise timed_out() from failure
+            raise Abort("rollout gate exceeded its 300s command limit; activation is refused") from failure
+        else:
+            unchanged_pointer()
+            if time.monotonic() >= deadline:
+                raise timed_out()
+            return payload
+
+
+def post_activation_check(runtime: Path, oid: str) -> None:
+    binary = runtime / "bin/worktree-controller"
+    reported = verify_runtime(runtime, oid)
+    payload = json.loads(run([binary, "capabilities", "--json"], timeout=60).stdout)
+    expected = {
+        "code": "CAPABILITIES",
+        "writer_session_version": 2,
+        "holder_resolver_version": 1,
+        "host_managed_writer_session_version": 2,
+    }
+    decision = payload.get("decision")
+    if (payload.get("errors") != [] or not isinstance(decision, dict)
+        or any(type(decision.get(key)) is not type(value) or decision.get(key) != value
+               for key, value in expected.items())):
+        raise Abort("activated Controller does not advertise the reviewed capability contract")
+    for repository in GOVERNED:
+        status = run(
+            [binary, "status", "--repo", str(repository), "--json"], timeout=120, check=False
+        )
+        if status.returncode:
+            raise Abort(f"activated Controller cannot read {repository}")
+    log(f"post-activation verification passed for {reported} ({oid})")
+
+
+def previous_contract(oid: str) -> dict:
+    return release_contract(oid)
+
+
+def migrate_layout(source: Path, runtime: Path, oid: str, arguments, previous_runtime: Path):
+    """A schema/layout cutover is a fenced activation, never a path fallback."""
+    own_source = Path(__file__).resolve().parent.parent
+    for relative in (
+        "scripts/controller-activate",
+        "src/worktree_controller/activation_layout.py",
+        "src/worktree_controller/store.py",
+    ):
+        if (own_source / relative).read_bytes() != (source / relative).read_bytes():
+            raise Abort("layout activation must run the exact frozen candidate source")
+    previous_oid = previous_runtime.parent.name
+    contract = previous_contract(previous_oid)
+    verify_runtime(previous_runtime, previous_oid, entrypoint=contract["entrypoint"])
+    previous_entries = {}
+    home = Path.home()
+    for argument in arguments.previous_entrypoint:
+        name, separator, sha = argument.rpartition("=")
+        path = Path(name)
+        if (
+            not separator
+            or len(sha) != 64
+            or any(c not in "0123456789abcdef" for c in sha)
+            or path.parent not in {home / "bin", home / ".local/bin"}
+        ):
+            raise Abort("--previous-entrypoint requires an exact installed bin path=SHA256")
+        if path in previous_entries:
+            raise Abort("duplicate previous entry point")
+        previous_entries[path] = sha
+    launcher = (source / "scripts/controller-runtime").read_bytes()
+    entries = {
+        home / ".local/bin" / name: launcher
+        for name in ("worktree-controller", "worktree-session", "worktree-session-end")
+    }
+    entries[home / "bin/controller-runtime"] = launcher
+    repositories = {}
+    for repository in GOVERNED:
+        common = run(
+            ["git", "-C", repository, "rev-parse", "--path-format=absolute", "--git-common-dir"]
+        ).stdout.strip()
+        repositories[repository.resolve(strict=True)] = Path(common).resolve(strict=True)
+    receipt = LOG_DIR / f"layout-{datetime.now().strftime('%Y%m%dT%H%M%S%f')}" / "receipt.json"
+    with activation_lock():
+        if ACTIVE.resolve(strict=True) != previous_runtime:
+            raise Abort("active runtime changed before layout preflight")
+        migration = LayoutMigration.prepare(
+            receipt,
+            repositories,
+            previous_namespace=arguments.migrate_namespace_from,
+            previous_policy=arguments.migrate_policy_from,
+            previous_entries=previous_entries,
+            entries=entries,
+            runtimes={
+                "before": str(previous_runtime),
+                "after": str(runtime),
+                "before_oid": previous_oid,
+                "after_oid": oid,
+            },
+        )
+        try:
+            migration.apply()
+            preflight(source, arguments.consumer, oid)
+            switch(runtime, expected=previous_runtime, locked=True)
+            post_activation_check(runtime, oid)
+            migration.document["phase"] = "activated"
+            migration.save()
+        except BaseException:
+            active = ACTIVE.resolve(strict=True)
+            if active == runtime:
+                switch(previous_runtime, expected=runtime, locked=True)
+            elif active != previous_runtime:
+                raise Abort("active pointer drift blocks automatic layout rollback") from None
+            migration.rollback()
+            raise
+    log(f"layout receipt: {receipt}")
+    log(f"layout receipt sha256: {digest(receipt.read_bytes())}")
+    log("previous entries remain fenced until explicit finish-layout after client acceptance")
+
+
+def recover_layout(arguments) -> None:
+    migration = LayoutMigration.load(arguments.layout_receipt, arguments.layout_receipt_sha256)
+    runtimes = migration.document["runtimes"]
+    before, after = Path(runtimes["before"]), Path(runtimes["after"])
+    with activation_lock():
+        active = ACTIVE.resolve(strict=True)
+        if arguments.action == "finish-layout":
+            if active != after:
+                raise Abort("active runtime no longer matches the layout receipt")
+            migration.finish()
+        else:
+            if active not in {before, after}:
+                raise Abort("active runtime drift blocks layout rollback")
+            contract = previous_contract(runtimes["before_oid"])
+            verify_runtime(before, runtimes["before_oid"], entrypoint=contract["entrypoint"])
+            verify_toolchain_compatibility(before)
+            verify_resource_compatibility(before)
+            migration.rollback()
+            if active == after:
+                switch(before, expected=after, locked=True)
+            for row in migration.document["repositories"]:
+                run(
+                    [
+                        before / "bin" / contract["entrypoint"],
+                        "status",
+                        "--repo",
+                        row["canonical"],
+                        "--json",
+                    ]
+                )
+    log(f"layout {migration.document['phase']}: {arguments.layout_receipt}")
+    log(f"layout receipt sha256: {digest(arguments.layout_receipt.read_bytes())}")
+
+
+def main() -> int:
+    global _log_handle, TEMP_HELPER, TOOLCHAIN_COMPATIBILITY
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "action",
+        choices=(
+            "stage",
+            "bootstrap",
+            "activate",
+            "rollback",
+            "status",
+            "finish-layout",
+            "sync-skill",
+        ),
+    )
+    parser.add_argument("--version", help="Controller commit to stage or activate")
+    parser.add_argument(
+        "--wait-ready-seconds", type=int, metavar="SECONDS",
+        help="retry only temporary rollout blockers within 1..3600 seconds (ordinary activate/rollback)",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="verify sync-skill without replacing it")
+    parser.add_argument(
+        "--skill-rollback-from", metavar="FULL_COMMIT_OID",
+        help="sync-skill only: prove the exact installed descendant Skill after runtime rollback",
+    )
+    parser.add_argument(
+        "--consumer",
+        type=Path,
+        action="append",
+        default=[],
+        help="deployed host capability command; repeat for every external consumer",
+    )
+    parser.add_argument("--recovery-preservation-receipt", type=Path)
+    parser.add_argument("--recovery-preservation-receipt-sha256")
+    parser.add_argument("--temp-helper", type=Path, default=TEMP_HELPER)
+    parser.add_argument(
+        "--toolchain-compatibility", type=Path, default=TOOLCHAIN_COMPATIBILITY,
+        help="published canonical owner catalog required before staged acceptance or any runtime switch",
+    )
+    parser.add_argument("--migrate-namespace-from")
+    parser.add_argument("--migrate-policy-from")
+    parser.add_argument("--previous-entrypoint", action="append", default=[])
+    parser.add_argument("--layout-receipt", type=Path)
+    parser.add_argument("--layout-receipt-sha256")
+    arguments = parser.parse_args()
+    if arguments.dry_run and arguments.action != "sync-skill":
+        parser.error("--dry-run is only supported for sync-skill")
+    if arguments.skill_rollback_from is not None and arguments.action != "sync-skill":
+        parser.error("--skill-rollback-from is only supported for sync-skill")
+    if arguments.action == "sync-skill" and (
+        arguments.consumer
+        or arguments.recovery_preservation_receipt
+        or arguments.recovery_preservation_receipt_sha256
+    ):
+        parser.error("sync-skill does not accept consumer or recovery options")
+    TEMP_HELPER = arguments.temp_helper
+    if TEMP_HELPER is not None and not TEMP_HELPER.is_absolute():
+        parser.error("--temp-helper must be absolute")
+    TOOLCHAIN_COMPATIBILITY = arguments.toolchain_compatibility
+    if TOOLCHAIN_COMPATIBILITY is not None and not TOOLCHAIN_COMPATIBILITY.is_absolute():
+        parser.error("--toolchain-compatibility must be absolute")
+    migration_requested = bool(
+        arguments.migrate_namespace_from
+        or arguments.migrate_policy_from
+        or arguments.previous_entrypoint
+    )
+    if arguments.wait_ready_seconds is not None and (
+        not 1 <= arguments.wait_ready_seconds <= 3600
+        or arguments.action not in {"activate", "rollback"}
+        or migration_requested
+        or arguments.layout_receipt
+        or arguments.layout_receipt_sha256
+    ):
+        parser.error("--wait-ready-seconds requires 1..3600 seconds and ordinary activate/rollback")
+    if migration_requested and (
+        arguments.action != "activate"
+        or not all(
+            (
+                arguments.migrate_namespace_from,
+                arguments.migrate_policy_from,
+                arguments.previous_entrypoint,
+            )
+        )
+    ):
+        parser.error(
+            "layout activation requires both previous layout paths and exact entry point hashes"
+        )
+    if (
+        arguments.layout_receipt
+        or arguments.layout_receipt_sha256
+        or arguments.action == "finish-layout"
+    ) and (
+        arguments.action not in {"rollback", "finish-layout"}
+        or not arguments.layout_receipt
+        or not arguments.layout_receipt.is_absolute()
+        or not arguments.layout_receipt_sha256
+        or migration_requested
+        or arguments.version
+    ):
+        parser.error("layout recovery requires only an absolute receipt and its exact SHA256")
+
+    if arguments.action == "sync-skill":
+        try:
+            if not arguments.version:
+                raise Abort("--version is required")
+            print(json.dumps(sync_skill(arguments.version, dry_run=arguments.dry_run,
+                                        rollback_from=arguments.skill_rollback_from), sort_keys=True))
+            return 0
+        except (Abort, LayoutError, OSError, subprocess.SubprocessError, ValueError) as failure:
+            log(f"ABORTED: {failure}")
+            return 2
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
+    log_path = LOG_DIR / f"activate-{arguments.action}-{stamp}.log"
+    _log_handle = log_path.open("w", encoding="utf-8")
+    log(f"log: {log_path}")
+
+    work = None
+    try:
+        if arguments.layout_receipt:
+            recover_layout(arguments)
+            return 0
+        if arguments.action == "status":
+            log(f"active: {active_version() or '<none>'}")
+            for entry in sorted(VERSIONS.glob("*")) if VERSIONS.is_dir() else []:
+                if (entry / "worktree-controller/bin/worktree-controller").exists():
+                    log(f"  staged: {entry.name}")
+            return 0
+        if not GIT_SOURCE:
+            raise Abort("rollout requires CONTROLLER_ROLLOUT_GIT_SOURCE")
+        if not arguments.version:
+            raise Abort("--version is required")
+        oid = arguments.version
+        if arguments.action == "stage":
+            work = temporary_directory("controller-stage")
+            # Entry points go to a throwaway directory: staging must never rewrite the
+            # pinned entry points that are currently in charge.
+            os.environ["UV_TOOL_BIN_DIR"] = str(work / "bin")
+            runtime = stage(oid)
+            log(f"staged version reports {verify_runtime(runtime, oid)}")
+            verify_toolchain_compatibility(runtime)
+            return 0
+        runtime = runtime_path(oid)
+        verify_runtime(runtime, oid)
+        verify_toolchain_compatibility(runtime)
+        work = temporary_directory("controller-gate")
+        source = frozen_source(work, oid)
+        if arguments.action == "bootstrap":
+            if (
+                arguments.recovery_preservation_receipt
+                or arguments.recovery_preservation_receipt_sha256
+            ):
+                raise Abort("bootstrap does not accept upgrade recovery options")
+            bootstrap_runtime(source, runtime, oid, arguments.consumer)
+            log("bootstrap complete")
+            return 0
+        previous = active_version()
+        if previous is None:
+            raise Abort(
+                "activation requires a verified previous runtime; use bootstrap for first activation"
+            )
+        previous_runtime = ACTIVE.resolve(strict=True)
+        log(f"currently active: {previous or '<unpinned>'}")
+        if arguments.action == "activate":
+            verify_release_lineage(previous, oid)
+        elif arguments.action == "rollback":
+            verify_rollback_lineage(previous, oid)
+        if migration_requested:
+            migrate_layout(source, runtime, oid, arguments, previous_runtime)
+            return 0
+        if arguments.wait_ready_seconds is None:
+            preflight(
+                source, arguments.consumer, oid,
+                arguments.recovery_preservation_receipt,
+                arguments.recovery_preservation_receipt_sha256,
+            )
+        else:
+            wait_for_preflight(
+                source, arguments.consumer, oid, previous_runtime,
+                arguments.wait_ready_seconds,
+                arguments.recovery_preservation_receipt,
+                arguments.recovery_preservation_receipt_sha256,
+            )
+        switch(runtime, expected=previous_runtime)
+        try:
+            post_activation_check(runtime, oid)
+        except (Abort, OSError, subprocess.SubprocessError, ValueError) as failure:
+            log(f"post-activation verification failed: {failure}")
+            # State can advance after the first switch. The previous binary must
+            # pass the same metadata, transaction and consumer gate as any rollback.
+            rollback_source = frozen_source(work / "rollback", previous)
+            verify_runtime(previous_runtime, previous)
+            verify_toolchain_compatibility(previous_runtime)
+            preflight(
+                rollback_source, arguments.consumer, previous,
+                arguments.recovery_preservation_receipt,
+                arguments.recovery_preservation_receipt_sha256,
+            )
+            switch(previous_runtime, expected=runtime)
+            post_activation_check(previous_runtime, previous)
+            log("rolled back to the previously active runtime")
+            return 3
+        log("activation complete; running commands finished on their own version")
+        return 0
+    except (Abort, LayoutError) as failure:
+        log(f"ABORTED: {failure}")
+        return 2
+    except (OSError, subprocess.SubprocessError, ValueError) as failure:
+        log(f"ABORTED: {failure}")
+        return 2
+    finally:
+        if work is not None and work.is_dir():
+            cleanup_temporary_directory(work)
+        if _log_handle is not None:
+            _log_handle.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

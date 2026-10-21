@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""Run optional acceptance against an explicitly pinned Controller/Finalizer pair."""
+
+import argparse
+import hashlib
+import json
+import os
+import runpy
+import subprocess
+import sys
+import tomllib
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+TESTS = (
+    "tests/test_branch_retirement_git_finalizer_acceptance.py::"
+    "test_the_released_consumer_accepts_a_controller_plan_and_rejects_drift",
+    "tests/test_branch_retirement_git_finalizer_acceptance.py::"
+    "test_the_grant_surface_and_the_consumer_pin_coexist",
+    "tests/test_publication_execution.py::"
+    "test_real_finalizer_crash_recovery_and_duplicate_execution",
+    "tests/test_installed_continuation_acceptance.py::"
+    "test_installed_direct_holder_continues_after_handoff",
+    "tests/test_installed_continuation_acceptance.py::"
+    "test_installed_hosted_holder_continues_after_handoff",
+    "tests/test_installed_continuation_acceptance.py::"
+    "test_installed_same_holder_can_write_other_leased_checkouts",
+    "tests/test_installed_continuation_acceptance.py::"
+    "test_installed_frozen_checkout_still_refuses_writes",
+    "tests/test_installed_load_acceptance.py::test_installed_wait_interrupt_during_report",
+    "tests/test_installed_load_acceptance.py::test_installed_wait_interrupt_during_repoll",
+    "tests/test_installed_load_acceptance.py::test_installed_wait_interrupt_preserves_bound_provider",
+    "tests/test_installed_load_acceptance.py::test_installed_growing_thread_pool_retains_reference",
+    "tests/test_installed_load_acceptance.py::test_installed_contracting_thread_pool_retains_reference",
+    "tests/test_installed_load_acceptance.py::test_installed_exiting_process_resolves_after_rescan",
+    "tests/test_installed_load_acceptance.py::test_installed_live_thread_keeps_exit_uncertain",
+    "tests/test_installed_load_acceptance.py::test_installed_live_permission_denial_stays_uncertain",
+    "tests/test_installed_exited_holder_acceptance.py::test_installed_exited_holder_releases_exact_lease",
+    "tests/test_installed_exited_holder_acceptance.py::test_installed_exited_holder_requires_lease_id",
+    "tests/test_installed_exited_holder_acceptance.py::test_installed_exited_holder_rejects_changed_identity",
+    "tests/test_installed_exited_holder_acceptance.py::test_installed_exited_holder_keeps_surviving_group",
+    "tests/test_installed_exited_holder_acceptance.py::test_installed_exited_holder_keeps_checkout_occupant",
+    "tests/test_installed_conflict_retry_acceptance.py::test_installed_retried_conflict_resolves_and_publishes",
+    "tests/test_installed_conflict_retry_acceptance.py::test_installed_retry_refuses_candidate_without_abort",
+    "tests/test_installed_conflict_retry_acceptance.py::test_installed_retry_refuses_unreleased_aborted_candidate",
+    "tests/test_installed_conflict_retry_acceptance.py::test_installed_resolution_refuses_wrong_head",
+    "tests/test_installed_conflict_retry_acceptance.py::test_installed_resolution_refuses_dirty_candidate",
+    "tests/test_installed_conflict_retry_acceptance.py::test_installed_resolution_refuses_scope_escape",
+    "tests/test_installed_conflict_retry_acceptance.py::test_installed_resolution_refuses_wrong_parents",
+    "tests/test_installed_conflict_retry_acceptance.py::test_installed_resolved_candidate_requires_fresh_validation",
+    "tests/test_installed_publication_reprepare_acceptance.py::test_installed_main_advance_invalidates_preparation",
+    "tests/test_installed_publication_reprepare_acceptance.py::test_installed_refresh_refuses_stale_record_cas",
+    "tests/test_installed_publication_reprepare_acceptance.py::test_installed_refresh_requires_new_validation_then_publishes",
+    "tests/test_installed_publication_lease_acceptance.py::test_installed_live_publication_lease_refuses_second_candidate",
+    "tests/test_installed_publication_lease_acceptance.py::test_installed_expired_publisher_cannot_disturb_replacement_lease",
+    "tests/test_installed_publication_lease_acceptance.py::test_installed_expired_lease_recovers_completed_push_without_repush",
+    "tests/test_installed_publication_refusal_acceptance.py::test_installed_publication_refuses_wrong_run_without_disturbing_lease",
+    "tests/test_installed_publication_refusal_acceptance.py::test_installed_publication_refuses_dirty_candidate_then_reuses_lease",
+    "tests/test_installed_publication_refusal_acceptance.py::test_installed_publication_refuses_split_endpoints_without_pushing_either",
+    "tests/test_installed_publication_remote_acceptance.py::test_installed_publication_refuses_remote_advance_then_reprepares_same_intent",
+    "tests/test_installed_publication_remote_acceptance.py::test_installed_publication_refuses_unavailable_remote_then_reuses_same_lease",
+    "tests/test_installed_publication_session_acceptance.py::test_installed_session_refuses_complete_before_authorization",
+    "tests/test_installed_publication_session_acceptance.py::test_installed_session_refuses_completion_without_remote_push",
+    "tests/test_installed_publication_session_acceptance.py::test_installed_session_disconnect_releases_lock_and_reuses_lease",
+    "tests/test_installed_renewal_backoff_acceptance.py::test_installed_first_expiry_renews_immediately",
+    "tests/test_installed_renewal_backoff_acceptance.py::test_installed_retention_backoff_keeps_unchanged_handoff",
+    "tests/test_installed_renewal_backoff_acceptance.py::test_installed_changed_record_renews_and_releases",
+)
+
+ROLLOUT_TESTS = tuple(
+    f"tests/test_rollout_process_acceptance.py::{name}" for name in (
+        "test_installed_rollout_retries_added_transactions",
+        "test_installed_rollout_retries_completed_transactions",
+        "test_installed_rollout_rechecks_addition_after_probe",
+        "test_installed_rollout_churn_exhausts_budget",
+        "test_installed_rollout_stops_on_real_recovery_error",
+        "test_installed_rollout_preserves_pointer_drift",
+        "test_installed_rollout_timeout_kills_only_its_gate_tree",
+        "test_installed_rollback_succeeds_with_frozen_target_gate",
+        "test_installed_rollback_retries_real_mutation_lock",
+        "test_installed_rollback_preserves_legacy_transaction_refusal",
+        "test_installed_rollback_stops_on_real_recovery_error",
+        "test_installed_rollback_enforces_consumer_minimum",
+        "test_installed_rollback_refuses_non_ancestor",
+        "test_installed_rollback_preserves_pointer_drift",
+        "test_installed_rollback_timeout_kills_only_its_gate_tree",
+        "test_installed_restoration_succeeds_with_frozen_previous_gate",
+        "test_installed_restoration_refuses_new_recovery_error",
+        "test_installed_restoration_enforces_changed_consumer_minimum",
+        "test_installed_restoration_rechecks_published_catalog",
+        "test_installed_restoration_preserves_concurrent_pointer",
+    )
+)
+
+
+def verify_results(report, tests=TESTS):
+    root = ET.parse(report).getroot()
+    cases = list(root.iter("testcase"))
+    expected = {node.rsplit("::", 1)[1] for node in tests}
+    if ({case.get("name") for case in cases} != expected or len(cases) != len(tests)
+            or any(list(root.iter(tag)) for tag in ("skipped", "failure", "error"))):
+        raise AssertionError("cross-tool acceptance requires all selected cases to pass without skips")
+    return {"passed": len(cases), "failed": 0, "skipped": 0}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--work-dir", type=Path, required=True, help="new output directory; never reused")
+    parser.add_argument("--controller", type=Path, required=True, help="versioned installed entry point")
+    parser.add_argument("--controller-version", required=True)
+    parser.add_argument("--git-finalizer", type=Path, required=True)
+    parser.add_argument("--finalizer-version", required=True)
+    parser.add_argument("--retirement-companion", type=Path, required=True)
+    parser.add_argument(
+        "--rollout-previous-controller", type=Path,
+        help="also run rollout process acceptance using two commit-pinned installed runtimes",
+    )
+    parser.add_argument("--offline", action="store_true", help="use cached locked dev dependencies")
+    arguments = parser.parse_args()
+    work_dir = arguments.work_dir.absolute()
+    if work_dir.exists() or work_dir.is_symlink():
+        parser.error("--work-dir must not already exist; existing outputs are preserved")
+    if sys.platform != "linux" or sys.version_info[:2] != (3, 12) or os.geteuid() == 0:
+        parser.error("checks require Linux, Python 3.12 and an unprivileged user")
+    for path in (arguments.controller, arguments.git_finalizer, arguments.retirement_companion):
+        if not path.is_absolute() or not path.is_file():
+            parser.error("tool paths must be existing absolute files")
+    for path in (arguments.controller, arguments.git_finalizer):
+        if not os.access(path, os.X_OK):
+            parser.error("tool entry points must be executable")
+    if arguments.rollout_previous_controller is not None:
+        for path in (arguments.controller, arguments.rollout_previous_controller):
+            if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
+                parser.error("rollout runtime pins must be existing absolute executables")
+            oid = path.parent.parent.parent.name
+            if len(oid) != 40 or any(c not in "0123456789abcdef" for c in oid):
+                parser.error("rollout runtime pins must name commit-pinned installations")
+    selected = TESTS + (ROLLOUT_TESTS if arguments.rollout_previous_controller else ())
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    contract = json.loads((ROOT / "tool_cli_contract.json").read_text())
+    if project["version"] != arguments.controller_version:
+        parser.error("checkout version does not match --controller-version")
+    if contract["tool_version"] != project["version"]:
+        raise RuntimeError("source contract version mismatch")
+
+    # Reuse the ordinary acceptance environment and command runner; its default suite stays independent.
+    checks = runpy.run_path(str(ROOT / "scripts/check-project"))
+    run = checks["run"]
+    work_dir.mkdir(parents=True)
+    cache_dir = run("uv", "cache", "dir", capture=True).stdout.strip()
+    environment = checks["fixture_environment"](work_dir, cache_dir)
+    temporary = work_dir / "tmp"
+    temporary.mkdir()
+    environment["TMPDIR"] = str(temporary)
+    tools = {
+        "controller": arguments.controller,
+        "git_finalizer": arguments.git_finalizer,
+        "retirement_companion": arguments.retirement_companion,
+    }
+    if arguments.rollout_previous_controller is not None:
+        tools["rollout_previous_controller"] = arguments.rollout_previous_controller
+        environment["WORKTREE_CONTROLLER_ROLLOUT_PREVIOUS"] = str(arguments.rollout_previous_controller)
+    hashes = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in tools.items()}
+    for path, expected in (
+        (arguments.controller, f"worktree-controller {arguments.controller_version}"),
+        (arguments.git_finalizer, f"git-finalize {arguments.finalizer_version}"),
+    ):
+        observed = run(path, "--version", env=environment, capture=True, timeout=30).stdout.strip()
+        if observed != expected:
+            raise RuntimeError(f"tool version mismatch: expected {expected}, got {observed}")
+    capabilities = json.loads(run(
+        arguments.controller, "capabilities", "--json", env=environment, capture=True, timeout=30,
+    ).stdout)
+    if capabilities["errors"]:
+        raise RuntimeError(capabilities["errors"])
+    for key in ("contract_version", "storage_layout_version", "host_handoff_continuation_version",
+                "exited_holder_release_version", "integration_conflict_resolution_version",
+                "retention_convergence_version", "integration_publication_execution_version"):
+        if capabilities["decision"][key] != contract[key]:
+            raise RuntimeError(f"{key} mismatch")
+    run("uv", "sync", "--locked", "--python", sys.executable,
+        *(["--offline"] if arguments.offline else []))
+    binaries = work_dir / "controller-bin"
+    binaries.mkdir()
+    (binaries / "worktree-controller").symlink_to(arguments.controller)
+    environment["PATH"] = os.pathsep.join((str(binaries), str(ROOT / ".venv/bin"), environment["PATH"]))
+    environment.update(
+        WORKTREE_CONTROLLER_ACCEPTANCE=str(arguments.controller),
+        WORKTREE_CONTROLLER_GIT_FINALIZER=str(arguments.git_finalizer),
+        WORKTREE_CONTROLLER_GIT_FINALIZER_COMPANION=str(arguments.retirement_companion),
+        GIT_FINALIZER_ACCEPTANCE=str(arguments.git_finalizer),
+    )
+    report = work_dir / "pytest.xml"
+    run(ROOT / ".venv/bin/python", "-m", "pytest", "-q", "--tb=short",
+        "-p", "no:cacheprovider", "--basetemp", work_dir / "pytest", "--junitxml", report,
+        *selected, env=environment, timeout=900)
+    results = verify_results(report, selected)
+    if hashes != {
+        name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in tools.items()
+    }:
+        raise RuntimeError("tool entry points changed during acceptance")
+    evidence = {
+        "schema_version": 1,
+        "controller_version": arguments.controller_version,
+        "finalizer_version": arguments.finalizer_version,
+        "cli_contract_version": contract["contract_version"],
+        "storage_layout_version": contract["storage_layout_version"],
+        "tools": {name: {"path": str(path), "sha256": hashes[name]} for name, path in tools.items()},
+        "tests": {"nodes": list(selected), **results},
+        "junit_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
+    }
+    (work_dir / "cross-tool.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+    print(f"Cross-tool checks passed: {results['passed']} passed, 0 skipped. Outputs: {work_dir}")
+
+
+if __name__ == "__main__":
+    try:
+        if sys.platform == "linux" and os.getpid() == 1:
+            helpers = runpy.run_path(str(ROOT / "scripts/check-project"))
+            raise SystemExit(helpers["namespace_init"]([sys.executable, *sys.orig_argv[1:]]))
+        main()
+    except (AssertionError, RuntimeError, OSError, subprocess.SubprocessError, ET.ParseError) as error:
+        print(f"Cross-tool checks failed: {error}", file=sys.stderr)
+        raise SystemExit(1) from error

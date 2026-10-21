@@ -1,0 +1,6 @@
+interface:
+  display_name: "Worktree Lifecycle"
+  short_description: "编排 worktree authority、handoff 与 release"
+  default_prompt: "Use $worktree-lifecycle to route this repository task through the correct worktree authority and lifecycle gates."
+policy:
+  allow_implicit_invocation: true

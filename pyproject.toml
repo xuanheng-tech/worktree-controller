@@ -1,0 +1,45 @@
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[project]
+name = "worktree-controller"
+version = "1.30.4"
+description = "Govern Git worktree budgets, authority, ownership, and lifecycle"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = ["websockets>=15,<16"]
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4,<9",
+    "ruff>=0.15,<0.16",
+]
+
+[project.scripts]
+worktree-controller = "worktree_controller.cli:main"
+worktree-session = "worktree_controller.writer_session:run_main"
+worktree-session-end = "worktree_controller.session:main"
+
+[tool.uv.build-backend]
+module-name = "worktree_controller"
+module-root = "src"
+source-include = ["tool_cli_contract.json"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

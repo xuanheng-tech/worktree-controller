@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""Run the same self-contained acceptance checks locally and in CI."""
+
+import argparse
+import json
+import os
+import shlex
+import signal
+import subprocess
+import sys
+import tomllib
+from contextlib import suppress
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_SMOKE = """
+import importlib.metadata
+import importlib.resources
+import pathlib
+import sys
+import worktree_controller.metadata_codec
+
+root = pathlib.Path(sys.argv[1])
+distribution = importlib.metadata.distribution('worktree-controller')
+if distribution.version != sys.argv[2]:
+    raise RuntimeError('distribution version mismatch')
+package = importlib.resources.files('worktree_controller')
+if pathlib.Path(str(package)).is_relative_to(root):
+    raise RuntimeError('source import leaked into smoke')
+if package.joinpath('tool_cli_contract.json').read_bytes() != (
+    root / 'tool_cli_contract.json'
+).read_bytes():
+    raise RuntimeError('packaged CLI contract mismatch')
+if distribution.metadata['License-Expression'] != 'Apache-2.0':
+    raise RuntimeError('packaged license expression mismatch')
+licenses = [item for item in distribution.files if str(item).endswith('.dist-info/licenses/LICENSE')]
+if len(licenses) != 1:
+    raise RuntimeError('packaged license missing')
+if distribution.locate_file(licenses[0]).read_bytes() != (root / 'LICENSE').read_bytes():
+    raise RuntimeError('packaged license content mismatch')
+if distribution.metadata.get_payload().strip() != (root / 'README.md').read_text().strip():
+    raise RuntimeError('packaged README mismatch')
+"""
+
+
+def run(*arguments, cwd=ROOT, env=None, capture=False, timeout=600):
+    command = [str(argument) for argument in arguments]
+    display = command.copy()
+    if "-c" in display and display[0].endswith("/python"):
+        display[display.index("-c") + 1] = "<package smoke>"
+    print(f"+ {shlex.join(display)}", flush=True)
+    try:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            capture_output=capture,
+            text=True,
+            check=True,
+            timeout=timeout,
+        )
+    except subprocess.CalledProcessError as error:
+        if capture:
+            print(error.stdout, end="", file=sys.stderr)
+            print(error.stderr, end="", file=sys.stderr)
+        raise
+
+
+def fixture_environment(work_dir, cache_dir):
+    # Fixture subprocesses must not inherit caller secrets, proxies or opt-in host integrations.
+    environment = {
+        key: os.environ[key]
+        for key in ("PATH", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "TZ")
+        if key in os.environ
+    }
+    home = work_dir / "fixture-home"
+    home.mkdir()
+    environment.update(
+        HOME=str(home),
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONNOUSERSITE="1",
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+        UV_OFFLINE="1",
+        UV_CACHE_DIR=cache_dir,
+        UV_PYTHON=sys.executable,
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_TERMINAL_PROMPT="0",
+        NO_PROXY="*",
+        no_proxy="*",
+    )
+    return environment
+
+
+def installed_smoke(wheel, destination, work_dir, environment, project, contract):
+    run("uv", "venv", "--offline", "--python", sys.executable, destination)
+    python = destination / "bin/python"
+    run(
+        "uv", "pip", "install", "--no-index", "--no-deps", "--python", python, wheel,
+        cwd=work_dir,
+    )
+    run(
+        python, "-I", "-c", PACKAGE_SMOKE, ROOT, project["version"],
+        cwd=work_dir, env=environment,
+    )
+    controller = destination / "bin/worktree-controller"
+    version = run(controller, "--version", cwd=work_dir, env=environment, capture=True)
+    if version.stdout.strip() != f"worktree-controller {project['version']}":
+        raise RuntimeError("installed Controller version mismatch")
+    for name in project["scripts"]:
+        run(destination / "bin" / name, "--help", cwd=work_dir, env=environment, capture=True)
+    capabilities = json.loads(
+        run(controller, "capabilities", "--json", cwd=work_dir, env=environment, capture=True).stdout
+    )
+    if capabilities["tool_version"] != project["version"]:
+        raise RuntimeError("installed capability version mismatch")
+    for key in ("contract_version", "storage_layout_version"):
+        if capabilities["decision"][key] != contract[key]:
+            raise RuntimeError(f"{key} mismatch")
+    repository = destination / "fixture-repo"
+    run("git", "init", "--initial-branch=main", repository, cwd=work_dir, env=environment)
+    run(
+        "git", "-C", repository, "-c", "user.name=Acceptance Fixture",
+        "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture",
+        cwd=work_dir, env=environment,
+    )
+    status = json.loads(
+        run(
+            controller, "status", "--repo", repository, "--json",
+            cwd=work_dir, env=environment, capture=True,
+        ).stdout
+    )
+    if status["errors"]:
+        raise RuntimeError(status["errors"])
+    if status["repository"]["canonical_path"] != str(repository):
+        raise RuntimeError("installed Controller repository mismatch")
+
+
+def namespace_init(arguments):
+    """Reap orphan fixtures without consuming the check worker's exit status."""
+    if os.getpid() != 1:
+        raise RuntimeError("namespace init requires PID 1")
+    child = None
+    pending = []
+
+    def forward(signum, frame):
+        if child is None:
+            pending.append(signum)
+            return
+        # The worker may have exited before this signal arrived.
+        with suppress(ProcessLookupError):
+            os.killpg(child.pid, signum)
+
+    handlers = {}
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            handlers[signum] = signal.signal(signum, forward)
+        child = subprocess.Popen(arguments, start_new_session=True)
+        for signum in pending:
+            forward(signum, None)
+        while True:
+            pid, status = os.waitpid(-1, 0)
+            if pid == child.pid:
+                code = os.waitstatus_to_exitcode(status)
+                child.returncode = code
+                return code if code >= 0 else 128 - code
+    finally:
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--work-dir", type=Path, required=True, help="new output directory; never reused")
+    parser.add_argument("--offline", action="store_true", help="use already cached build/dev dependencies")
+    arguments = parser.parse_args()
+    work_dir = arguments.work_dir.absolute()
+    if work_dir.exists() or work_dir.is_symlink():
+        parser.error("--work-dir must not already exist; existing outputs are preserved")
+    if sys.platform != "linux" or sys.version_info[:2] != (3, 12):
+        parser.error("checks require Linux and Python 3.12")
+    if os.geteuid() == 0:
+        parser.error("checks require an unprivileged user to verify file permissions")
+    work_dir.mkdir(parents=True)
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    contract_bytes = (ROOT / "tool_cli_contract.json").read_bytes()
+    contract = json.loads(contract_bytes)
+    if contract["tool_version"] != project["version"]:
+        raise RuntimeError("source version mismatch")
+    if contract_bytes != (ROOT / "src/worktree_controller/tool_cli_contract.json").read_bytes():
+        raise RuntimeError("source CLI contract mismatch")
+    offline = ["--offline"] if arguments.offline else []
+    run("uv", "sync", "--locked", "--python", sys.executable, *offline)
+    run(
+        ROOT / ".venv/bin/ruff", "check", "--no-cache", "src", "tests",
+        "scripts/controller-activate", "scripts/check-writer-rollout", "scripts/check-project",
+        "scripts/benchmark-cli",
+        "scripts/check-cross-tool",
+    )
+    distribution_dir = work_dir / "dist"
+    run("uv", "build", "--no-sources", "--out-dir", distribution_dir, *offline)
+    wheels = list(distribution_dir.glob("*.whl"))
+    sources = list(distribution_dir.glob("*.tar.gz"))
+    if len(wheels) != 1 or len(sources) != 1:
+        raise RuntimeError("expected one wheel and one sdist")
+    rebuilt_dir = work_dir / "from-sdist"
+    run(
+        "uv", "build", "--wheel", "--no-sources", "--out-dir", rebuilt_dir, sources[0], *offline,
+        cwd=work_dir,
+    )
+    rebuilt = list(rebuilt_dir.glob("*.whl"))
+    if len(rebuilt) != 1:
+        raise RuntimeError("expected one wheel rebuilt from sdist")
+    cache_dir = run("uv", "cache", "dir", capture=True).stdout.strip()
+    environment = fixture_environment(work_dir, cache_dir)
+    for wheel, name in ((wheels[0], "wheel-env"), (rebuilt[0], "sdist-env")):
+        installed_smoke(wheel, work_dir / name, work_dir, environment, project, contract)
+    run(
+        ROOT / ".venv/bin/python", "-m", "pytest", "-q", "--tb=short",
+        "-p", "no:cacheprovider", "--basetemp", work_dir / "pytest",
+        "--junitxml", work_dir / "pytest.xml", env=environment, timeout=5400,
+    )
+    print(f"Project checks passed. Outputs: {work_dir}", flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        if sys.platform == "linux" and os.getpid() == 1:
+            raise SystemExit(namespace_init([sys.executable, *sys.orig_argv[1:]]))
+        main()
+    except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+        print(f"Project checks failed: {error}", file=sys.stderr)
+        raise SystemExit(1) from error

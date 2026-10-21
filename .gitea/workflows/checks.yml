@@ -1,0 +1,57 @@
+name: Project checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Existing commit or tag to validate; empty uses the workflow commit
+        required: false
+        type: string
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    container:
+      image: gitea/runner-images:ubuntu-24.04@sha256:58ea92624c7c09582e05594d95488331045053d3a3f34cf09649f2a32313a614
+      options: --init
+    timeout-minutes: 100
+    env:
+      UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/project-python
+    steps:
+      - name: Checkout
+        uses: https://github.com/actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2, Node 20
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source_ref || github.sha }}
+      - name: Install GNU Time in the disposable job
+        run: |
+          if [ ! -x /usr/bin/time ]; then
+            test "$(id -u)" -eq 0
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends time
+          fi
+          /usr/bin/time --version
+          ps -p 1 -o comm=
+      - name: Set up uv
+        uses: https://github.com/astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0, Node 20
+        with:
+          version: "0.11.15"
+          python-version: "3.12"
+          github-token: "" # Public downloads do not need the Gitea job token.
+          cache-local-path: ${{ runner.temp }}/project-uv-cache
+          enable-cache: false
+      - name: Install Python
+        run: uv python install 3.12
+      - name: Validate tests, CLI contract and distributions
+        run: |
+          checks_parent="$RUNNER_TEMP/project-check-output"
+          mkdir -p "$checks_parent" "$UV_CACHE_DIR"
+          if [ "$(id -u)" -eq 0 ]; then
+            # These paths belong to this disposable job; permission tests require a non-root user.
+            chown -R nobody:nogroup "$GITHUB_WORKSPACE" "$UV_PYTHON_INSTALL_DIR" "$UV_CACHE_DIR" "$checks_parent"
+            runuser -u nobody -- uv run --locked --python 3.12 --no-env-file python scripts/check-project --work-dir "$checks_parent/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          else
+            uv run --locked --python 3.12 --no-env-file python scripts/check-project --work-dir "$checks_parent/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          fi
