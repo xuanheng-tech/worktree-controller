@@ -2,6 +2,7 @@
 
 import json
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -96,3 +97,26 @@ def test_resume_rejects_checkpoint_symlink_before_reading_or_logging(tmp_path):
     result = invoke(workspace, "--resume")
     assert result.returncode == 1 and "symlink example path" in result.stderr
     assert note.read_text() == "unrelated owner data" and not (workspace / "commands.jsonl").exists()
+
+
+@pytest.mark.parametrize("dimension", ["contract_version", "storage_layout_version"])
+def test_unknown_contract_is_refused_before_repository_operations(tmp_path, monkeypatch, dimension):
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    main = runpy.run_path(str(SCRIPT))["main"]
+    workspace = tmp_path / "example"
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--workspace", str(workspace)])
+    capabilities = {"contract_version": 61, "storage_layout_version": 5,
+                    "task_workflow_version": 1, "task_checkpoint_park_version": 1,
+                    "session_closeout_expectations_version": 1, "session_closeout_report_version": 1}
+    capabilities[dimension] = 999
+    calls = []
+
+    def reply(command, **_options):
+        calls.append(command)
+        assert "capabilities" in command
+        return subprocess.CompletedProcess(command, 0, json.dumps({"decision": capabilities}), "")
+
+    monkeypatch.setattr(subprocess, "run", reply)
+    with pytest.raises(RuntimeError, match="unsupported CLI or storage contract"):
+        main()
+    assert len(calls) == 1 and not (workspace / "main").exists()

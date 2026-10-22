@@ -114,6 +114,9 @@ def main():
         return result
 
     capabilities = wc("capabilities")["decision"]
+    require(capabilities.get("contract_version") == 61
+            and capabilities.get("storage_layout_version") == 5,
+            "unsupported CLI or storage contract; no repository operation was started")
     for capability in ("task_workflow_version", "session_closeout_expectations_version",
                        "session_closeout_report_version", "task_checkpoint_park_version"):
         require(capabilities.get(capability) == 1, f"unsupported capability: {capability}")
