@@ -6,7 +6,7 @@ It checks repository policy before allocating a worktree, grants writing authori
 process, and records handoff, integration, recovery and release evidence. Git remains the source
 of truth for files, branches, commits and registered worktrees.
 
-**Current release: 1.30.5 · Linux · Python 3.12 · Apache-2.0**
+**Current release: 1.30.6 · Linux · Python 3.12 · Apache-2.0**
 
 ## Install
 
@@ -15,14 +15,16 @@ Use a virtual environment in a new directory:
 ```bash
 python3.12 -m venv .venv
 . .venv/bin/activate
-python -m pip install worktree-controller==1.30.5
+python -m pip install worktree-controller==1.30.6
 worktree-controller --version
 worktree-controller capabilities --json
 ```
 
 WC requires Git and readable Linux `/proc`. Other operating systems and Python versions are not
 supported by this release. Its one runtime dependency is `websockets>=15,<16`.
-Software version 1.30.5 retains CLI contract **60** and storage layout **5**.
+On Ubuntu, if creating the environment reports that `ensurepip` is unavailable, install the
+distribution's `python3.12-venv` package first (for example, `sudo apt install python3.12-venv`).
+Software version 1.30.6 retains CLI contract **60** and storage layout **5**.
 
 ## Try it in a disposable repository
 
@@ -31,7 +33,7 @@ With the environment above active:
 ```bash
 git clone https://github.com/xuanheng-tech/worktree-controller.git wc
 cd wc
-git checkout v1.30.5
+git checkout v1.30.6
 python examples/quickstart.py --workspace "$HOME/wc-first-run"
 ```
 
@@ -46,6 +48,10 @@ The [getting started guide](https://github.com/xuanheng-tech/worktree-controller
 explains the output and how to proceed to tasks that change files. The example also ships in the
 source distribution; it requires only WC and Git, with no companion delivery tools.
 
+To actually change a file, publish to a local bare remote, integrate and recover a paused task,
+follow [your first change](https://github.com/xuanheng-tech/worktree-controller/blob/main/docs/first-change.md).
+That complete example additionally uses public Git Finalizer and Snapshot Runner installations.
+
 ## Use WC in a real project
 
 A governed repository tracks `.agents/worktree-policy.toml` and registers its checkouts with WC.
@@ -57,7 +63,8 @@ for task admission, writer identity, handoff, integration and safe release.
 WC manages checkout authority and lifecycle. It does not implement your task, commit changes or
 publish a branch. Real handoff and integration flows use separate delivery evidence from
 [Git Finalizer](https://github.com/xuanheng-tech/git-finalizer).
-Context Loader and Snapshot Runner are optional companion tools; see
+Context Loader and the maintenance checker are optional. The complete integration example uses
+Snapshot Runner for the explicit review receipts required by its policy; see
 [optional integrations](https://github.com/xuanheng-tech/worktree-controller/blob/main/docs/reference.md#optional-integrations-and-dependencies).
 
 When blocked, run `worktree-controller recovery-guide --repo /path/to/repo --path /path/to/checkout --json`

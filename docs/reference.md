@@ -7,14 +7,17 @@ The [CLI contract](../tool_cli_contract.json) is authoritative for exact interfa
 ## Optional integrations and dependencies
 
 The core control plane has a single runtime dependency (`websockets>=15,<16`) and works standalone
-against any local Git repository on the supported platform. Everything below is optional and is
-exercised only when the corresponding context or companion tool is present:
+against any local Git repository on the supported platform. The integrations below are optional
+for core inspection/allocation; selecting a delivery flow can add explicit evidence requirements:
 
 - **Companion delivery tools.** WC composes with, but does not require or embed, the separate
   **Context Loader** (context reading), **Snapshot Runner** (read-only review evidence) and
   **Git Finalizer** (commit and publication). Each owns its own authority; WC never merges,
   publishes or commits on their behalf. The handoff and integration flows in
   [docs/operations.md](operations.md) assume Git Finalizer is installed for delivery evidence.
+  Policy schema 4+ also requires explicit test and Snapshot receipt identities for preparation;
+  [your first change](first-change.md) uses the public Snapshot Runner package to produce them.
+  Context Loader and the optional maintenance checker are not required by that example.
 - **Client-specific recovery.** The `archived_codex_binding_recovery_version` capability
   (`--recover-archived-codex-session`) recovers a released writer lease whose original session
   belonged to the Codex CLI client, by verifying that client's own archived-session and

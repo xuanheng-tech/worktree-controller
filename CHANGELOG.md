@@ -1,12 +1,17 @@
 # Changelog
 
-## Unreleased
+## 1.30.6
+
+- Add a complete local change example with public Finalizer and Snapshot Runner, genuine review
+  receipts, strict checkout closeout, and pause/resume of the original integration request.
+- Document Ubuntu's venv prerequisite and the explicit Snapshot evidence required for integration;
+  keep the optional maintenance checker separate from standalone WC requirements.
 
 - Add a manually triggered, resumable package release workflow using PyPI Trusted Publishing.
   Freeze checked distributions once, retain a matching GitHub draft before PyPI upload, reject
   remote identity/content drift, and verify public downloads and fresh installations separately.
 - Keep build/test, publishing and installed-package execution in separate permission stages.
-- WC software remains 1.30.5; CLI contract 60, storage layout 5 and lifecycle behavior are unchanged.
+- CLI contract 60, storage layout 5 and lifecycle behavior are unchanged.
 
 ## 1.30.5
 

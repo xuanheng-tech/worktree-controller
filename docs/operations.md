@@ -7,8 +7,15 @@ the [getting started guide](getting-started.md) provides an isolated first run.
 
 ## Start or resume development
 
-1. Run `tool-skill-sync doctor --repo <checkout> --summary`, then Controller `status --json`.
+For a worked local task, use [your first change](first-change.md). Core inspection/allocation needs
+WC and Git. The integration flow below additionally uses Git Finalizer and separate test and
+Snapshot evidence; policy schema 4+ requires both receipt identities explicitly. The worked example
+uses the public Snapshot Runner package. Context Loader and `tool-skill-sync` are optional.
+
+1. Run Controller `--version`, `capabilities --json`, `status --json` and `doctor --json`.
    Read the selected repository policy and distinguish installed runtime from source candidates.
+   If your site installed the optional maintenance checker, also run
+   `tool-skill-sync doctor --repo <checkout> --summary` for its tool/Skill pairing checks.
 2. Use `plan` for the existing task/authority. Reuse its allocation when supported; otherwise use
    `acquire` with explicit owner, branch, base and scope. A waiting request is not an allocation.
 3. Bind the real writer process and session/run through `writer-session` or `writer-lease-acquire`.

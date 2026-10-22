@@ -63,9 +63,10 @@ not establish completion.
 
 The example deliberately performs a genuine no-change inspection, so `complete-no-change` is
 appropriate. A task that edits files or creates commits must preserve or deliver that work;
-it cannot use this shortcut. See the [operations guide](operations.md) for the existing
-handoff, integration and recovery contracts and [Git Finalizer](https://github.com/xuanheng-tech/git-finalizer)
-for delivery evidence. WC itself does not commit, push or approve a production release.
+it cannot use this shortcut. Follow [your first change](first-change.md) for an executable local
+commit, handoff, integration and pause/resume example with public companion tools. See the
+[operations guide](operations.md) for the existing contracts. WC itself does not commit, push
+or approve a production release.
 
 For real session closeout, pass the complete recorded selector (`--client-id`, `--session-id`,
 `--run-id` when present, and `--holder`) and every known `--expected-allocation-id` to
