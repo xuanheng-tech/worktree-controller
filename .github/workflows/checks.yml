@@ -14,9 +14,9 @@ jobs:
   checks:
     runs-on: ubuntu-24.04
     timeout-minutes: 100
-    env:
-      UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/project-python
     steps:
+      - name: Set Python installation directory
+        run: echo "UV_PYTHON_INSTALL_DIR=$RUNNER_TEMP/project-python" >> "$GITHUB_ENV"
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2, Node 20
         with:
