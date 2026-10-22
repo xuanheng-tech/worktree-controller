@@ -194,6 +194,13 @@ def recovery_guide(repository_path: Path, *, target: Path | None = None,
                   str(item["record_version"]), "--dry-run", "--json"])
             step("retry_original_intent", "After complete release, select the original intent with "
                  "recovery-guide --intent-id; retry requires its public plan and fresh admission")
+        elif lifecycle == "NO_CHANGE_COMPLETED":
+            decision["reason"] = "No-change completion is recorded; checkout release still has its own guards"
+            step("inspect_release", "Do not create another completion receipt; inspect release guards "
+                 "and preserve unclassified content before cleanup",
+                 ["worktree-controller", "release", "--repo", canonical, "--path", item["path"],
+                  "--owner-release", item["owner"], "--expected-record-version",
+                  str(item["record_version"]), "--dry-run", "--json"])
         elif lifecycle == "HANDOFF_READY":
             decision["reason"] = "A frozen handoff needs exact Finalizer identity before session closeout"
             step("check_session", "Run worktree-session-end --check with the real client/session/holder/run "

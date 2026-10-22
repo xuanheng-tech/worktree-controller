@@ -8,6 +8,8 @@ from typing import Any
 
 def render(payload: dict[str, Any]) -> str:
     command = payload.get("command")
+    if command == "task":
+        return _render_task(payload)
     repository = payload.get("repository") or {}
     lines: list[str] = []
     if repository:
@@ -176,4 +178,44 @@ def render(payload: dict[str, Any]) -> str:
         lines.append("Errors:")
         for error in errors:
             lines.append(f"  {error.get('code')}: {error.get('message')}")
+    return "\n".join(lines)
+
+
+def _render_task(payload: dict[str, Any]) -> str:
+    decision = payload.get("decision") or {}
+    lines = [f"Repository: {(payload.get('repository') or {}).get('canonical_path', 'unknown')}",
+             f"{decision.get('code', 'ERROR')}: {decision.get('reason', '')}"]
+    for row in decision.get("tasks", []):
+        lines.append(f"  {row['task_key'] or 'unmanaged'} | owner={row['owner'] or 'unknown'} | "
+                     f"{row['lifecycle'] or 'unknown'} | writer={row['writer']} | "
+                     f"{'clean' if row['clean'] else 'dirty'} | {row['path']}")
+        if row.get("waiting_on"):
+            lines.append(f"    Waiting on: {row['waiting_on']}")
+    guidance = decision.get("guidance") or {}
+    task = guidance.get("identity") or decision.get("task")
+    if task:
+        lines.append(f"Task: {task['task_key']} | owner={task['owner']} | {task['lifecycle']}")
+        lines.append(f"Checkout: {task['path']}")
+    if operation := decision.get("operation"):
+        lines.append(f"Operation: {operation['code']}")
+        if operation.get("path"):
+            lines.append(f"Checkout: {operation['path']}")
+    if guidance.get("intent"):
+        lines.append(f"Integration: {guidance['intent']['intent_id']} | {guidance['intent']['state']}")
+    for blocker in guidance.get("blockers", []):
+        lines.append(f"Blocker: {blocker}")
+    for step in (*guidance.get("next_steps", []), *decision.get("next_steps", [])):
+        lines.append(f"Next: {step['message']}")
+        if step.get("argv"):
+            lines.append(f"  {shlex.join(step['argv'])}")
+    if history := decision.get("history"):
+        for row in history["closed_releases"]:
+            lines.append(f"Released: owner={row['owner']} | proof={row['proof_status']} | {row['branch']} | {row['worktree_path']}")
+        for row in history["incomplete_history"]:
+            lines.append(f"Incomplete history: {row['reason']}")
+        if history["next_after"]:
+            lines.append(f"More history: lifecycle-history --task-key (cursor {history['next_after']})")
+    for group in ("errors", "warnings"):
+        for item in payload.get(group, []):
+            lines.append(f"{item['code']}: {item['message']}")
     return "\n".join(lines)

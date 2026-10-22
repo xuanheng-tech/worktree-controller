@@ -1,5 +1,8 @@
 # Technical reference
 
+For the task-oriented CLI 61 entrypoints, see [everyday task operations](daily-workflow.md).
+They delegate to the existing lifecycle guards and introduce no additional stored state.
+
 For a first run, use the [getting started guide](getting-started.md). This reference retains
 the detailed contracts, historical compatibility notes and benchmark evidence previously in the README.
 The [CLI contract](../tool_cli_contract.json) is authoritative for exact interfaces.

@@ -1,6 +1,11 @@
 {
   "commands": [
     {
+      "name": "task",
+      "operation_class": "git_worktree_mutation",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
       "name": "acquire",
       "operation_class": "git_worktree_mutation",
       "result_contract": "worktree-controller/v1"
@@ -404,7 +409,8 @@
   "branch_retirement_version": 1,
   "branch_retirement_verify_version": 1,
   "cleanup_hardlink_topology_version": 2,
-  "contract_version": 60,
+  "contract_version": 61,
+  "task_workflow_version": 1,
   "release_recovery_inspection_version": 1,
   "release_recovery_inspection_contract": {
     "contract": "release-recovery-inspection/v1",
@@ -1065,7 +1071,7 @@
   "session_launcher_entrypoint": "worktree-session",
   "session_entrypoint": "worktree-session-end",
   "tool_name": "worktree-controller",
-  "tool_version": "1.30.6",
+  "tool_version": "1.31.0",
   "delivered_closeout_version": 1,
   "retained_archive_version": 1,
   "retention_convergence_version": 2,
@@ -1787,5 +1793,34 @@
     "retention": "history records the checkpoint reference; status exposes wait_checkpoint while RETAINED",
     "release": "explicit reviewed archive-retained plan then unchanged guarded release; branches kept, unknown files block",
     "resume": "the Task restores the exact retained HEAD through controlled admission and revalidates context before a new writer"
+  },
+  "task_workflow_contract": {
+    "contract": "task-workflow/v1",
+    "version": 1,
+    "actions": [
+      "list",
+      "show",
+      "start",
+      "resume",
+      "finish",
+      "recover"
+    ],
+    "read_only": [
+      "list",
+      "show",
+      "recover"
+    ],
+    "selectors": "One exact task key or checkout path; show/recover also accept the original integration intent. Ambiguous live task keys fail closed.",
+    "start": "Feature allocation only; explicit owner and scope. Defaults: authority=task key, module=task, branch=task/<task-key>, base=policy publication remote/branch. No writer lease is granted.",
+    "resume": "Original retained allocation only, exact owner/allocation/record CAS and no writer lease; does not grant write entitlement.",
+    "finish": {
+      "no-change": "Complete no-change then guarded release; retain branch. Partial release failures preserve completion evidence and exit 2.",
+      "checkpoint": "Require existing Task checkpoint ID and explicitly bound HEAD; park with no writer lease, preserve files and checkout.",
+      "handoff": "Require actual Finalizer record and exact commit; freeze handoff with exact owner/allocation/CAS and no writer lease. Integration/publication remain separate."
+    },
+    "recovery": "Read-only forwarding of existing recovery-guidance/v1; execute its formal steps separately and reobserve after every transition.",
+    "exit": "0 for successful observation or completed requested operation; 2 for refusal, RESOURCE_WAIT or incomplete checkout release. Observation exit 0 never proves task completion.",
+    "storage": "No additional state, lifecycle states or database; storage layout remains 5.",
+    "compatibility": "CLI 61 adds task-workflow/v1; existing low-level commands and contracts remain compatible."
   }
 }

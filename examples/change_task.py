@@ -99,7 +99,11 @@ def main():
         (workspace / name).write_text(json.dumps(value, indent=2) + "\n")
 
     def wc(command, *arguments):
-        value = json.loads(run(controller, command, "--repo", repo, "--json", *arguments))
+        if command == "task":
+            action, *arguments = arguments
+            value = json.loads(run(controller, command, action, "--repo", repo, "--json", *arguments))
+        else:
+            value = json.loads(run(controller, command, "--repo", repo, "--json", *arguments))
         require(not value.get("errors"), f"Controller refused {command}; see commands.jsonl")
         print(f"{command}: {(value.get('decision') or {}).get('code', 'observed')}", flush=True)
         return value
@@ -146,11 +150,10 @@ def main():
            "--message", "Initialize local demo", "--", "README.md", ".agents/worktree-policy.toml")
         wc("adopt", "--path", repo, "--task-key", "demo-control", "--authority-key", "demo-control",
            "--module", "demo", "--role", "control-plane", "--owner", OWNER, "--lifecycle", "ACTIVE")
-        request = ["--task-key", "demo-change", "--authority-key", "demo-change", "--module", "demo", "--role", "feature"]
-        require(wc("plan", *request)["decision"]["code"] == "CREATE_ALLOWED", "admission refused")
-        acquired = wc("acquire", *request, "--owner", OWNER, "--branch", "demo/change",
-                      "--base-ref", "main", "--path", source, "--scope", "README.md")
-        allocation = acquired["decision"]["allocation_id"]
+        acquired = wc("task", "start", "--task-key", "demo-change", "--module", "demo",
+                      "--owner", OWNER, "--branch", "demo/change", "--base-ref", "main",
+                      "--path", source, "--scope", "README.md")
+        allocation = acquired["decision"]["operation"]["allocation_id"]
         lease = wc("writer-lease-acquire", "--path", source, "--owner", OWNER,
                    "--holder-pid", os.getpid(), *identity)["decision"]
         guard = wc("write-guard", "--path", source, "--task-key", "demo-change",
@@ -168,8 +171,8 @@ def main():
         wc("writer-lease-release", "--path", source, "--lease-id", lease["lease_id"],
            "--holder-pid", holder["pid"], "--holder-boot-id", holder["boot_id"],
            "--holder-start-ticks", holder["start_ticks"], *identity)
-        wc("handoff", "--path", source, "--expected-record-version", row(source)["record_version"],
-           "--kind", "integration-ready", "--commit", commit, "--finalizer-commit", commit,
+        wc("task", "finish", "--task-key", "demo-change", "--owner", OWNER,
+           "--outcome", "handoff", "--commit", commit,
            "--finalizer-record-id", workspace / "source-finalizer.json")
         queued = wc("integration-enqueue", "--task-key", "demo-integration", "--authority-key",
                     "demo-integration", "--module", "demo", "--owner", OWNER,
@@ -197,7 +200,7 @@ def main():
                 require(not run("git", "-C", path, "status", "--porcelain"),
                         f"uncommitted files remain in {path}; preserve them and follow recovery-guide")
 
-    guide = wc("recovery-guide", "--intent-id", checkpoint["intent_id"])["decision"]
+    guide = wc("task", "recover", "--intent-id", checkpoint["intent_id"])["decision"]["guidance"]
     if guide.get("terminal_status") != "PUBLISHED_RELEASED":
         require(guide["intent"]["state"] in {"QUEUED", "PREPARING_INTEGRATION"},
                 "this demo resumes only queued or unchanged claimed work; follow recovery-guide")

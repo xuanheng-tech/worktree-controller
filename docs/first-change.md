@@ -6,6 +6,10 @@ pause after handoff and continue in a new process with the original task and int
 It creates a **local bare Git remote**, never contacts a hosting service, and needs no credentials.
 Use a disposable workspace; do not point it at an existing project.
 
+This release uses the CLI 61 [task entrypoints](daily-workflow.md) for start, handoff and
+recovery inspection; use WC 1.31.0 or newer with `task_workflow_version` 1. The underlying
+writer, review, integration and closeout guards are the same as the low-level flow.
+
 ## Install the example's tools
 
 WC itself needs Linux, Python 3.12, Git and readable `/proc`. Install the released version using

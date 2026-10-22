@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.31.0
+
+- Add task-oriented list/show/start/resume/finish/recover entrypoints over existing Controller
+  authority. Resolve task paths and record versions without a new task database or lifecycle.
+- Support original-task checkpoint pause/resume, exact Finalizer handoff and guarded no-change
+  release. Refuse live or stale recorded writers and allocation replacement during resolution.
+- Report partial no-change release with its completed prefix and nonzero exit; retries preserve
+  completion evidence. Recovery guidance now directs completed no-change tasks to release guards.
+- Add CLI 61 and capability `task_workflow_version` 1; existing low-level interfaces and storage
+  layout 5 remain compatible. No dependencies were added.
+
 ## 1.30.6
 
 - Add a complete local change example with public Finalizer and Snapshot Runner, genuine review

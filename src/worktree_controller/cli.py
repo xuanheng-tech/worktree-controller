@@ -104,6 +104,10 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     common = _common_parser()
 
+    from .task_workflow import add_parser as add_task_parser
+
+    add_task_parser(commands, common)
+
     status_parser = commands.add_parser("status", parents=[common], help="show Git and controller state")
     status_parser.add_argument("--namespace-pid", type=int,
                                help="compare mounts with an existing writer process")
@@ -1020,7 +1024,8 @@ def _main(argv: list[str] | None) -> int:
             payload = envelope("capabilities")
             payload["decision"] = {
                 "code": "CAPABILITIES",
-                "contract_version": 60,
+                "contract_version": 61,
+                "task_workflow_version": 1,
                 "exited_holder_release_version": 1,
                 "canonical_refresh_version": 1,
                 "host_handoff_continuation_version": HOST_HANDOFF_CONTINUATION_VERSION,
@@ -1119,6 +1124,10 @@ def _main(argv: list[str] | None) -> int:
                 release_receipt_id=parsed.release_receipt_id,
                 limit=parsed.limit, after=parsed.after,
             )
+        elif parsed.command == "task":
+            from .task_workflow import dispatch as dispatch_task
+
+            payload = dispatch_task(parsed)
         elif parsed.command == "recovery-guide":
             from .recovery_guidance import recovery_guide
 
@@ -1888,6 +1897,10 @@ def _main(argv: list[str] | None) -> int:
         _print(payload, parsed.json)
         return 2
     _print(payload, parsed.json)
+    if parsed.command == "task" and (
+        payload.get("errors") or payload.get("decision", {}).get("operation_complete") is False
+    ):
+        return 2
     if (payload.get("decision") or {}).get("code") in {
         "RESOURCE_CLEANUP_BLOCKED",
         "RECOVERY_ATTEMPT_INCOMPLETE",

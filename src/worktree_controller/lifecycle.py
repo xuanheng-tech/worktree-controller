@@ -2305,6 +2305,8 @@ def complete_no_change(
     expected_record_version: int,
     owner: str,
     preserve_only: bool = False,
+    expected_allocation_id: str | None = None,
+    require_no_writer_lease: bool = False,
 ) -> dict[str, Any]:
     """Record a genuine no-change completion for a task that produced no commit.
 
@@ -2320,7 +2322,9 @@ def complete_no_change(
         repository = inventory(repository_path)
         snapshot = store._load_unlocked()
         item, record = _managed_record(repository, snapshot, target)
-        _cas(record, expected_record_version)
+        _cas(record, expected_record_version, expected_allocation_id)
+        if require_no_writer_lease and record.allocation_id in snapshot.writer_leases:
+            raise ControllerError("WRITER_LEASE_PRESENT", "end the exact writer before task completion")
         policy = load_policy(repository.canonical_path)
         if policy.retained_slots < 1:
             raise ControllerError(
@@ -2683,6 +2687,8 @@ def resume(
     target: Path,
     expected_record_version: int,
     owner: str,
+    expected_allocation_id: str | None = None,
+    require_no_writer_lease: bool = False,
 ) -> dict[str, Any]:
     """Return a retained checkout to writer status under normal admission."""
 
@@ -2692,7 +2698,9 @@ def resume(
         repository = inventory(repository_path)
         snapshot = store._load_unlocked()
         item, record = _managed_record(repository, snapshot, target)
-        _cas(record, expected_record_version)
+        _cas(record, expected_record_version, expected_allocation_id)
+        if require_no_writer_lease and record.allocation_id in snapshot.writer_leases:
+            raise ControllerError("WRITER_LEASE_PRESENT", "an existing writer blocks task resume")
         if record.lifecycle != "RETAINED":
             raise ControllerError(
                 "INVALID_LIFECYCLE", f"lifecycle {record.lifecycle} is not retained"
@@ -3091,6 +3099,9 @@ def handoff(
     scope_paths: tuple[str, ...] = (),
     mainline_commit: str | None = None,
     scope_changed: bool = False,
+    expected_allocation_id: str | None = None,
+    expected_owner: str | None = None,
+    require_no_writer_lease: bool = False,
 ) -> dict[str, Any]:
     if kind not in {"integration-ready", "preserved"}:
         raise ControllerError("INVALID_HANDOFF", "handoff kind is invalid")
@@ -3102,7 +3113,11 @@ def handoff(
         repository = inventory(repository_path)
         snapshot = store._load_unlocked()
         item, record = _managed_record(repository, snapshot, target)
-        _cas(record, expected_record_version)
+        _cas(record, expected_record_version, expected_allocation_id)
+        if expected_owner is not None and record.owner != expected_owner:
+            raise ControllerError("OWNER_MISMATCH", "handoff owner does not match")
+        if require_no_writer_lease and record.allocation_id in snapshot.writer_leases:
+            raise ControllerError("WRITER_LEASE_PRESENT", "end the exact writer before task handoff")
         if record.lifecycle in {"QUARANTINED", "INTEGRATING", "PUBLISHED", "RELEASED"}:
             raise ControllerError(
                 "INVALID_LIFECYCLE", f"lifecycle {record.lifecycle} cannot be handed off"
@@ -8219,6 +8234,7 @@ def _release_registered_target(
     publication_receipt_id: str | None = None,
     release_intent_id: str | None = None,
     expected_governance_plan_id: str | None = None,
+    expected_allocation_id: str | None = None,
 ) -> dict[str, Any]:
     repository_initial = inventory(repository_path)
     store = MetadataStore(repository_initial.common_dir)
@@ -8231,6 +8247,8 @@ def _release_registered_target(
         repository = inventory(repository_path)
         snapshot = store._load_unlocked()
         item, record = _managed_record(repository, snapshot, target)
+        if expected_allocation_id is not None and record.allocation_id != expected_allocation_id:
+            raise ControllerError("IDENTITY_MISMATCH", "release allocation differs from the selected task")
         target_path = str(item.path)
         publication_receipt = (
             snapshot.publication_receipts.get(publication_receipt_id)
@@ -8927,6 +8945,7 @@ def release(
     publication_receipt_id: str | None = None,
     release_intent_id: str | None = None,
     expected_governance_plan_id: str | None = None,
+    expected_allocation_id: str | None = None,
 ) -> dict[str, Any]:
     target_path = str(target.expanduser().resolve(strict=False))
     repository = inventory(repository_path)
@@ -8947,6 +8966,7 @@ def release(
                 publication_receipt_id=publication_receipt_id,
                 release_intent_id=release_intent_id,
                 expected_governance_plan_id=expected_governance_plan_id,
+                expected_allocation_id=expected_allocation_id,
             )
         except ControllerError as error:
             if error.code not in {"INVALID_TARGET", "UNREGISTERED_WORKTREE"}:
@@ -8965,6 +8985,8 @@ def release(
                 }
                 return refreshed
             return payload
+    if expected_allocation_id is not None:
+        raise ControllerError("TASK_CHECKOUT_MISSING", "selected task checkout is absent; inspect its original lifecycle history")
     if expected_governance_plan_id is not None:
         raise ControllerError("GC_PLAN_DRIFT", "GC target is no longer registered")
     payload = _recover_or_replay_removed_release(

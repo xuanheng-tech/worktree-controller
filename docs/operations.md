@@ -7,6 +7,10 @@ the [getting started guide](getting-started.md) provides an isolated first run.
 
 ## Start or resume development
 
+For everyday feature/audit work, the [task entrypoints](daily-workflow.md) resolve the original
+checkout and record identity by task key, covering start, checkpoint/resume and finish. The
+steps below remain the underlying authority and the route for advanced integration/recovery.
+
 For a worked local task, use [your first change](first-change.md). Core inspection/allocation needs
 WC and Git. The integration flow below additionally uses Git Finalizer and separate test and
 Snapshot evidence; policy schema 4+ requires both receipt identities explicitly. The worked example

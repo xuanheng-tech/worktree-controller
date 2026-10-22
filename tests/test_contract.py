@@ -75,7 +75,7 @@ def test_public_contract_matches_package_and_commands(tmp_path: Path) -> None:
     with (ROOT / "pyproject.toml").open("rb") as stream:
         project = tomllib.load(stream)["project"]
     assert contract["schema_version"] == SCHEMA_VERSION == 1
-    assert contract["contract_version"] == 60
+    assert contract["contract_version"] == 61
     assert contract["aborted_integration_preserved_cleanup_version"] == 1
     assert contract["aborted_integration_preserved_cleanup_contract"]["contract"] == "aborted-integration-preserved-cleanup/v1"
     assert contract["canonical_transition_version"] == 1
@@ -156,7 +156,7 @@ def test_public_contract_matches_package_and_commands(tmp_path: Path) -> None:
         "release",
     ]
     assert contract["metadata_schema_version"] == 4
-    assert contract["tool_version"] == project["version"] == __version__ == "1.30.6"
+    assert contract["tool_version"] == project["version"] == __version__ == "1.31.0"
     assert contract["cleanup_hardlink_topology_contract"]["supported_versions"] == [1, 2]
     assert contract["release_options"] == [
         "--intent-id",
@@ -166,6 +166,7 @@ def test_public_contract_matches_package_and_commands(tmp_path: Path) -> None:
     ]
     assert contract["entrypoint"] == "worktree-controller"
     assert {command["name"] for command in contract["commands"]} == {
+        "task",
         "recovery-guide",
         "acquire-across",
         "admission-queue",
@@ -301,14 +302,14 @@ def test_release_versions_are_independently_declared_and_advertised(capsys) -> N
     assert advertised["archived_codex_binding_recovery_version"] == contract[
         "archived_codex_binding_recovery_version"] == 1
 
-    assert payload["tool_version"] == contract["tool_version"] == "1.30.6"
+    assert payload["tool_version"] == contract["tool_version"] == "1.31.0"
     assert advertised["hosted_session_closeout_check_version"] == contract["hosted_session_closeout_check_version"] == 1
     assert advertised["integration_keyed_document_scope_version"] == contract["integration_keyed_document_scope_version"] == 1
     assert advertised["source_release_summary_version"] == contract["source_release_summary_version"] == 1
     assert contract["source_release_summary_contract"]["field"] == "source_release_trigger.outcomes"
     assert contract["source_release_summary_contract"]["preserved_fields"] == [
         "created_intent_ids", "skipped", "reconciliation"]
-    assert advertised["contract_version"] == contract["contract_version"] == 60
+    assert advertised["contract_version"] == contract["contract_version"] == 61
     assert advertised["aborted_integration_preserved_cleanup_version"] == contract["aborted_integration_preserved_cleanup_version"] == 1
     assert advertised["typed_cleanup_verify_boundary_version"] == contract[
         "typed_cleanup_verify_boundary_version"] == 1

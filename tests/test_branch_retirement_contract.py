@@ -566,7 +566,7 @@ def test_contract_declares_the_verify_command_and_version_pins() -> None:
     assert entries["branch-retirement-status"]["result_contract"] == "branch-retirement/v1"
     assert CONTRACT["branch_retirement_version"] == 1
     assert CONTRACT["branch_retirement_verify_version"] == 1
-    assert CONTRACT["contract_version"] == 60
+    assert CONTRACT["contract_version"] == 61
     assert CONTRACT["branch_retirement_execution_version"] == 1
     assert RETIREMENT["contract"] == "branch-retirement/v5"
     assert RETIREMENT["plan_schema_version"] == retirement.PLAN_SCHEMA_VERSION == 1
