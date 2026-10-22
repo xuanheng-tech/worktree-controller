@@ -105,6 +105,33 @@ This demonstrates two CLI consumers, not actual invocation or discovery by two A
 Vendor-specific discovery and live-client use require their own observed acceptance, as described
 in [checks and deployment evidence](operations.md#checks-and-deployment).
 
+## Accept a real AI client
+
+Accept a client by observing it use the installed WC interface during a real task,
+including a pause and continuation in a later native session. Running the offline
+protocol example checks the CLI workflow; it does not establish that an AI client
+discovers or invokes WC correctly. Keep the actual session identities and checkpoint
+evidence with the acceptance result, and limit claims to the client and workflow observed.
+
+Use the separate `worktree-session-end` executable for session closeout. Keep a practical
+evidence checklist:
+
+- Capture actual native-client WC invocations, raw results and exit codes, client version,
+  and distinct native session/run/holder identities before and after interruption.
+- Verify the raw checkpoint digest and unchanged Task/authority/owner, allocation, path,
+  branch, HEAD and scope; compare exact file SHA256 values before the next session edits.
+- Resume the original Task, acquire a fresh live writer, and pass its check and write guard;
+  record refusal of the previous identity without reviving it or bypassing a refusal.
+- While leases are recorded, check and end with the exact client/session/run/holder selector.
+  Include every allocation via `--expected-allocation-id`; retain every per-tree decision
+  and require `summary.terminal_complete` with `--require-complete` before claiming closeout.
+- Follow the [first-change workflow](first-change.md) to finish; keep separate Finalizer,
+  handoff, integration/publication and release evidence before claiming task completion.
+  A retained checkpoint preserves unfinished work; it is not delivery evidence.
+
+One tested vendor does not prove another vendor's discovery or invocation of WC; accept each
+client and workflow using its own observed evidence.
+
 ## Upgrade an existing managed installation
 
 A public package installation in a new environment is separate from activation of a shared
