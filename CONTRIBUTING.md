@@ -33,7 +33,7 @@ matching port plus tests and must update the declared `requires-python` and clas
 WC uses [uv](https://docs.astral.sh/uv/) for a locked, reproducible environment:
 
 ```bash
-git clone <repository-url> wc && cd wc
+git clone https://github.com/xuanheng-tech/worktree-controller.git wc && cd wc
 uv sync --locked --python 3.12
 ```
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.30.5
+
+- Add public repository, documentation, issue tracker and changelog links to package metadata.
+- Shorten the README entry point and retain the full technical material in `docs/reference.md`.
+- Add a self-contained, offline onboarding example with real admission, a live writer lease,
+  an expected owner-mismatch refusal, read-only diagnosis and verified no-change closeout.
+  It uses a new isolated repository and needs no companion delivery tools or credentials.
+- Run the example against both the installed wheel and the wheel rebuilt from the sdist.
+- Lifecycle behavior, CLI contract 60 and storage layout 5 remain unchanged.
+
 ## 1.30.4
 
 - The read-only rollout gate (`scripts/check-writer-rollout`) no longer treats a live

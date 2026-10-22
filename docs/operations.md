@@ -2,7 +2,8 @@
 
 Use this page to select a flow. The [CLI contract](../tool_cli_contract.json) owns exact command,
 capability and result schemas; installed `--help` owns the arguments available on this host.
-The [README](../README.md) retains detailed protocols and compatibility history.
+The [technical reference](reference.md) retains detailed protocols and compatibility history;
+the [getting started guide](getting-started.md) provides an isolated first run.
 
 ## Start or resume development
 

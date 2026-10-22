@@ -18,6 +18,7 @@ import importlib.metadata
 import importlib.resources
 import pathlib
 import sys
+import tomllib
 import worktree_controller.metadata_codec
 
 root = pathlib.Path(sys.argv[1])
@@ -40,6 +41,10 @@ if distribution.locate_file(licenses[0]).read_bytes() != (root / 'LICENSE').read
     raise RuntimeError('packaged license content mismatch')
 if distribution.metadata.get_payload().strip() != (root / 'README.md').read_text().strip():
     raise RuntimeError('packaged README mismatch')
+project = tomllib.loads((root / 'pyproject.toml').read_text())['project']
+urls = dict(item.split(', ', 1) for item in distribution.metadata.get_all('Project-URL', []))
+if urls != project['urls']:
+    raise RuntimeError('packaged project URLs mismatch')
 """
 
 
@@ -134,6 +139,10 @@ def installed_smoke(wheel, destination, work_dir, environment, project, contract
         raise RuntimeError(status["errors"])
     if status["repository"]["canonical_path"] != str(repository):
         raise RuntimeError("installed Controller repository mismatch")
+    run(
+        python, ROOT / "examples/quickstart.py", "--workspace", work_dir / f"{destination.name}-demo",
+        cwd=work_dir, env=environment,
+    )
 
 
 def namespace_init(arguments):
@@ -196,6 +205,7 @@ def main():
         "scripts/controller-activate", "scripts/check-writer-rollout", "scripts/check-project",
         "scripts/benchmark-cli",
         "scripts/check-cross-tool",
+        "examples",
     )
     distribution_dir = work_dir / "dist"
     run("uv", "build", "--no-sources", "--out-dir", distribution_dir, *offline)
