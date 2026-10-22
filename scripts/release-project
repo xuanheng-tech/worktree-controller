@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""Prepare, audit, publish or verify one immutable WC release bundle."""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+import tomllib
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+REPOSITORY = "xuanheng-tech/worktree-controller"
+PYPI = "https://pypi.org/pypi/worktree-controller"
+TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def run(*arguments, cwd=None, env=None, binary=False, check=True):
+    result = subprocess.run([str(arg) for arg in arguments], cwd=cwd, env=env,
+                            stdin=subprocess.DEVNULL, capture_output=True,
+                            text=not binary, timeout=300, check=False)
+    if check and result.returncode:
+        raise RuntimeError(f"{arguments[0]} exited {result.returncode}: {result.stderr}")
+    return result
+
+
+def api(path, missing=False):
+    result = run("gh", "api", f"repos/{REPOSITORY}/{path}", check=False)
+    if missing and result.returncode and "HTTP 404" in result.stderr:
+        return None
+    require(result.returncode == 0, f"GitHub API failed: {result.stderr}")
+    return json.loads(result.stdout)
+
+
+def read_json(url, missing=False):
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        if missing and error.code == 404:
+            return None
+        raise
+
+
+def checked_tag(tag):
+    require(TAG.fullmatch(tag) is not None, "use an exact stable tag such as v1.30.5")
+    return tag[1:]
+
+
+def check_identity(manifest):
+    """Recheck public Git facts, without creating tags or publishing Git branches."""
+    obj = api(f"git/ref/tags/{manifest['tag']}")["object"]
+    for _ in range(5):
+        if obj["type"] != "tag":
+            break
+        obj = api(f"git/tags/{obj['sha']}")["object"]
+    require(obj["type"] == "commit" and obj["sha"] == manifest["commit"], "release tag drift")
+    comparison = api(f"compare/{manifest['commit']}...main")
+    require(comparison["merge_base_commit"]["sha"] == manifest["commit"],
+            "release commit is not contained in public main")
+
+
+def prepare(source, tag, work, bundle):
+    version = checked_tag(tag)
+    source = source.resolve()
+    require(not run("git", "status", "--porcelain", cwd=source).stdout, "source must be clean")
+    commit = run("git", "rev-parse", "HEAD", cwd=source).stdout.strip()
+    tagged = run("git", "rev-parse", f"refs/tags/{tag}^{{commit}}", cwd=source).stdout.strip()
+    require(commit == tagged, "checkout must equal the exact release tag")
+    require(run("git", "merge-base", "--is-ancestor", commit, "origin/main",
+                cwd=source, check=False).returncode == 0, "release must be integrated into main")
+    project = tomllib.loads((source / "pyproject.toml").read_text())["project"]
+    require(project["name"] == "worktree-controller" and project["version"] == version,
+            "tag/package version mismatch")
+    require("urls" in project and (source / "examples/quickstart.py").is_file(),
+            "release automation requires the 1.30.5+ packaging and onboarding contract")
+    contract_bytes = (source / "tool_cli_contract.json").read_bytes()
+    contract = json.loads(contract_bytes)
+    require(contract["tool_version"] == version, "tag/CLI version mismatch")
+    require(not work.exists() and not work.is_symlink(), "work directory must be new")
+    require(not bundle.exists() and not bundle.is_symlink(), "bundle directory must be new")
+    check_identity({"tag": tag, "commit": commit})
+    work.mkdir(parents=True)
+    # Only this unprivileged stage executes package code and tests. Publish receives its bytes.
+    command = ["uv", "run", "--locked", "--python", "3.12", "--no-env-file", "python",
+               str(source / "scripts/check-project"), "--work-dir", str(work / "checks")]
+    with (work / "checks.log").open("w") as log:
+        result = subprocess.run(command, cwd=source, stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=subprocess.STDOUT, timeout=6000, check=False)
+    require(result.returncode == 0, f"release gate exited {result.returncode}; see {work / 'checks.log'}")
+    check_identity({"tag": tag, "commit": commit})
+    bundle.mkdir(parents=True)
+    (bundle / "dist").mkdir()
+    names = [f"worktree_controller-{version}-py3-none-any.whl", f"worktree_controller-{version}.tar.gz"]
+    files = []
+    for name in names:
+        original = work / "checks/dist" / name
+        data = original.read_bytes()
+        shutil.copy2(original, bundle / "dist" / name)
+        files.append({"filename": name, "size": len(data), "sha256": digest(data)})
+    manifest = {
+        "schema_version": 1, "tag": tag, "version": version, "commit": commit,
+        "tree": run("git", "rev-parse", "HEAD^{tree}", cwd=source).stdout.strip(),
+        "contract_version": contract["contract_version"],
+        "storage_layout_version": contract["storage_layout_version"],
+        "contract_sha256": digest(contract_bytes),
+        "readme_sha256": digest((source / project["readme"]).read_text().strip().encode()),
+        "license_sha256": digest((source / "LICENSE").read_bytes()),
+        "project_urls": project["urls"], "files": files,
+    }
+    (bundle / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (bundle / "SHA256SUMS").write_text("".join(f"{row['sha256']}  {row['filename']}\n" for row in files))
+    changelog = (source / "CHANGELOG.md").read_text()
+    section = re.search(rf"^## {re.escape(version)}\n(.*?)(?=^## |\Z)", changelog, re.M | re.S)
+    notes = section.group(1).strip() if section else f"Worktree Controller {version}."
+    (bundle / "RELEASE-NOTES.md").write_text(f"{notes}\n\nSource commit: `{commit}`.\n")
+    return manifest
+
+
+def load_bundle(bundle):
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    require(manifest["schema_version"] == 1, "unknown release manifest schema")
+    version = checked_tag(manifest["tag"])
+    require(version == manifest["version"], "manifest version drift")
+    require(re.fullmatch(r"[0-9a-f]{40}", manifest["commit"]) is not None, "invalid source identity")
+    expected = {f"worktree_controller-{version}-py3-none-any.whl", f"worktree_controller-{version}.tar.gz"}
+    require({row["filename"] for row in manifest["files"]} == expected
+            and len(manifest["files"]) == 2, "unexpected distribution inventory")
+    require({p.name for p in (bundle / "dist").iterdir()} == expected, "unknown distribution file")
+    for row in manifest["files"]:
+        path = bundle / "dist" / row["filename"]
+        require(path.is_file() and not path.is_symlink(), "distribution must be a regular file")
+        data = path.read_bytes()
+        require(len(data) == row["size"] and digest(data) == row["sha256"], "local artifact drift")
+    sums = "".join(f"{row['sha256']}  {row['filename']}\n" for row in manifest["files"])
+    require((bundle / "SHA256SUMS").read_text() == sums, "checksum inventory drift")
+    return manifest
+
+
+def pypi_missing(manifest):
+    response = read_json(f"{PYPI}/{manifest['version']}/json", missing=True)
+    expected = {row["filename"]: row for row in manifest["files"]}
+    observed = set()
+    for row in response["urls"] if response else []:
+        name = row["filename"]
+        require(name in expected and name not in observed, "unexpected PyPI file")
+        wanted = expected[name]
+        require(not row["yanked"] and row["size"] == wanted["size"]
+                and row["digests"]["sha256"] == wanted["sha256"], "PyPI artifact drift")
+        observed.add(name)
+    return sorted(set(expected) - observed)
+
+
+def release_by_tag(tag):
+    published = api(f"releases/tags/{tag}", missing=True)
+    if published is not None:
+        return published
+    # The tag endpoint excludes drafts. Push-authorized list queries include them.
+    page = 1
+    while True:
+        releases = api(f"releases?per_page=100&page={page}")
+        matches = [item for item in releases if item["tag_name"] == tag]
+        require(len(matches) <= 1, "ambiguous GitHub release identity")
+        if matches:
+            return matches[0]
+        if len(releases) < 100:
+            return None
+        page += 1
+
+
+def github_assets(bundle, manifest, write=False):
+    tag = manifest["tag"]
+    release = release_by_tag(tag)
+    files = {row["filename"]: bundle / "dist" / row["filename"] for row in manifest["files"]}
+    files["SHA256SUMS"] = bundle / "SHA256SUMS"
+    if release is None and write:
+        run("gh", "release", "create", tag, "--repo", REPOSITORY, "--draft", "--verify-tag",
+            "--target", manifest["commit"], "--title", f"Worktree Controller {manifest['version']}",
+            "--notes-file", bundle / "RELEASE-NOTES.md")
+        release = release_by_tag(tag)
+        require(release is not None, "created GitHub draft not visible; retry with the same bundle")
+    observed = set()
+    for asset in release["assets"] if release else []:
+        name = asset["name"]
+        require(name in files and name not in observed, "unexpected GitHub release asset")
+        data = run("gh", "api", f"repos/{REPOSITORY}/releases/assets/{asset['id']}",
+                   "-H", "Accept: application/octet-stream", binary=True).stdout
+        require(data == files[name].read_bytes(), "GitHub release asset drift")
+        observed.add(name)
+    missing = sorted(set(files) - observed)
+    if write and missing:
+        run("gh", "release", "upload", tag, "--repo", REPOSITORY, *[files[name] for name in missing])
+        # Observe actual bytes again before uploading anything to PyPI.
+        return github_assets(bundle, manifest)
+    return {"exists": release is not None, "draft": release["draft"] if release else None,
+            "missing": missing}
+
+
+def audit(bundle):
+    manifest = load_bundle(bundle)
+    check_identity(manifest)
+    return {"tag": manifest["tag"], "github": github_assets(bundle, manifest),
+            "pypi_missing": pypi_missing(manifest), "mutation_performed": False}
+
+
+def publish(bundle):
+    manifest = load_bundle(bundle)
+    check_identity(manifest)
+    # Validate both destinations before the first write; never clobber an existing asset.
+    github_assets(bundle, manifest)
+    missing = pypi_missing(manifest)
+    frozen = github_assets(bundle, manifest, write=True)
+    require(not frozen["missing"], "GitHub draft assets are incomplete; retry with the same bundle")
+    check_identity(manifest)
+    if missing:
+        run("uv", "publish", "--trusted-publishing", "always", "--no-progress",
+            "--publish-url", "https://upload.pypi.org/legacy/",
+            *[bundle / "dist" / name for name in missing])
+    for attempt in range(12):
+        if not pypi_missing(manifest):
+            break
+        require(attempt < 11, "PyPI propagation incomplete; rerun the publisher with the same artifact")
+        time.sleep(5)
+    check_identity(manifest)
+    observed = github_assets(bundle, manifest)
+    require(not observed["missing"], "GitHub upload incomplete")
+    if observed["draft"]:
+        run("gh", "release", "edit", manifest["tag"], "--repo", REPOSITORY, "--draft=false", "--latest")
+    final = github_assets(bundle, manifest)
+    require(final["exists"] and not final["draft"] and not final["missing"], "release did not become public")
+    return {"tag": manifest["tag"], "status": "PUBLISHED_VERIFIED",
+            "pypi_uploaded": missing, "github": final}
+
+
+PACKAGE_SMOKE = """
+import hashlib, importlib.metadata as m, importlib.resources as r, json, pathlib, sys
+expected = json.loads(pathlib.Path(sys.argv[1]).read_text())
+d = m.distribution('worktree-controller')
+def require(condition, message):
+    if not condition: raise RuntimeError(message)
+require(d.version == expected['version'], 'installed version mismatch')
+require(d.metadata['License-Expression'] == 'Apache-2.0', 'installed license mismatch')
+require(dict(i.split(', ', 1) for i in d.metadata.get_all('Project-URL', [])) == expected['project_urls'], 'installed URLs mismatch')
+require(hashlib.sha256(d.metadata.get_payload().strip().encode()).hexdigest() == expected['readme_sha256'], 'installed README mismatch')
+contract = r.files('worktree_controller').joinpath('tool_cli_contract.json').read_bytes()
+require(hashlib.sha256(contract).hexdigest() == expected['contract_sha256'], 'installed contract mismatch')
+licenses = [f for f in d.files if str(f).endswith('.dist-info/licenses/LICENSE')]
+require(len(licenses) == 1 and hashlib.sha256(d.locate_file(licenses[0]).read_bytes()).hexdigest() == expected['license_sha256'], 'installed license content mismatch')
+"""
+
+
+def verify(bundle, work):
+    manifest = load_bundle(bundle)
+    require(not pypi_missing(manifest), "PyPI release incomplete")
+    require(not work.exists() and not work.is_symlink(), "verification directory must be new")
+    work.mkdir(parents=True)
+    response = read_json(f"{PYPI}/{manifest['version']}/json")
+    expected = {row["filename"]: row for row in manifest["files"]}
+    for row in response["urls"]:
+        with urllib.request.urlopen(row["url"], timeout=30) as stream:
+            data = stream.read(expected[row["filename"]]["size"] + 1)
+        require(digest(data) == expected[row["filename"]]["sha256"], "downloaded PyPI artifact drift")
+        (work / row["filename"]).write_bytes(data)
+    archive = work / f"worktree_controller-{manifest['version']}.tar.gz"
+    with tarfile.open(archive) as stream:
+        entries = [item for item in stream.getmembers() if item.name.endswith('/examples/quickstart.py')]
+        require(len(entries) == 1 and entries[0].isfile(), "sdist onboarding example missing")
+        (work / "quickstart.py").write_bytes(stream.extractfile(entries[0]).read())
+    results = []
+    for kind in ("wheel", "sdist"):
+        target = work / kind
+        target.mkdir()
+        for name in ("home", "tmp", "cache"):
+            (target / name).mkdir()
+        environment = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "TZ")
+                       if key in os.environ}
+        environment.update(HOME=str(target / "home"), TMPDIR=str(target / "tmp"),
+                           UV_CACHE_DIR=str(target / "cache"), GIT_CONFIG_NOSYSTEM="1",
+                           GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0",
+                           PYTHONDONTWRITEBYTECODE="1", PYTHONNOUSERSITE="1")
+        run("uv", "venv", "--no-config", "--python", "3.12", target / "venv", env=environment)
+        python = target / "venv/bin/python"
+        requirement = f"worktree-controller=={manifest['version']}" if kind == "wheel" else str(archive)
+        mode = ["--only-binary", "worktree-controller"] if kind == "wheel" else []
+        for attempt in range(6):
+            installed = run("uv", "pip", "install", "--python", python, "--no-config", "--no-cache",
+                            "--default-index", "https://pypi.org/simple/", *mode, requirement,
+                            env=environment, check=False)
+            if installed.returncode == 0:
+                break
+            # Retry only a newly uploaded version missing from the package index.
+            propagation = f"no version of worktree-controller=={manifest['version']}" in installed.stderr
+            require(propagation and attempt < 5, f"fresh install exited {installed.returncode}: {installed.stderr}")
+            time.sleep(10)
+        run(python, "-I", "-c", PACKAGE_SMOKE, bundle / "manifest.json", env=environment, cwd=work)
+        for name in ("worktree-controller", "worktree-session", "worktree-session-end"):
+            run(target / "venv/bin" / name, "--help", env=environment, cwd=work)
+        caps = json.loads(run(target / "venv/bin/worktree-controller", "capabilities", "--json",
+                              env=environment, cwd=work).stdout)
+        require(caps["tool_version"] == manifest["version"], "installed capability version mismatch")
+        for name in ("contract_version", "storage_layout_version"):
+            require(caps["decision"][name] == manifest[name], f"installed {name} mismatch")
+        run(python, work / "quickstart.py", "--workspace", target / "demo", env=environment, cwd=work)
+        results.append({"kind": kind, "status": "PASS"})
+    return {"tag": manifest["tag"], "status": "FRESH_INSTALLS_VERIFIED", "installations": results}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("prepare", "audit", "publish", "verify"))
+    parser.add_argument("--bundle", type=Path, required=True)
+    parser.add_argument("--source", type=Path)
+    parser.add_argument("--tag")
+    parser.add_argument("--work-dir", type=Path)
+    args = parser.parse_args()
+    args.bundle = args.bundle.absolute()
+    if args.work_dir:
+        args.work_dir = args.work_dir.absolute()
+    if args.command == "prepare":
+        if not args.source or not args.tag or not args.work_dir:
+            parser.error("prepare needs --source, --tag and --work-dir")
+        result = prepare(args.source, args.tag, args.work_dir, args.bundle)
+    elif args.command == "verify":
+        if not args.work_dir:
+            parser.error("verify needs --work-dir")
+        result = verify(args.bundle, args.work_dir)
+    else:
+        result = {"audit": audit, "publish": publish}[args.command](args.bundle)
+    print(json.dumps(result, sort_keys=True))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (RuntimeError, OSError, ValueError, KeyError, tarfile.TarError, subprocess.SubprocessError) as error:
+        print(f"Release stopped: {error}", file=sys.stderr)
+        raise SystemExit(1) from error

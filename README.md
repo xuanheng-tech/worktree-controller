@@ -73,6 +73,7 @@ a successful process exit alone does not prove that all worktrees are settled.
 - [Architecture](https://github.com/xuanheng-tech/worktree-controller/blob/main/docs/architecture.md)
 - [Exact CLI and capability contract](https://github.com/xuanheng-tech/worktree-controller/blob/main/tool_cli_contract.json)
 - [Changelog](https://github.com/xuanheng-tech/worktree-controller/blob/main/CHANGELOG.md)
+- [Publishing and recovery](https://github.com/xuanheng-tech/worktree-controller/blob/main/docs/publishing.md)
 - [Releases](https://github.com/xuanheng-tech/worktree-controller/releases) · [PyPI](https://pypi.org/project/worktree-controller/)
 - [Report a bug](https://github.com/xuanheng-tech/worktree-controller/issues) · [Contribute](https://github.com/xuanheng-tech/worktree-controller/blob/main/CONTRIBUTING.md)
 - [Report a security issue](https://github.com/xuanheng-tech/worktree-controller/blob/main/SECURITY.md)

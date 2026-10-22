@@ -69,6 +69,12 @@ Linting uses [ruff](https://docs.astral.sh/ruff/) (line length 100, target `py31
 Run `scripts/check-cross-tool --help` for the current arguments. Gates whose environment is not
 available should be recorded as skipped rather than claimed as passing.
 
+## Package releases
+
+Use the [publishing guide](docs/publishing.md) for the checked, resumable GitHub/PyPI workflow and
+one-time PyPI Trusted Publisher setup. The workflow publishes an already integrated version tag;
+it does not replace source delivery or update a maintainer's installed runtime.
+
 ## Proposing changes
 
 1. Open an issue describing the problem or proposal before starting substantial work, so the

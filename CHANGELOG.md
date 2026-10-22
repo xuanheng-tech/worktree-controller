@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add a manually triggered, resumable package release workflow using PyPI Trusted Publishing.
+  Freeze checked distributions once, retain a matching GitHub draft before PyPI upload, reject
+  remote identity/content drift, and verify public downloads and fresh installations separately.
+- Keep build/test, publishing and installed-package execution in separate permission stages.
+- WC software remains 1.30.5; CLI contract 60, storage layout 5 and lifecycle behavior are unchanged.
+
 ## 1.30.5
 
 - Add public repository, documentation, issue tracker and changelog links to package metadata.

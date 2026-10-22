@@ -205,6 +205,7 @@ def main():
         "scripts/controller-activate", "scripts/check-writer-rollout", "scripts/check-project",
         "scripts/benchmark-cli",
         "scripts/check-cross-tool",
+        "scripts/release-project",
         "examples",
     )
     distribution_dir = work_dir / "dist"
