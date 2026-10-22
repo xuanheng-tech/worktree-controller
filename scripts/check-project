@@ -178,6 +178,22 @@ def namespace_init(arguments):
             signal.signal(signum, handler)
 
 
+PUBLIC_INDEX = "https://pypi.org/simple"
+PUBLIC_FILES = "https://files.pythonhosted.org/packages/"
+
+
+def check_public_lock(lock):
+    """Contributors resolve from public PyPI; a local mirror must not leak into the lockfile."""
+    for package in lock.get("package", []):
+        source = package.get("source", {})
+        if "registry" in source and source["registry"] != PUBLIC_INDEX:
+            raise RuntimeError(f"uv.lock {package['name']} uses a non-public registry")
+        artifacts = [package["sdist"]] if "sdist" in package else []
+        for artifact in [*artifacts, *package.get("wheels", [])]:
+            if "url" in artifact and not artifact["url"].startswith(PUBLIC_FILES):
+                raise RuntimeError(f"uv.lock {package['name']} has a non-public artifact URL")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work-dir", type=Path, required=True, help="new output directory; never reused")
@@ -198,6 +214,7 @@ def main():
         raise RuntimeError("source version mismatch")
     if contract_bytes != (ROOT / "src/worktree_controller/tool_cli_contract.json").read_bytes():
         raise RuntimeError("source CLI contract mismatch")
+    check_public_lock(tomllib.loads((ROOT / "uv.lock").read_text()))
     offline = ["--offline"] if arguments.offline else []
     run("uv", "sync", "--locked", "--python", sys.executable, *offline)
     run(

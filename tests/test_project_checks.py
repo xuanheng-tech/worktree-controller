@@ -26,7 +26,7 @@ def copied_project(tmp_path):
     (root / "cache").mkdir()
     for name in ("check-project", "check-cross-tool"):
         (root / "scripts" / name).write_bytes((ROOT / "scripts" / name).read_bytes())
-    for name in ("pyproject.toml", "tool_cli_contract.json"):
+    for name in ("pyproject.toml", "tool_cli_contract.json", "uv.lock"):
         (root / name).write_bytes((ROOT / name).read_bytes())
     (root / "src/worktree_controller/tool_cli_contract.json").write_bytes(
         (root / "tool_cli_contract.json").read_bytes(),
@@ -63,17 +63,27 @@ def python_command(mode):
 
 
 @pytest.mark.parametrize("mode", PYTHON_MODES)
-@pytest.mark.parametrize("mismatch", ["version", "contract"])
+@pytest.mark.parametrize("mismatch", ["version", "contract", "registry", "artifact"])
 def test_source_mismatch_stops_before_dependencies_even_with_optimization(tmp_path, mode, mismatch):
     root = copied_project(tmp_path)
+    lock = root / "uv.lock"
     if mismatch == "version":
         contract = json.loads((root / "tool_cli_contract.json").read_text())
         contract["tool_version"] = "0.0.0"
         (root / "tool_cli_contract.json").write_text(json.dumps(contract))
         message = "source version mismatch"
-    else:
+    elif mismatch == "contract":
         (root / "src/worktree_controller/tool_cli_contract.json").write_text("{}")
         message = "source CLI contract mismatch"
+    elif mismatch == "registry":
+        lock.write_text(lock.read_text().replace(
+            "https://pypi.org/simple", "https://mirror.example.invalid/simple", 1))
+        message = "uses a non-public registry"
+    else:
+        lock.write_text(lock.read_text().replace(
+            "https://files.pythonhosted.org/packages/",
+            "https://mirror.example.invalid/packages/", 1))
+        message = "has a non-public artifact URL"
     result = subprocess.run(
         [*python_command(mode), str(root / "scripts/check-project"),
          "--work-dir", str(root / "output"), "--offline"],
