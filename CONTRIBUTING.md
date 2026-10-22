@@ -37,6 +37,12 @@ git clone https://github.com/xuanheng-tech/worktree-controller.git wc && cd wc
 uv sync --locked --python 3.12
 ```
 
+`uv.lock` resolves from public PyPI. A local package mirror may be configured for your own
+downloads, but must not be written into the committed lockfile; `scripts/check-project` refuses a
+lockfile whose registry or artifact URLs are not `pypi.org` / `files.pythonhosted.org`. To verify
+or regenerate it against the public index, use
+`uv lock --check --no-config --default-index https://pypi.org/simple`.
+
 ## Running checks
 
 The project has two gate scripts. Always give them a **new** output directory; they refuse a
