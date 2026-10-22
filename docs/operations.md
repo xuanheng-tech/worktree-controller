@@ -4,6 +4,8 @@ Use this page to select a flow. The [CLI contract](../tool_cli_contract.json) ow
 capability and result schemas; installed `--help` owns the arguments available on this host.
 The [technical reference](reference.md) retains detailed protocols and compatibility history;
 the [getting started guide](getting-started.md) provides an isolated first run.
+Client implementers can follow the [AI client integration guide](client-integration.md) and its
+offline cross-client continuation example.
 
 ## Start or resume development
 

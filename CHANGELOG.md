@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Document the public AI client integration boundary and managed-upgrade history constraints.
+- Add an offline two-process continuation example: preserve one original task and its unknown
+  files, verify fresh writer identities, inspect both checkouts at closeout, and retry an
+  incomplete no-change release without repeating its completion. No runtime contract changes.
+
 ## 1.31.0
 
 - Add task-oriented list/show/start/resume/finish/recover entrypoints over existing Controller

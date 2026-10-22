@@ -59,6 +59,10 @@ for the recorded owner and next formal step. The [everyday task guide](docs/dail
 covers simpler start, original-task checkpoint/resume, guarded no-change release and exact
 Finalizer handoff. These CLI 61 entrypoints retain the existing ownership, lease and policy checks.
 
+For client developers, the [AI client integration guide](docs/client-integration.md) describes the
+public identity and closeout contract, with an offline example that continues the same unfinished
+task from two independent client processes while preserving its files and checkpoint.
+
 ## Use WC in a real project
 
 A governed repository tracks `.agents/worktree-policy.toml` and registers its checkouts with WC.
