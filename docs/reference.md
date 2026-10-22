@@ -34,7 +34,9 @@ for core inspection/allocation; selecting a delivery flow can add explicit evide
   Repositories created under the current namespace never invoke it.
 - **Maintainer deployment.** `scripts/controller-activate` and `scripts/controller-runtime` are the
   source-owned runtime activation and start entry points used by a maintainer's host; they are not
-  required to install or use the published package.
+  required to install or use the published package. Since 1.32.0, their explicit
+  `release-history-handover/v1` and `controller-runtime-source/v1` contracts support exact public
+  exports and immutable runtime provenance; see the [maintenance procedure](operations.md#moving-an-exact-exported-release-to-its-public-history).
 
 From 1.30.1, a completed cleanup at a retained source may survive normal park/resume
 cycles followed by a formal handoff of the same HEAD and owner. Verification requires

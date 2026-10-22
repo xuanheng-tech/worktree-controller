@@ -37,6 +37,7 @@ from worktree_controller.activation_layout import (
     digest,
     owned,
     replace_file,
+    sync_directory,
 )
 
 # The repository and the governed set are overridable so the rolling-upgrade
@@ -71,6 +72,14 @@ TEMP_HELPER = (
     else None
 )
 _created_temp_dirs: set[Path] = set()
+_structured_output = False
+RUNTIME_SOURCE_CONTRACT = "controller-runtime-source/v1"
+HISTORY_CONTRACT = "release-history-handover/v1"
+EXPORT_PATHS = (
+    "src/worktree_controller", "scripts/controller-activate", "scripts/controller-runtime",
+    "scripts/check-writer-rollout", "skills/worktree-lifecycle", "pyproject.toml", "uv.lock",
+    "tool_cli_contract.json",
+)
 
 
 class Abort(Exception):
@@ -89,7 +98,7 @@ class RolloutBlocked(Abort):
 
 def log(message: str) -> None:
     line = f"{datetime.now().astimezone().isoformat(timespec='seconds')} {message}"
-    print(line, flush=True)
+    print(line, file=sys.stderr if _structured_output else sys.stdout, flush=True)
     if _log_handle is not None:
         _log_handle.write(line + "\n")
         _log_handle.flush()
@@ -283,7 +292,7 @@ def verify_release_progression(previous_oid: str, target_oid: str) -> None:
         raise Abort("target release drops or regresses storage layout version")
 
 
-def verify_runtime(runtime: Path, oid: str, *, entrypoint: str = "worktree-controller") -> str:
+def verify_runtime_payload(runtime: Path, oid: str, *, entrypoint: str = "worktree-controller") -> str:
     if Path(entrypoint).name != entrypoint:
         raise Abort("runtime entry point must be an exact basename")
     binary = runtime / "bin" / entrypoint
@@ -321,11 +330,341 @@ def verify_runtime(runtime: Path, oid: str, *, entrypoint: str = "worktree-contr
             mismatched.append(name)
     if mismatched:
         raise Abort(f"staged source differs from {oid}: {', '.join(mismatched)}")
+    return reported
+
+
+def runtime_source_document(oid: str) -> dict | None:
+    if run(["git", "-C", CONTROLLER_REPO, "rev-parse", "--is-bare-repository"]).stdout.strip() == "true":
+        return None  # Ordinary legacy staging from a bare object source remains supported.
+    entries = git_bytes("worktree", "list", "--porcelain", "-z")
+    first = entries.split(b"\0\0", 1)[0].split(b"\0")
+    paths = [os.fsdecode(line.removeprefix(b"worktree ")) for line in first if line.startswith(b"worktree ")]
+    if len(paths) != 1 or b"bare" in first:
+        raise Abort("runtime source binding requires a primary source checkout")
+    source = Path(paths[0]).resolve(strict=True)
+    common = Path(git_bytes("rev-parse", "--path-format=absolute", "--git-common-dir").decode().strip()).resolve(strict=True)
+    owned(source, directory=True)
+    owned(common, directory=True)
+    roots = git_bytes("rev-list", "--max-parents=0", oid).decode().splitlines()
+    if len(roots) != 1:
+        raise Abort("runtime source binding requires one frozen history root")
+    return {"schema_version": 1, "contract": RUNTIME_SOURCE_CONTRACT, "commit": oid,
+            "source_repository": str(source), "git_common_dir": str(common), "root_commit": roots[0],
+            "contract_sha256": digest(release_contract_blob(oid)),
+            "skill_sha256": digest(git_bytes("show", f"{oid}:{SKILL_SOURCE}/SKILL.md"))}
+
+
+def source_document_bytes(document: dict) -> bytes:
+    return (json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
+
+
+def bind_runtime_source(runtime: Path, oid: str) -> None:
+    document = runtime_source_document(oid)
+    if document is None:
+        return
+    target = runtime / "controller-source.json"
+    raw = source_document_bytes(document)
+    if target.exists() or target.is_symlink():
+        info = owned(target)
+        if info.st_mode & 0o022 or info.st_size > 65536 or target.read_bytes() != raw:
+            raise Abort("existing runtime source binding differs; preserve it for owner recovery")
+        return
+    owned(runtime, directory=True)
+    replace_file(target, raw)
+
+
+def verify_runtime(runtime: Path, oid: str, *, entrypoint: str = "worktree-controller") -> str:
+    reported = verify_runtime_payload(runtime, oid, entrypoint=entrypoint)
     receipt = runtime / "uv-receipt.toml"
     text = receipt.read_text(encoding="utf-8") if receipt.is_file() else ""
     if f"rev={oid}" not in text or GIT_SOURCE not in text:
         raise Abort("staged receipt does not record the governed git source pinned to this commit")
+    manifest = runtime / "controller-source.json"
+    if manifest.exists() or manifest.is_symlink():
+        info = owned(manifest)
+        document = runtime_source_document(oid)
+        if document is None or info.st_mode & 0o022 or info.st_size > 65536 or manifest.read_bytes() != source_document_bytes(document):
+            raise Abort("runtime source binding changed from its frozen source")
     return reported
+
+
+def verify_exported_runtime(runtime: Path, previous: str, baseline: str) -> tuple[str, str]:
+    """Verify the old installed payload against its byte-identical public export."""
+    if runtime.resolve(strict=True) != runtime_path(previous).resolve(strict=True):
+        raise Abort("handover predecessor runtime identity changed")
+    reported = verify_runtime_payload(runtime, baseline)
+    receipt = runtime / "uv-receipt.toml"
+    info = owned(receipt)
+    if info.st_size > 1024 * 1024:
+        raise Abort("predecessor installation receipt is oversized")
+    raw = receipt.read_bytes()
+    if f"rev={previous}".encode() not in raw:
+        raise Abort("predecessor installation is not pinned to its exact original commit")
+    return reported, digest(raw)
+
+
+def export_tree(repository: Path, oid: str) -> list[list[str]]:
+    entries = git_bytes("ls-tree", "-r", "-z", oid, "--", *EXPORT_PATHS, repo=repository)
+    rows = []
+    for entry in entries.decode().split("\0"):
+        if not entry:
+            continue
+        identity, path = entry.split("\t", 1)
+        mode, kind, blob = identity.split()
+        if mode not in {"100644", "100755"} or kind != "blob":
+            raise Abort("export baseline contains an unsupported runtime payload entry")
+        rows.append([path, mode, blob])
+    required = {"pyproject.toml", "uv.lock", "tool_cli_contract.json", "scripts/controller-activate",
+                "scripts/controller-runtime", "scripts/check-writer-rollout",
+                f"{SKILL_SOURCE}/SKILL.md", f"{SKILL_SOURCE}/agents/openai.yaml"}
+    if not required <= {row[0] for row in rows} or not any(row[0].startswith("src/worktree_controller/") for row in rows):
+        raise Abort("export baseline is missing a required runtime or maintenance payload")
+    return sorted(rows)
+
+
+def published_release(oid: str) -> dict[str, str]:
+    version = release_contract(oid).get("tool_version")
+    if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        raise Abort("handover requires a stable numeric published release")
+    ref = f"refs/tags/v{version}"
+    response = run(["git", "ls-remote", "--exit-code", GIT_SOURCE, ref, ref + "^{}"], timeout=120)
+    entries = dict((name, value) for value, name in (row.split() for row in response.stdout.splitlines()))
+    if set(entries) - {ref, ref + "^{}"} or entries.get(ref + "^{}", entries.get(ref)) != oid:
+        raise Abort("published release tag differs from its exact frozen commit")
+    return entries
+
+
+def history_proof(previous: str, baseline: str, target: str, previous_repo: Path) -> dict:
+    for oid in (previous, baseline, target):
+        if not re.fullmatch(r"[0-9a-f]{40}", oid):
+            raise Abort("release-history handover requires full commit identities")
+    previous_repo = previous_repo.resolve(strict=True)
+    owned(previous_repo, directory=True)
+    roots = git_bytes("rev-list", "--max-parents=0", previous, repo=previous_repo).decode().splitlines()
+    if (len(roots) != 1 or roots == [baseline]
+            or git_bytes("rev-list", "--parents", "-n", "1", baseline).decode().split() != [baseline]):
+        raise Abort("handover requires an independent previous history and a public root baseline")
+    run(["git", "-C", CONTROLLER_REPO, "merge-base", "--is-ancestor", baseline, target], timeout=60)
+    own_source = Path(__file__).resolve().parent.parent
+    for name in ("scripts/controller-activate", "src/worktree_controller/activation_layout.py"):
+        if (own_source / name).read_bytes() != git_bytes("show", f"{target}:{name}"):
+            raise Abort("history handover must run the exact published target maintenance implementation")
+    before = export_tree(previous_repo, previous)
+    if before != export_tree(CONTROLLER_REPO, baseline):
+        raise Abort("previous runtime, packaging, maintenance or Skill source differs from the public baseline")
+    verify_release_progression(baseline, target)
+    old_contract, new_contract = release_contract(baseline), release_contract(target)
+    if (old_contract.get("storage_layout") != new_contract.get("storage_layout")
+            or any(old_contract.get(key) != new_contract.get(key) for key in
+                   ("storage_layout_version", "metadata_schema_version", "writer_lease_schema_version"))):
+        raise Abort("history handover cannot combine a storage, metadata or lease-format migration")
+    old_runtime, new_runtime = runtime_path(previous), runtime_path(target)
+    _, old_receipt_sha = verify_exported_runtime(old_runtime, previous, baseline)
+    verify_runtime(new_runtime, target)
+    document = runtime_source_document(target)
+    manifest = new_runtime / "controller-source.json"
+    if document is None or not manifest.is_file() or manifest.is_symlink():
+        raise Abort("stage the public target with its formal runtime source binding before handover")
+    baseline_skill, target_skill = frozen_skill(baseline), frozen_skill(target)
+    installed, _ = installed_skill()
+    if installed != baseline_skill or target_skill != baseline_skill:
+        raise Abort("history handover requires unchanged exact baseline, target and installed Skill payloads")
+    return {"previous": previous, "baseline": baseline, "target": target,
+            "previous_repository": str(previous_repo),
+            "previous_common_dir": git_bytes("rev-parse", "--path-format=absolute", "--git-common-dir", repo=previous_repo).decode().strip(),
+            "previous_root": roots[0], "source_repository": document["source_repository"],
+            "source_common_dir": document["git_common_dir"],
+            "git_source_sha256": digest(GIT_SOURCE.encode()),
+            "export_payload_sha256": digest(source_document_bytes({"entries": before})),
+            "previous_receipt_sha256": old_receipt_sha,
+            "target_receipt_sha256": digest((new_runtime / "uv-receipt.toml").read_bytes()),
+            "target_source_sha256": digest(manifest.read_bytes()),
+            "baseline_release_refs": published_release(baseline), "target_release_refs": published_release(target),
+            "skill_sha256": {name: digest(raw) for name, raw in baseline_skill.items()}}
+
+
+def history_path(request_id: str, suffix: str = "") -> Path:
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", request_id):
+        raise Abort("history request id must be a bounded opaque identifier")
+    return LOG_DIR / f"history-{digest(request_id.encode())}{suffix}.json"
+
+
+def read_history(path: Path, expected_sha: str) -> dict:
+    if (not path.is_absolute() or path.resolve(strict=True) != path
+            or path.parent != LOG_DIR.resolve(strict=True)):
+        raise Abort("history receipt must be its canonical managed producer path")
+    info = owned(path)
+    if info.st_mode & 0o022 or info.st_size > 65536:
+        raise Abort("history receipt is unsafe or oversized")
+    raw = path.read_bytes()
+    if digest(raw) != expected_sha:
+        raise Abort("history receipt SHA256 changed")
+    data = json.loads(raw)
+    if (not isinstance(data, dict) or set(data) != {"contract", "schema_version", "request_id", "proof", "governed", "consumers"}
+            or type(data.get("schema_version")) is not int or data["schema_version"] != 1
+            or data.get("contract") != HISTORY_CONTRACT or source_document_bytes(data) != raw
+            or history_path(data["request_id"]) != path):
+        raise Abort("history receipt does not match the versioned producer contract")
+    return data
+
+
+def store_history(path: Path, document: dict) -> str:
+    """Write immutable preparation/outcome evidence, preserving interrupted writes."""
+    raw = source_document_bytes(document)
+    if len(raw) > 65536:
+        raise Abort("history evidence exceeds its bounded record size")
+    owned(LOG_DIR, directory=True)
+    if path.exists() or path.is_symlink():
+        info = owned(path)
+        if info.st_mode & 0o022 or info.st_size > 65536 or path.read_bytes() != raw:
+            raise Abort("existing history evidence differs; no record was overwritten")
+        return digest(raw)
+    pending = path.with_name(f".{path.name}.layout-pending")
+    if pending.exists() or pending.is_symlink():
+        info = owned(pending)
+        partial = pending.read_bytes() if info.st_size <= 65536 else b""
+        if info.st_mode & 0o022 or info.st_size > 65536 or not raw.startswith(partial):
+            raise Abort("unknown pending history evidence is preserved for its owner")
+        preserved = path.with_name(path.name + f".preserved-{digest(partial)}")
+        if preserved.exists() or preserved.is_symlink():
+            raise Abort("pending history preservation already exists; preserve both generations")
+        # Preserve every byte before retrying the same producer-bound preparation.
+        os.rename(pending, preserved)
+        sync_directory(LOG_DIR)
+    replace_file(path, raw)
+    return digest(raw)
+
+
+def history_scope(data: dict, consumers: list[Path]) -> dict:
+    governed = sorted(str(path.resolve(strict=True)) for path in GOVERNED)
+    selected = sorted(str(path.resolve(strict=True)) for path in consumers)
+    if (not governed or not set(data["governed"]) <= set(governed)
+            or not set(data["consumers"]) <= set(selected)):
+        raise Abort("handover scope cannot omit an originally governed repository or consumer")
+    catalog = None
+    if TOOLCHAIN_COMPATIBILITY is not None:
+        _, _, catalog = reviewed_toolchain_requirements(TOOLCHAIN_COMPATIBILITY)
+    return {"governed": governed, "consumers": selected, "catalog_sha256": catalog}
+
+
+def history_pointer_switch(runtime: Path, expected: Path, *, content_oid: str | None = None) -> None:
+    pending = ROOT / ".active.pending"
+    if (pending.exists() or pending.is_symlink()) and (
+        not pending.is_symlink() or pending.lstat().st_uid != os.geteuid()
+        or pending.readlink() != runtime
+    ):
+        raise Abort("unknown pending runtime pointer is preserved for its owner")
+    switch(runtime, expected=expected, locked=True, content_oid=content_oid)
+
+
+def history_action(arguments, work: Path) -> tuple[dict, int]:
+    """Perform only an exact exported-history transition through existing rollout gates."""
+    with activation_lock():
+        if arguments.history_receipt:
+            data = read_history(arguments.history_receipt, arguments.history_receipt_sha256)
+        else:
+            path = history_path(arguments.request_id)
+            if path.exists() or path.is_symlink():
+                info = owned(path)
+                if info.st_size > 65536:
+                    raise Abort("existing history receipt is oversized")
+                data = read_history(path, digest(path.read_bytes()))
+                proof = data["proof"]
+                if (proof["target"] != arguments.version or proof["baseline"] != arguments.handover_baseline
+                        or proof["previous_repository"] != str(arguments.previous_source_repo.resolve(strict=True))):
+                    raise Abort("history request identity drift; original receipt preserved")
+            else:
+                previous = active_version()
+                if previous is None or previous == arguments.version:
+                    raise Abort("handover requires the original active predecessor; inspect an existing receipt")
+                data = {"schema_version": 1, "contract": HISTORY_CONTRACT, "request_id": arguments.request_id,
+                        "proof": history_proof(previous, arguments.handover_baseline, arguments.version,
+                                               arguments.previous_source_repo),
+                        "governed": sorted(str(path.resolve(strict=True)) for path in GOVERNED),
+                        "consumers": sorted(str(path.resolve(strict=True)) for path in arguments.consumer)}
+        proof = data["proof"]
+        observed = history_proof(proof["previous"], proof["baseline"], proof["target"],
+                                 Path(proof["previous_repository"]))
+        if observed != proof:
+            raise Abort("history source, runtime, release or identity drift; original receipt preserved")
+        request_id = data["request_id"]
+        receipt_path = history_path(request_id)
+        receipt_sha = digest(source_document_bytes(data))
+        rollback_request = history_path(request_id, "-rollback-request")
+        rollback_pending = rollback_request.with_name(f".{rollback_request.name}.layout-pending")
+        rollback = arguments.action == "history-rollback"
+        if not rollback and (rollback_request.exists() or rollback_request.is_symlink()
+                             or rollback_pending.exists() or rollback_pending.is_symlink()):
+            raise Abort("this handover has an explicit rollback request; resume that original rollback")
+        previous, target = runtime_path(proof["previous"]), runtime_path(proof["target"])
+        active = ACTIVE.resolve(strict=True)
+        if active not in {previous.resolve(strict=True), target.resolve(strict=True)}:
+            raise Abort("active runtime identity drift; no pointer was changed")
+        scope = history_scope(data, arguments.consumer)
+        plan = {"contract": HISTORY_CONTRACT, "request_id": request_id,
+                "action": arguments.action, "receipt_sha256": receipt_sha,
+                "expected_active": str(active), **scope}
+        plan_id = digest(source_document_bytes(plan))
+        desired, desired_oid = (previous, proof["previous"]) if rollback else (target, proof["target"])
+        content_oid = proof["baseline"] if rollback else None
+        if content_oid is None:
+            verify_toolchain_compatibility(desired)
+        else:
+            verify_toolchain_compatibility(desired, content_oid=content_oid)
+        source = frozen_source(work, content_oid or desired_oid)
+        if arguments.wait_ready_seconds is None:
+            preflight(source, arguments.consumer, desired_oid)
+        else:
+            wait_for_preflight(source, arguments.consumer, desired_oid, active, arguments.wait_ready_seconds)
+        result = {"contract": HISTORY_CONTRACT, "request_id": request_id,
+                  "plan_id": plan_id, "receipt": str(receipt_path), "receipt_sha256": receipt_sha,
+                  "previous": proof["previous"], "baseline": proof["baseline"], "target": proof["target"],
+                  "active_commit": active_version(), "plan_ready": True, "operation_complete": False,
+                  "activation_performed": False, "controller_lifecycle_mutation": False}
+        if arguments.dry_run:
+            return {**result, "code": "HISTORY_ROLLBACK_READY" if rollback else "HISTORY_HANDOVER_READY"}, 0
+        if arguments.expected_plan_id != plan_id:
+            raise Abort("history plan identity changed; inspect a fresh dry-run with the original request")
+        if history_proof(proof["previous"], proof["baseline"], proof["target"],
+                         Path(proof["previous_repository"])) != proof or history_scope(data, arguments.consumer) != scope:
+            raise Abort("history proof or scope changed during preflight; no pointer was changed")
+        store_history(receipt_path, data)
+        if rollback:
+            store_history(rollback_request, {"contract": HISTORY_CONTRACT, "request_id": request_id,
+                                            "receipt_sha256": receipt_sha, "desired_commit": desired_oid})
+        changed = active != desired.resolve(strict=True)
+        if changed:
+            history_pointer_switch(desired, active, content_oid=content_oid)
+        try:
+            if rollback:
+                verify_exported_runtime(previous, proof["previous"], proof["baseline"])
+                for repository in GOVERNED:
+                    run([previous / "bin/worktree-controller", "status", "--repo", repository, "--json"], timeout=120)
+            else:
+                post_activation_check(target, proof["target"])
+            if installed_skill()[0] != frozen_skill(proof["baseline"]):
+                raise Abort("shared Skill changed during history handover")
+        except (Abort, LayoutError, OSError, subprocess.SubprocessError, ValueError) as failure:
+            # Restore only a verified predecessor, using the same current consumer and data gates.
+            if not rollback and changed:
+                old_source = frozen_source(work / "rollback", proof["baseline"])
+                verify_exported_runtime(previous, proof["previous"], proof["baseline"])
+                verify_toolchain_compatibility(previous, content_oid=proof["baseline"])
+                preflight(old_source, arguments.consumer, proof["previous"])
+                history_pointer_switch(previous, target, content_oid=proof["baseline"])
+                for repository in GOVERNED:
+                    run([previous / "bin/worktree-controller", "status", "--repo", repository, "--json"], timeout=120)
+                return {**result, "code": "HISTORY_ACTIVATION_FAILED_PREDECESSOR_RESTORED",
+                        "active_commit": active_version(), "reason": str(failure), "activation_performed": True}, 3
+            raise
+        outcome = history_path(request_id, "-rolled-back" if rollback else "-activated")
+        outcome_data = {"contract": HISTORY_CONTRACT, "request_id": request_id,
+                        "receipt_sha256": receipt_sha, "action": arguments.action, "active_commit": desired_oid}
+        store_history(outcome, outcome_data)
+        return {**result, "code": "HISTORY_ROLLED_BACK" if rollback else "HISTORY_HANDOVER_ACTIVE",
+                "active_commit": desired_oid, "operation_complete": True,
+                "activation_performed": changed, "outcome_receipt": str(outcome),
+                "outcome_receipt_sha256": digest(source_document_bytes(outcome_data))}, 0
 
 
 def reviewed_toolchain_requirements(catalog: Path) -> tuple[dict, str, str]:
@@ -424,12 +763,12 @@ def reviewed_toolchain_requirements(catalog: Path) -> tuple[dict, str, str]:
     return requirements, head, hashlib.sha256(raw).hexdigest()
 
 
-def verify_toolchain_compatibility(runtime: Path) -> None:
+def verify_toolchain_compatibility(runtime: Path, *, content_oid: str | None = None) -> None:
     if TOOLCHAIN_COMPATIBILITY is None:
         return  # Independent sites need not install a cross-tool workflow.
     requirements, owner_head, catalog_sha = reviewed_toolchain_requirements(TOOLCHAIN_COMPATIBILITY)
     try:
-        contract = release_contract(runtime.parent.name)
+        contract = release_contract(content_oid or runtime.parent.name)
         payload = json.loads(run(
             [runtime / "bin/worktree-controller", "capabilities", "--json"], timeout=30
         ).stdout)
@@ -684,17 +1023,21 @@ def activation_lock():
 
 
 def switch(
-    runtime: Path, *, expected: Path | None = None, locked: bool = False, bootstrap: bool = False
+    runtime: Path, *, expected: Path | None = None, locked: bool = False, bootstrap: bool = False,
+    content_oid: str | None = None,
 ) -> None:
     """Repoint the active pointer with the same CAS under the activation lock."""
     if not locked:
         with activation_lock():
-            return switch(runtime, expected=expected, locked=True, bootstrap=bootstrap)
+            return switch(runtime, expected=expected, locked=True, bootstrap=bootstrap, content_oid=content_oid)
     if bootstrap and (ACTIVE.exists() or ACTIVE.is_symlink()):
         raise Abort("bootstrap requires an absent active pointer")
     if expected is not None and ACTIVE.resolve(strict=True) != expected.resolve(strict=True):
         raise Abort("active runtime changed since preflight; activation is refused")
-    verify_toolchain_compatibility(runtime)
+    if content_oid is None:
+        verify_toolchain_compatibility(runtime)
+    else:
+        verify_toolchain_compatibility(runtime, content_oid=content_oid)
     verify_resource_compatibility(runtime)
     pending = ROOT / ".active.pending"
     if pending.is_symlink() or pending.exists():
@@ -1079,7 +1422,7 @@ def recover_layout(arguments) -> None:
 
 
 def main() -> int:
-    global _log_handle, TEMP_HELPER, TOOLCHAIN_COMPATIBILITY
+    global _log_handle, TEMP_HELPER, TOOLCHAIN_COMPATIBILITY, _structured_output
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -1093,14 +1436,22 @@ def main() -> int:
             "status",
             "finish-layout",
             "sync-skill",
+            "history-activate",
+            "history-rollback",
         ),
     )
     parser.add_argument("--version", help="Controller commit to stage or activate")
     parser.add_argument(
         "--wait-ready-seconds", type=int, metavar="SECONDS",
-        help="retry only temporary rollout blockers within 1..3600 seconds (ordinary activate/rollback)",
+        help="retry only temporary rollout blockers within 1..3600 seconds (ordinary or history activate/rollback)",
     )
-    parser.add_argument("--dry-run", action="store_true", help="verify sync-skill without replacing it")
+    parser.add_argument("--dry-run", action="store_true", help="prepare sync-skill or history handover without changing the active pin")
+    parser.add_argument("--request-id", help="exact original exported-history handover request")
+    parser.add_argument("--handover-baseline", help="published root release byte-identical to the predecessor")
+    parser.add_argument("--previous-source-repo", type=Path, help="read-only original predecessor Git source")
+    parser.add_argument("--expected-plan-id", help="exact producer plan from history dry-run")
+    parser.add_argument("--history-receipt", type=Path, help="original managed history receipt for resume or rollback")
+    parser.add_argument("--history-receipt-sha256", help="original producer receipt SHA256")
     parser.add_argument(
         "--skill-rollback-from", metavar="FULL_COMMIT_OID",
         help="sync-skill only: prove the exact installed descendant Skill after runtime rollback",
@@ -1125,8 +1476,29 @@ def main() -> int:
     parser.add_argument("--layout-receipt", type=Path)
     parser.add_argument("--layout-receipt-sha256")
     arguments = parser.parse_args()
-    if arguments.dry_run and arguments.action != "sync-skill":
-        parser.error("--dry-run is only supported for sync-skill")
+    history = arguments.action in {"history-activate", "history-rollback"}
+    _structured_output = history
+    history_options = any((arguments.request_id, arguments.handover_baseline, arguments.previous_source_repo,
+                           arguments.expected_plan_id, arguments.history_receipt, arguments.history_receipt_sha256))
+    if history_options and not history:
+        parser.error("history arguments require history-activate or history-rollback")
+    if arguments.dry_run and arguments.action not in {"sync-skill", "history-activate", "history-rollback"}:
+        parser.error("--dry-run is supported only by sync-skill and history handover")
+    if history:
+        if (arguments.migrate_namespace_from or arguments.migrate_policy_from or arguments.previous_entrypoint
+                or arguments.layout_receipt or arguments.layout_receipt_sha256 or arguments.skill_rollback_from
+                or arguments.recovery_preservation_receipt or arguments.recovery_preservation_receipt_sha256):
+            parser.error("history handover cannot combine layout, Skill or cleanup recovery")
+        if arguments.history_receipt:
+            if (not arguments.history_receipt_sha256 or arguments.version or arguments.request_id
+                    or arguments.handover_baseline or arguments.previous_source_repo):
+                parser.error("receipt recovery requires only the original receipt and SHA256")
+        elif (arguments.action == "history-rollback" or arguments.history_receipt_sha256
+              or not all((arguments.version, arguments.request_id, arguments.handover_baseline,
+                          arguments.previous_source_repo))):
+            parser.error("fresh handover requires version, request-id, baseline and previous-source-repo")
+        if not arguments.dry_run and not arguments.expected_plan_id:
+            parser.error("history apply requires the reviewed --expected-plan-id")
     if arguments.skill_rollback_from is not None and arguments.action != "sync-skill":
         parser.error("--skill-rollback-from is only supported for sync-skill")
     if arguments.action == "sync-skill" and (
@@ -1148,12 +1520,12 @@ def main() -> int:
     )
     if arguments.wait_ready_seconds is not None and (
         not 1 <= arguments.wait_ready_seconds <= 3600
-        or arguments.action not in {"activate", "rollback"}
+        or arguments.action not in {"activate", "rollback", "history-activate", "history-rollback"}
         or migration_requested
         or arguments.layout_receipt
         or arguments.layout_receipt_sha256
     ):
-        parser.error("--wait-ready-seconds requires 1..3600 seconds and ordinary activate/rollback")
+        parser.error("--wait-ready-seconds requires 1..3600 seconds and ordinary or history activate/rollback")
     if migration_requested and (
         arguments.action != "activate"
         or not all(
@@ -1194,7 +1566,8 @@ def main() -> int:
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
-    log_path = LOG_DIR / f"activate-{arguments.action}-{stamp}.log"
+    suffix = f"-{os.getpid()}" if history else ""
+    log_path = LOG_DIR / f"activate-{arguments.action}-{stamp}{suffix}.log"
     _log_handle = log_path.open("w", encoding="utf-8")
     log(f"log: {log_path}")
 
@@ -1211,6 +1584,11 @@ def main() -> int:
             return 0
         if not GIT_SOURCE:
             raise Abort("rollout requires CONTROLLER_ROLLOUT_GIT_SOURCE")
+        if history:
+            work = temporary_directory("controller-history")
+            result, code = history_action(arguments, work)
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return code
         if not arguments.version:
             raise Abort("--version is required")
         oid = arguments.version
@@ -1222,6 +1600,7 @@ def main() -> int:
             runtime = stage(oid)
             log(f"staged version reports {verify_runtime(runtime, oid)}")
             verify_toolchain_compatibility(runtime)
+            bind_runtime_source(runtime, oid)
             return 0
         runtime = runtime_path(oid)
         verify_runtime(runtime, oid)
@@ -1285,11 +1664,12 @@ def main() -> int:
             return 3
         log("activation complete; running commands finished on their own version")
         return 0
-    except (Abort, LayoutError) as failure:
+    except (Abort, LayoutError, OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError) as failure:
         log(f"ABORTED: {failure}")
-        return 2
-    except (OSError, subprocess.SubprocessError, ValueError) as failure:
-        log(f"ABORTED: {failure}")
+        if history:
+            print(json.dumps({"contract": HISTORY_CONTRACT, "code": "HISTORY_REFUSED",
+                              "operation_complete": False, "active_commit": active_version(),
+                              "reason": str(failure)}, ensure_ascii=False, sort_keys=True))
         return 2
     finally:
         if work is not None and work.is_dir():

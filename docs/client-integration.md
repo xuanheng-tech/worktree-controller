@@ -78,8 +78,7 @@ the same Task in a new client; do not recreate an old holder to make it appear c
 
 ## Run the offline continuation example
 
-From the current source checkout, with WC 1.31.0 or later installed (the example is scheduled for
-the next source distribution):
+From the source checkout or the 1.32.0 source distribution, with WC 1.31.0 or later installed:
 
 ```bash
 python examples/client_continuation.py --workspace "$HOME/wc-client-example"
@@ -113,9 +112,10 @@ Controller. Use the site's supported installer, published toolchain compatibilit
 consumer checks and rollout gate. Finish with installed smoke and the default installed doctor.
 Do not repoint the active runtime, modify another client's session or widen accepted versions.
 
-The current `controller-activate` upgrade requires the target commit to descend from the active
-commit. An installation built from private history cannot infer an upgrade path into an
-independent public root. It needs an explicitly reviewed migration contract before activation;
-ordinary bootstrap, copying the shared Skill or treating matching storage versions as proof is
-not a substitute. A catalog refusal blocks deployment, while isolated protocol validation and
-source delivery can continue. Record staged, activated and verified results separately.
+Ordinary `controller-activate activate` requires the target to descend from the active commit.
+For an independent public export, 1.32.0 provides the explicit, receipt-bound
+[`release-history-handover/v1` procedure](operations.md#moving-an-exact-exported-release-to-its-public-history).
+It requires exact exported payloads, published release identities and current rollout gates;
+ordinary bootstrap, copying the shared Skill or matching storage versions is not a substitute.
+A catalog refusal blocks deployment while isolated protocol validation and source delivery can
+continue. Record staged, activated and verified results separately.

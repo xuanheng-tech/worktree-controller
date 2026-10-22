@@ -262,6 +262,69 @@ stage, rollout and activation. CLI, capability and storage versions are independ
 Use the existing rollback flow; never repoint the active runtime by hand or activate another
 owner's unintegrated candidate. Finish with installed smoke, rollout/deployment checks and doctor.
 
+### Moving an exact exported release to its public history
+
+Normal `activate` requires descendant history and normal `rollback` requires ancestor history.
+An independent public export does not satisfy either rule. Since 1.32.0, the existing
+`scripts/controller-activate` entry supports `release-history-handover/v1`; it does not modify
+Controller lifecycle data, Git ancestry, admission policy or writer leases. Run the exact
+published target's maintenance script, with the normal site configuration:
+
+```bash
+export CONTROLLER_ROLLOUT_REPO=/absolute/public/canonical-checkout
+export CONTROLLER_ROLLOUT_GIT_SOURCE=https://github.com/your-org/worktree-controller.git
+export CONTROLLER_ROLLOUT_GOVERNED=/absolute/repo-one:/absolute/repo-two
+controller-activate stage --version FULL_TARGET_OID --temp-helper /absolute/tool-temp-dir
+controller-activate history-activate --version FULL_TARGET_OID \
+  --request-id original-export-request --handover-baseline FULL_PUBLIC_ROOT_OID \
+  --previous-source-repo /absolute/retained-original-source \
+  --consumer /absolute/installed-host-capability-command --dry-run
+```
+
+Repeat `--consumer` for every effective external host and include the site's published
+`--toolchain-compatibility /absolute/catalog.json` when one is configured. The optional checker
+must understand CLI 61 and `controller-runtime-source/v1` (Git Finalizer 1.9.4 or later for the
+bundled checker). Stage writes that immutable, owned source manifest beside the runtime; it binds
+the exact commit, primary source checkout, Git common directory, history root, contract hash and
+Skill hash. Legacy installations without it retain their existing source selection. Invalid or
+changed manifests must fail rather than silently fall back. Keep both source histories and both
+installed runtimes available for verification and rollback.
+
+The gate requires a root release whose runtime, packaging, maintenance scripts and complete Skill
+payload exactly equal the original frozen predecessor. Both public baseline and target must have
+live matching stable release tags. The target must descend from that baseline and preserve storage,
+metadata and writer-lease formats and installed Skill bytes. This entry cannot combine namespace,
+policy, Skill or cleanup migrations. Existing resource, metadata and consumer gates still run.
+Live compatible writer sessions may continue; incompatible, stale or incomplete evidence is not
+made eligible by this procedure.
+
+Inspect the single JSON result. Dry-run exit 0 means `plan_ready=true`, **not** completed activation.
+Apply the identical request without `--dry-run`, adding its exact `--expected-plan-id`. The plan
+binds the current active pointer, scope and compatibility catalog. The producer saves an immutable
+receipt before switching. Preserve its `receipt` and `receipt_sha256` from the result. On interruption
+or an uncertain result, inspect the original request and active pin before retrying; do not invent
+another request identity. Resume using only the original receipt and SHA256:
+
+```bash
+controller-activate history-activate --history-receipt /absolute/original-receipt.json \
+  --history-receipt-sha256 ORIGINAL_SHA256 --consumer /absolute/installed-host-capability-command \
+  --dry-run
+controller-activate history-rollback --history-receipt /absolute/original-receipt.json \
+  --history-receipt-sha256 ORIGINAL_SHA256 --consumer /absolute/installed-host-capability-command \
+  --dry-run
+```
+
+For either action, inspect a fresh plan and apply with its exact plan ID. Keep the original governed
+repositories and consumers; adding current checks is allowed, omitting original checks is refused.
+An explicit rollback request fences subsequent forward reuse of that request. Unknown pending files
+are preserved. An interrupted producer write is preserved byte for byte before an exact retry.
+Exit 0 with `operation_complete=true` proves the requested active pin and postchecks; a repeated
+verified operation may report `activation_performed=false`. Refusal exits 2. Failed activation
+followed by verified predecessor restoration exits 3 with `operation_complete=false`; this is a
+failure, not successful upgrade. If restoration itself cannot pass current gates, the entry reports
+the observed active commit and preserves evidence for the original recovery. Finish with installed
+smoke and the default deployment doctor; runtime activation never grants business release approval.
+
 For each external consumer, distinguish three outcomes:
 
 | Check | What it proves |

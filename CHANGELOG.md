@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased
+## 1.32.0
+
+- Add a versioned exported-release history handover and receipt-bound rollback to the existing
+  maintenance entry. Require exact baseline payloads, live published release identities, unchanged
+  storage and Skill formats, current consumer gates and a compare-and-swap plan. Preserve interrupted
+  evidence and distinguish restoration after failure from successful activation.
+- Bind staged runtimes to their frozen primary source through `controller-runtime-source/v1` so
+  optional maintenance checkers can verify public release histories without private source copies.
+- Keep ordinary `--dry-run` refusal while adding explicit history preparation plans. CLI 61 and
+  storage 5 remain unchanged; no Controller lifecycle, admission or write-guard rules are relaxed.
 
 - Document the public AI client integration boundary and managed-upgrade history constraints.
 - Add an offline two-process continuation example: preserve one original task and its unknown

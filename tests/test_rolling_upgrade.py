@@ -169,6 +169,7 @@ def toolchain_candidate(tmp_path, monkeypatch):
         monkeypatch.setattr(module, "stage", lambda *args: runtime)
         monkeypatch.setattr(module, "preflight", lambda *args: None)
         monkeypatch.setattr(module, "post_activation_check", lambda *args: None)
+        monkeypatch.setattr(module, "bind_runtime_source", lambda *args: None)
         original_run = module.run
 
         def run(command, **kwargs):
