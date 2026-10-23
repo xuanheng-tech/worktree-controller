@@ -99,6 +99,19 @@ def assert_record_version(
         )
 
 
+def intent_for_allocation(
+    snapshot: MetadataSnapshot, allocation_id: str
+) -> IntegrationIntent | None:
+    matches = [
+        intent
+        for intent in snapshot.integration_intents.values()
+        if intent.allocation_id == allocation_id
+    ]
+    if len(matches) > 1:
+        raise ControllerError("INVALID_METADATA", "multiple intents bind one allocation")
+    return matches[0] if matches else None
+
+
 def integration_intent_abandoned(intent: IntegrationIntent) -> bool:
     """Recognize the explicit terminal event without forgiving unexplained drift."""
     return (

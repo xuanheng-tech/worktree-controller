@@ -87,3 +87,8 @@ one-day backoff cap. This extraction changes no CLI, capability or storage contr
 Scope digest and overlap queries live in `semantics` alongside scope normalization. Integration
 retry calls these shared pure helpers directly; lifecycle retains compatibility aliases. Their
 serialization, empty-scope interpretation and parent/child path rules remain unchanged.
+
+Allocation-to-intent lookup also lives in `semantics`. It reads only the caller's snapshot,
+returns the original unique intent or no match, and refuses multiple intents bound to one
+allocation as `INVALID_METADATA`. Publication execution and conflict resolution use this shared
+query directly; lifecycle keeps its existing alias, lock scope and transition guards.

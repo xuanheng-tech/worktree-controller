@@ -9,7 +9,7 @@ from typing import Any
 from .git_backend import commits_with_parents, inventory
 from .integration_retry import _sources
 from .models import ControllerError
-from .semantics import integration_candidate_issues
+from .semantics import integration_candidate_issues, intent_for_allocation
 from .store import MetadataStore
 
 
@@ -23,7 +23,7 @@ def resolve_integration(
     finalizer_record_id: str,
 ) -> dict[str, Any]:
     from .controller import status
-    from .lifecycle import _intent_for_allocation, _intent_payload
+    from .lifecycle import _intent_payload
     from .record_updates import updated_intent, updated_record
     from .semantics import assert_record_version as _cas
     from .semantics import managed_record as _managed_record
@@ -40,7 +40,7 @@ def resolve_integration(
         snapshot = store._load_unlocked()
         item, record = _managed_record(repository, snapshot, target)
         _cas(record, expected_record_version)
-        intent = _intent_for_allocation(snapshot, record.allocation_id)
+        intent = intent_for_allocation(snapshot, record.allocation_id)
         if record.owner != owner:
             raise ControllerError("OWNER_MISMATCH", "resolution owner does not match")
         if (

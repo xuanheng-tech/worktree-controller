@@ -7,8 +7,11 @@ direction. Each stage needs its own tested deliverable; later ideas are not curr
 
 WC 1.32.5 retains CLI contract 61 and storage layout 5. The scope and architecture documents
 are already on main. Previous extractions reduced private cross-module imports from 93 to
-82 and then 80. This batch moves pure scope hashing/overlap queries into `semantics`, reducing
-the baseline to 78. It retains lifecycle mutation helpers, clocks and internal aliases.
+82 and then 80; pure scope hashing/overlap queries lowered it to 78. This maintenance batch
+moves allocation-to-intent lookup into `semantics`, reducing the baseline to 76 while retaining
+its duplicate-identity refusal and lifecycle alias. Mutation helpers, clocks and lock scope stay
+with their existing owner. Batch this source maintenance into the next planned release; it does
+not declare a new package release or change the installed 1.32.5 runtime.
 
 GF 1.9.8 already consumes SR's public read API and WC's versioned publication/retirement
 protocols. CL 1.3.10 and SR 2.5.12 already use main on both hosting platforms. These completed
@@ -45,7 +48,9 @@ Python floor, move host-specific defaults without migration, or replace existing
 GitHub-first release consolidation and a future toolchain repository remain design decisions,
 not permission to disable existing Gitea delivery or platform controls.
 
-This maintenance batch moves pure scope hashing and overlap queries to `semantics`, lowering
-the private-import baseline from 80 to 78. Publication metadata readback now shares a bounded
-visibility window; exact bytes, identities, failed-command outcomes and same-bundle recovery stay
-mandatory. CL/SR shared quality checks have passed their hosted parallel and final matrices.
+The current maintenance task moves allocation-to-intent lookup to `semantics`, lowering the
+private-import baseline from 78 to 76. Use its real task to observe checkpoint pause, fresh-executor
+resume, Finalizer handoff, integration and release; preserve pending results instead of interpreting
+an advisory success as completion. The released publication visibility window keeps exact bytes,
+identities, failed-command outcomes and same-bundle recovery mandatory. CL/SR shared quality checks
+have passed their hosted parallel and final matrices.

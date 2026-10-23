@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -29,6 +30,7 @@ from worktree_controller.lifecycle import (
 )
 from worktree_controller.models import ControllerError
 from worktree_controller.policy import load_policy
+from worktree_controller.semantics import intent_for_allocation
 from worktree_controller.store import MetadataStore
 
 POLICY_FOUR_SOURCES = (
@@ -467,3 +469,26 @@ def test_historical_released_intent_reconciliation_is_immutable_and_idempotent()
         )
         assert reconciled_warning["severity"] == "informational"
         assert "INTEGRATION_INTENT_DRIFT" not in {warning["code"] for warning in after["warnings"]}
+
+
+def test_allocation_lookup_refuses_ambiguous_integration_identity() -> None:
+    with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES) as repository:
+        adopt_canonical(repository)
+        _configure_remote(repository)
+        _source_path, source, _handoff = _source(
+            repository, task="lookup-source", relative_path="source.txt", content="source\n"
+        )
+        queued = _enqueue(repository, task="lookup-candidate", source_allocation=source)
+        intent_id = queued["decision"]["intent_id"]
+        _candidate, claimed = _claim(repository, task="lookup-candidate", intent_id=intent_id)
+        allocation = claimed["decision"]["allocation_id"]
+        snapshot = MetadataStore(inventory(repository.repo).common_dir).load()
+        intent = snapshot.integration_intents[intent_id]
+
+        assert intent_for_allocation(snapshot, allocation) is intent
+        assert intent_for_allocation(snapshot, "missing-allocation") is None
+        duplicate = replace(intent, intent_id="duplicate-intent")
+        snapshot.integration_intents[duplicate.intent_id] = duplicate
+        with pytest.raises(ControllerError, match="multiple intents bind one allocation") as caught:
+            intent_for_allocation(snapshot, allocation)
+        assert caught.value.code == "INVALID_METADATA"

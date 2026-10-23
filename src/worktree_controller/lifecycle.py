@@ -97,6 +97,7 @@ from .semantics import (
 )
 from .semantics import effective_intent_state as _effective_intent_state
 from .semantics import integration_reconciliation as _integration_reconciliation
+from .semantics import intent_for_allocation as _intent_for_allocation
 from .semantics import managed_record as _managed_record
 from .semantics import publication_receipt_lease_released as _publication_receipt_lease_released
 from .semantics import record_for as _record_for
@@ -353,19 +354,6 @@ def _cancel_release_intents(
                     blocker=blocker,
                 )
             )
-
-
-def _intent_for_allocation(
-    snapshot: MetadataSnapshot, allocation_id: str
-) -> IntegrationIntent | None:
-    matches = [
-        intent
-        for intent in snapshot.integration_intents.values()
-        if intent.allocation_id == allocation_id
-    ]
-    if len(matches) > 1:
-        raise ControllerError("INVALID_METADATA", "multiple intents bind one allocation")
-    return matches[0] if matches else None
 
 
 def _duration_ms(start: str, end: str) -> int:

@@ -21,9 +21,10 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from .git_backend import _git, inventory, is_ancestor, validate_branch_name
-from .lifecycle import _intent_for_allocation, _validate_prepared_publication_receipt
+from .lifecycle import _validate_prepared_publication_receipt
 from .models import ControllerError
 from .policy import load_policy
+from .semantics import intent_for_allocation
 from .semantics import managed_record as _managed_record
 from .store import MetadataStore, now_iso
 
@@ -163,7 +164,7 @@ class PublicationSession:
             raise ControllerError(
                 "PUBLICATION_EVIDENCE_MISMATCH", "leased candidate evidence differs"
             )
-        intent = _intent_for_allocation(snapshot, record.allocation_id)
+        intent = intent_for_allocation(snapshot, record.allocation_id)
         if intent is None or (
             intent.state != "PUBLISHING"
             or intent.publication_identity != lease.lease_id
