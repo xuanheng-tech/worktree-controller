@@ -4760,6 +4760,7 @@ def _typed_cleanup_plan_locked(
     blockers: list[dict[str, str]] = []
     aborted_integration = record.role == "integration" and record.lifecycle == "INTEGRATION_ABORTED"
     integration_abort_evidence = None
+    terminal_evidence = None
     preserved_evidence = None
     preserved_evidences: list[dict[str, Any]] = []
     multiple = bool(additional_preservation_receipts or additional_preservation_receipt_sha256)
@@ -4907,6 +4908,12 @@ def _typed_cleanup_plan_locked(
             from .integration_cleanup import abort_evidence
 
             integration_abort_evidence = abort_evidence(store, snapshot, item, record)
+        elif ((record.lifecycle == "PUBLISHED" and record.role == "integration")
+              or (record.lifecycle == "NO_CHANGE_COMPLETED" and not archived_no_commit
+                  and record.history)):
+            from .delivered_closeout import terminal_cleanup_evidence
+
+            terminal_evidence = terminal_cleanup_evidence(store, snapshot, item, record)
         elif (record.lifecycle != "HANDOFF_READY" and not archived_no_commit and not retained_cleanup) or record.role not in {
             "feature",
             "audit",
@@ -4963,13 +4970,13 @@ def _typed_cleanup_plan_locked(
         runtime_evidence["scan_error"] = {"code": exc.code, "message": str(exc)}
         blockers.append({"code": exc.code, "message": str(exc)})
     for resource in resources:
-        if aborted_integration and resource["cleanup_action"] == "remove-tree":
+        if (aborted_integration or terminal_evidence is not None) and resource["cleanup_action"] == "remove-tree":
             # This additional lifecycle has no project-name/path allowlist. Even
             # otherwise recognized build output requires an exact preserved copy.
             resource.update(
                 classification="blocked", cleanup_action="none",
-                blocker="INTEGRATION_PRESERVATION_REQUIRED",
-                reason="aborted integration cleanup requires exact preservation for every tree",
+                blocker="INTEGRATION_PRESERVATION_REQUIRED" if aborted_integration else "TERMINAL_PRESERVATION_REQUIRED",
+                reason="terminal integration/no-change cleanup requires exact preservation for every tree",
             )
         if resource["blocker"]:
             blockers.append(
@@ -5039,6 +5046,8 @@ def _typed_cleanup_plan_locked(
         identity["preservation_evidence"] = preserved_evidence
     if multiple:
         identity["preservation_evidences"] = preserved_evidences
+    if terminal_evidence is not None:
+        identity["terminal_evidence"] = terminal_evidence
     if integration_abort_evidence is not None:
         identity["integration_abort_evidence"] = integration_abort_evidence
     if recovery is not None:
@@ -7518,7 +7527,11 @@ def _validate_release_core(
     elif record.lifecycle == "NO_CHANGE_COMPLETED" and record.history[-1].get("no_change_completion_ref"):
         from .delivered_closeout import verify_no_change_cleanup
 
-        cleanup_refs = verify_no_change_cleanup(store, item, record, snapshot.repository_id)
+        cleanup_refs = verify_no_change_cleanup(
+            store, item, record, snapshot.repository_id, cleanup_recovery=cleanup_recovery,
+            cleanup_transaction_id=cleanup_transaction_id,
+            allow_pending_typed_no_action=allow_pending_typed_no_action,
+        )
     else:
         cleanup_refs = cleanup_receipts(
             store, item, record, snapshot.repository_id,

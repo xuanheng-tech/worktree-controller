@@ -97,3 +97,13 @@ a successful process exit alone does not prove that all worktrees are settled.
 - [Report a security issue](https://github.com/xuanheng-tech/worktree-controller/blob/main/SECURITY.md)
 
 Licensed under the [Apache License 2.0](https://github.com/xuanheng-tech/worktree-controller/blob/main/LICENSE).
+
+With `terminal_preserved_cleanup_version` 1, published integrations and completed
+no-change feature/audit tasks may use the existing preservation and `resource-clean --typed`
+flow. Require one exact remote-verified, lease-cleared publication or one verified original
+no-change completion. Every removed tree needs immutable preservation coverage.
+Plans pin the current verified proof baseline; cleanup and release recheck it without
+rewriting history, reopening lifecycle or relaxing owner/HEAD/CAS, runtime, lease, retained-ref
+and transaction guards. A newly observed legacy digest is not historical hash evidence.
+New-format no-change completions may clean afterward only when their frozen prior cleanup
+set is empty; existing pre-completion proofs retain their original CAS.

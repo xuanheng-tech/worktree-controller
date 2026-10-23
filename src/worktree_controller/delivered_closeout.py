@@ -136,8 +136,119 @@ def _legacy_no_change(store: MetadataStore, item: WorktreeGitState, record: Meta
     return original
 
 
+def _has_pre_completion_cleanup(store: MetadataStore, record: MetadataRecord) -> bool:
+    from .cleanup_evidence import read
+
+    for path in sorted(store.completion_receipts_dir.glob("*.json")):
+        value, _ = read(path)
+        plan = value.get("plan", {})
+        if plan.get("allocation_id") == record.allocation_id and plan.get("terminal_evidence") is None:
+            return True
+    return False
+
+
+def terminal_cleanup_evidence(store: MetadataStore, snapshot: MetadataSnapshot,
+                              item: WorktreeGitState, record: MetadataRecord) -> dict[str, Any]:
+    """Pin existing terminal proof without reopening a frozen allocation.
+
+    Legacy no-change receipts acquire a verified baseline now, never a claim of
+    historical digest observation. New completions can clean at their terminal
+    CAS only when they froze an empty prior cleanup set.
+    """
+    from .cleanup_evidence import read
+    from .lifecycle import _publication_receipt_lease_released
+
+    def invalid():
+        return ControllerError("TERMINAL_CLEANUP_EVIDENCE_INVALID",
+                               "exact lease-cleared publication or no-change completion required")
+
+    try:
+        if record.lifecycle == "PUBLISHED" and record.role == "integration":
+            matches = [receipt for receipt in snapshot.publication_receipts.values()
+                       if receipt.allocation_id == record.allocation_id]
+            if len(matches) != 1:
+                raise invalid()
+            receipt = matches[0]
+            if (receipt.repository_id != snapshot.repository_id
+                    or receipt.status not in {"REMOTE_VERIFIED", "RELEASED"}
+                    or not receipt.remote_verified_at
+                    or not _publication_receipt_lease_released(snapshot, receipt)
+                    or receipt.candidate_oid != item.head
+                    or receipt.finalizer_record_id != record.finalizer_record_id
+                    or not receipt.validation_evidence_id):
+                raise invalid()
+            intents = [intent for intent in snapshot.integration_intents.values()
+                       if intent.allocation_id == record.allocation_id]
+            if receipt.intent_id is not None or intents:
+                if len(intents) != 1:
+                    raise invalid()
+                intent = intents[0]
+                if (receipt.intent_id != intent.intent_id
+                        or intent.allocation_id != record.allocation_id
+                        or intent.publication_identity != receipt.receipt_id
+                        or intent.candidate_oid != item.head
+                        or intent.validation_evidence_id != receipt.validation_evidence_id):
+                    raise invalid()
+            from .store import publication_receipt_to_dict
+
+            receipt_path = store.publication_receipts_dir / f"{receipt.receipt_id}.json"
+            receipt_value, receipt_digest = read(receipt_path)
+            if receipt_value != publication_receipt_to_dict(receipt):
+                raise invalid()
+            # The producer receipt is immutable; later closeout has separate evidence.
+            return {"contract": "terminal-preserved-cleanup/v1", "kind": "publication",
+                    "receipt_id": receipt.receipt_id,
+                    "receipt_ref": {"path": str(receipt_path), "sha256": receipt_digest},
+                    "repository_id": receipt.repository_id,
+                    "allocation_id": receipt.allocation_id, "intent_id": receipt.intent_id,
+                    "candidate_oid": receipt.candidate_oid,
+                    "finalizer_record_id": receipt.finalizer_record_id,
+                    "validation_evidence_id": receipt.validation_evidence_id,
+                    "remote_verified_at": receipt.remote_verified_at}
+        if (record.lifecycle != "NO_CHANGE_COMPLETED" or record.role not in {"feature", "audit"}
+                or not record.history):
+            raise invalid()
+        completion_ref = record.history[-1].get("no_change_completion_ref")
+        if completion_ref:
+            receipt = _completion_document(store, completion_ref)
+            original = record_from_dict(receipt["before_record"])
+            event = record.history[-1]
+            if (receipt.get("contract") != NO_CHANGE_CONTRACT
+                    or receipt.get("kind") != "no_change_completion"
+                    or receipt.get("preservation_cleanup_receipts") != []
+                    or _no_change_transition(original, event) != record
+                    or {key: value for key, value in event.items() if key != "no_change_completion_ref"}
+                    != receipt["completion_event"]):
+                raise invalid()
+            _no_change_identity(receipt, original, item, snapshot.repository_id)
+            if not (_no_change_time(original.last_reviewed_at)
+                    <= _no_change_time(receipt["completed_at"]) <= _no_change_time(event["at"])):
+                raise invalid()
+            if _has_pre_completion_cleanup(store, record):
+                raise invalid()
+            return {"contract": "terminal-preserved-cleanup/v1", "kind": "no_change",
+                    "completion_ref": completion_ref}
+        matches = []
+        for path in sorted(store.completion_receipts_dir.glob("*.json")):
+            value, digest = read(path)
+            if (value.get("kind") == "no_change_completion"
+                    and value.get("allocation_id") == record.allocation_id):
+                matches.append({"receipt_id": path.stem, "path": str(path), "sha256": digest})
+        if len(matches) != 1:
+            raise invalid()
+        ref = matches[0]
+        _legacy_no_change(store, item, record, snapshot.repository_id, ref)
+        return {"contract": "terminal-preserved-cleanup/v1", "kind": "legacy_no_change",
+                "completion_ref": ref}
+    except (OSError, KeyError, TypeError, ValueError, IndexError, ControllerError) as exc:
+        raise invalid() from exc
+
+
 def verify_no_change_cleanup(store: MetadataStore, item: WorktreeGitState,
-                             record: MetadataRecord, repository_id: str | None) -> list[dict[str, str]]:
+                             record: MetadataRecord, repository_id: str | None, *,
+                             cleanup_recovery: dict[str, Any] | None = None,
+                             cleanup_transaction_id: str | None = None,
+                             allow_pending_typed_no_action: bool = False) -> list[dict[str, str]]:
     """Bridge only frozen normal transitions; cleanup keeps its original exact CAS."""
     from .preserved_cleanup import cleanup_receipts
 
@@ -157,6 +268,14 @@ def verify_no_change_cleanup(store: MetadataStore, item: WorktreeGitState,
                     <= _no_change_time(receipt["completed_at"]) <= _no_change_time(event["at"])):
                 raise _no_change_fail("completion timestamp differs from its transition")
             refs = receipt["preservation_cleanup_receipts"]
+            if refs == [] and not _has_pre_completion_cleanup(store, record):
+                terminal_cleanup_evidence(store, store._load_unlocked(), item, record)
+                return cleanup_receipts(
+                    store, item, record, repository_id, cleanup_recovery=cleanup_recovery,
+                    cleanup_transaction_id=cleanup_transaction_id,
+                    allow_pending_typed_no_action=allow_pending_typed_no_action,
+                    include_no_action_refs=True,
+                )
         elif receipt.get("kind") == "no_change_cleanup_recovery":
             plan = receipt["plan"]
             legacy = record_from_dict(plan["record"])

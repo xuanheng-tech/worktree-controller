@@ -640,6 +640,11 @@ def cleanup_receipts(
             plan = receipt.get("plan", {})
             if plan.get("allocation_id") != record.allocation_id:
                 continue
+            if plan.get("terminal_evidence") is not None:
+                from .delivered_closeout import terminal_cleanup_evidence
+
+                if terminal_cleanup_evidence(store, store._load_unlocked(), item, record) != plan["terminal_evidence"]:
+                    raise _blocked("terminal completion evidence changed after cleanup")
             if plan.get("integration_abort_evidence") is not None:
                 from .integration_cleanup import abort_evidence
 

@@ -1071,7 +1071,7 @@
   "session_launcher_entrypoint": "worktree-session",
   "session_entrypoint": "worktree-session-end",
   "tool_name": "worktree-controller",
-  "tool_version": "1.32.2",
+  "tool_version": "1.32.3",
   "delivered_closeout_version": 1,
   "retained_archive_version": 1,
   "retention_convergence_version": 2,
@@ -1511,6 +1511,14 @@
     "interrupted_recovery": "prepare-multiple with exact original journal/receipt SHA-256; completed prefix and never-started pending suffix only; full original proof set and immutable historical evidence retained",
     "single_input_compatibility": "existing single receipt contract, plan and receipt shape remain unchanged",
     "storage_layout_version": 4
+  },
+  "terminal_preserved_cleanup_version": 1,
+  "terminal_preserved_cleanup_contract": {
+    "contract": "terminal-preserved-cleanup/v1",
+    "eligible": "PUBLISHED integration with one matching remote-verified publication and cleared publication lease; NO_CHANGE_COMPLETED feature/audit with one verified original completion transition and receipt",
+    "coverage": "every removed tree requires an exact immutable preservation generation; existing owner, HEAD, CAS, retained-ref, binding, runtime, writer and transaction guards remain mandatory",
+    "evidence": "plan pins raw producer publication bytes or exact completion reference; legacy completion establishes a newly verified raw baseline; cleanup and release reverify it without rewriting historical evidence or reopening lifecycle",
+    "new_no_change": "new-format completions with an empty frozen prior cleanup set may clean at the exact terminal CAS; nonempty prior proof sets retain their original pre-completion CAS"
   },
   "retained_typed_cleanup_version": 1,
   "aborted_integration_preserved_cleanup_version": 1,

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.32.3
+
+- Allow exact preserved-tree cleanup for published integrations with verified producer
+  publication proof and completed no-change feature/audit tasks with verified
+  original completion evidence. Pin proof in the cleanup plan and recheck it at release;
+  retain frozen lifecycle, owner/CAS, runtime, lease, ref and transaction guards.
+- Require preservation for every removed tree on these terminal compatibility paths.
+  New-format no-change completion with prior cleanup keeps its original exact-CAS contract.
+- Add `terminal_preserved_cleanup_version` 1; CLI 61 and storage layout 5 remain unchanged.
+
 ## 1.32.2
 
 - Share history-preserving record and intent updates through `record_updates`, and interpret
