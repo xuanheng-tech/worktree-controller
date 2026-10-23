@@ -397,7 +397,8 @@ def retry_integration(
 ) -> dict[str, Any]:
     """Plan/CAS an append-only dependency decision or restart the original intent."""
     from .controller import status
-    from .lifecycle import _blocking_scope_intent, _emit_lifecycle_event, _updated_intent
+    from .lifecycle import _blocking_scope_intent, _emit_lifecycle_event
+    from .record_updates import updated_intent
 
     detail = reason.strip()
     if not detail or len(detail) > 512 or "\x00" in detail:
@@ -451,9 +452,9 @@ def retry_integration(
                 raise ControllerError("BLOCK_DRIFT", "retry plan evidence changed; plan again")
             if not dry_run:
                 if prerequisite_intent_id:
-                    updated = _updated_intent(intent, "RETRY_PREREQUISITE_BOUND")
+                    updated = updated_intent(intent, "RETRY_PREREQUISITE_BOUND")
                 else:
-                    updated = _updated_intent(
+                    updated = updated_intent(
                         intent,
                         "PREPARATION_RETRY_QUEUED",
                         state="QUEUED",

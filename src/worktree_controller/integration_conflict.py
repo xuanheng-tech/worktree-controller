@@ -23,7 +23,8 @@ def resolve_integration(
     finalizer_record_id: str,
 ) -> dict[str, Any]:
     from .controller import status
-    from .lifecycle import _intent_for_allocation, _intent_payload, _updated_intent, _updated_record
+    from .lifecycle import _intent_for_allocation, _intent_payload
+    from .record_updates import updated_intent, updated_record
     from .semantics import assert_record_version as _cas
     from .semantics import managed_record as _managed_record
 
@@ -84,8 +85,8 @@ def resolve_integration(
         issues = integration_candidate_issues(item, record, snapshot, require_task_match=False)
         if issues:
             raise ControllerError(issues[0]["code"], issues[0]["message"])
-        updated = _updated_record(record, "INTEGRATION_CONFLICT_RESOLVED", task_commit=item.head)
-        resolved = _updated_intent(
+        updated = updated_record(record, "INTEGRATION_CONFLICT_RESOLVED", task_commit=item.head)
+        resolved = updated_intent(
             intent,
             "INTEGRATION_CONFLICT_RESOLVED",
             candidate_oid=item.head,

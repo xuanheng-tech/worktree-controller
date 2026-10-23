@@ -20,10 +20,10 @@ from .lifecycle import (
     _cancel_release_intents,
     _typed_runtime_blockers,
     _typed_runtime_evidence,
-    _updated_record,
 )
 from .models import ControllerError
 from .policy import load_policy
+from .record_updates import updated_record
 from .semantics import assert_record_version as _cas
 from .semantics import integration_intent_abandoned, publication_ref
 from .semantics import managed_record as _managed_record
@@ -245,7 +245,7 @@ def recover_frozen_checkout(
                 git_write(item.path, ("symbolic-ref", "HEAD", f"refs/heads/{branch}"))
             elif latest.branch != branch:
                 raise ControllerError("BLOCK_DRIFT", "checkout branch changed during recovery")
-            updated = _updated_record(record, "PUBLISHED_CHECKOUT_REATTACHED")
+            updated = updated_record(record, "PUBLISHED_CHECKOUT_REATTACHED")
         else:
             _cancel_release_intents(
                 store,
@@ -254,7 +254,7 @@ def recover_frozen_checkout(
                 event="FROZEN_SOURCE_RECOVERED",
                 blocker="REOPENED",
             )
-            updated = _updated_record(
+            updated = updated_record(
                 record,
                 "PUBLISHED_SOURCE_RECOVERED",
                 lifecycle="ACTIVE",

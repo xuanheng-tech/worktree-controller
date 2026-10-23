@@ -662,7 +662,7 @@ def close_delivered(
     plan_id: str | None = None,
 ) -> dict[str, Any]:
     from .controller import envelope
-    from .lifecycle import _updated_record
+    from .record_updates import updated_record
     from .semantics import assert_record_version as _cas
     from .semantics import managed_record as _managed_record
 
@@ -758,7 +758,7 @@ def close_delivered(
                     "plan_id": identity,
                     "plan": plan,
                 }
-                updated = _updated_record(record, EVENT, lifecycle=STATE)
+                updated = updated_record(record, EVENT, lifecycle=STATE)
                 event = {
                     **updated.history[-1],
                     "closeout_receipt_id": receipt_id,
@@ -803,7 +803,7 @@ def archive_retained(
 ) -> dict[str, Any]:
     """Freeze a clean, unfinished retained task for guarded physical release."""
     from .controller import envelope
-    from .lifecycle import _updated_record
+    from .record_updates import updated_record
     from .semantics import assert_record_version as _cas
     from .semantics import managed_record as _managed_record
 
@@ -896,7 +896,7 @@ def archive_retained(
                     "plan_id": identity,
                     "plan": plan,
                 }
-                updated = _updated_record(record, ARCHIVE_EVENT, lifecycle=ARCHIVE_STATE)
+                updated = updated_record(record, ARCHIVE_EVENT, lifecycle=ARCHIVE_STATE)
                 event = {
                     **updated.history[-1],
                     "archive_receipt_id": receipt_id,

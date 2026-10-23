@@ -20,7 +20,7 @@ from typing import Any
 
 from .controller import status
 from .git_backend import inventory
-from .lifecycle import _cancel_release_intents, _updated_record
+from .lifecycle import _cancel_release_intents
 from .models import (
     ControllerError,
     MetadataRecord,
@@ -28,6 +28,7 @@ from .models import (
     WriterReconciliationReceipt,
 )
 from .policy import load_policy
+from .record_updates import updated_record
 from .semantics import record_for as _record_for
 from .store import WRITER_RECEIPT_SCHEMA_VERSION, MetadataStore
 from .writer_lease import (
@@ -278,7 +279,7 @@ def reconcile_writers(
                     event="RECORD_CHANGED",
                     blocker="PARKED",
                 )
-                updated = _updated_record(record, "PARKED", lifecycle="RETAINED")
+                updated = updated_record(record, "PARKED", lifecycle="RETAINED")
                 store.replace_record(updated)
                 store.remove_writer_lease(record.allocation_id)
                 receipt = WriterReconciliationReceipt(

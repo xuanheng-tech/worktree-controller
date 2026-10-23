@@ -20,7 +20,6 @@ from .git_backend import (
     public_refs,
     worktree_content_fingerprint,
 )
-from .lifecycle import _updated_record
 from .models import (
     ControllerError,
     MetadataRecord,
@@ -29,6 +28,7 @@ from .models import (
     WorktreeGitState,
     WorktreePolicy,
 )
+from .record_updates import updated_record
 from .store import MetadataStore, now_iso
 
 CONTRACT = "registration-prune/v1"
@@ -343,7 +343,7 @@ def apply_prune(
         snapshot = store._load_unlocked()
         record = snapshot.records[journal["allocation_id"]]
         if record.record_version == journal["expected_record_version"]:
-            updated = _updated_record(
+            updated = updated_record(
                 record, "REGISTRATION_PRUNED", lifecycle="RELEASED", owner="unassigned"
             )
             store.replace_record(updated)
