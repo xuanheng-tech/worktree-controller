@@ -14,7 +14,6 @@ from tests.test_shadow import GitRepository
 from worktree_controller import writer_lease
 from worktree_controller.controller import status
 from worktree_controller.lifecycle import (
-    _updated_record,
     acquire,
     park,
     update_external_binding,
@@ -22,6 +21,7 @@ from worktree_controller.lifecycle import (
 from worktree_controller.models import ControllerError, WriterHolder
 from worktree_controller.policy import load_policy
 from worktree_controller.reconciler import reconcile_writers
+from worktree_controller.record_updates import updated_record
 from worktree_controller.writer_lease import (
     acquire_writer_lease,
     boot_id,
@@ -1106,7 +1106,7 @@ def test_reconciliation_clears_entitlement_left_by_a_finished_allocation() -> No
             with store.lock(exclusive=True):
                 snapshot = store._load_unlocked()
                 store.replace_record(
-                    _updated_record(snapshot.records[allocation], "RELEASED", lifecycle="RELEASED")
+                    updated_record(snapshot.records[allocation], "RELEASED", lifecycle="RELEASED")
                 )
             assert allocation in _leases(repository)
 
@@ -1151,7 +1151,7 @@ def test_reconciliation_leaves_a_frozen_allocation_alone() -> None:
             with store.lock(exclusive=True):
                 snapshot = store._load_unlocked()
                 store.replace_record(
-                    _updated_record(
+                    updated_record(
                         snapshot.records[allocation], "HANDOFF", lifecycle="HANDOFF_READY"
                     )
                 )
@@ -1185,7 +1185,7 @@ def test_reconciliation_sweeps_a_dead_holder_lease_on_a_parked_allocation() -> N
         with store.lock(exclusive=True):
             snapshot = store._load_unlocked()
             store.replace_record(
-                _updated_record(snapshot.records[allocation], "PARKED", lifecycle="RETAINED")
+                updated_record(snapshot.records[allocation], "PARKED", lifecycle="RETAINED")
             )
         child.kill()
         child.wait()

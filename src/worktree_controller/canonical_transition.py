@@ -19,7 +19,6 @@ from .git_backend import (
     update_branch_ref,
     validate_branch_name,
 )
-from .lifecycle import _updated_record
 from .models import (
     ControllerError,
     MetadataRecord,
@@ -29,6 +28,7 @@ from .models import (
     WorktreePolicy,
 )
 from .policy import default_policy, load_policy, parse_policy
+from .record_updates import updated_record
 from .semantics import managed_record as _managed_record
 from .store import MetadataStore
 from .transaction_scope import conflicts
@@ -274,7 +274,7 @@ def transition_canonical(
             if not refresh_main and item.branch == expected_branch:
                 git_write(item.path, ("checkout", "--no-overwrite-ignore", expected_branch))
             raise
-        updated = _updated_record(
+        updated = updated_record(
             record,
             "CANONICAL_MAIN_REFRESHED" if refresh_main else "CANONICAL_TRANSITIONED",
             lifecycle="ACTIVE",

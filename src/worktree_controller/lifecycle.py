@@ -77,6 +77,8 @@ from .models import (
 from .policy import load_policy
 from .preserved_cleanup import CONTRACT as PRESERVED_CLEANUP_CONTRACT
 from .preserved_cleanup import coverage, delete_preserved_state
+from .record_updates import updated_intent as _updated_intent
+from .record_updates import updated_record as _updated_record
 from .semantics import assert_record_version as _cas
 from .semantics import (
     attribution_base,
@@ -106,11 +108,9 @@ from .store import (
     RELEASE_RECEIPT_SCHEMA_VERSION,
     MetadataStore,
     integration_intent_from_dict,
-    integration_intent_to_dict,
     lifecycle_event_from_dict,
     new_record,
     now_iso,
-    record_from_dict,
     record_to_dict,
     release_intent_from_dict,
     release_intent_to_dict,
@@ -144,46 +144,6 @@ POST_TEARDOWN_RECOVERY_PHASES = frozenset({"VENV_REMOVED", "PREPARED"})
 def _crash_point(name: str) -> None:
     if os.environ.get("WORKTREE_CONTROLLER_TEST_CRASH_AT") == name:
         os._exit(97)
-
-
-def _updated_record(record: MetadataRecord, event: str, **changes: Any) -> MetadataRecord:
-    payload = record_to_dict(record)
-    before = record.lifecycle
-    timestamp = now_iso()
-    payload.update(changes)
-    payload["record_version"] = record.record_version + 1
-    payload["last_reviewed_at"] = timestamp
-    history = list(record.history)
-    history.append(
-        {
-            "at": timestamp,
-            "event": event,
-            "from": before,
-            "to": payload.get("lifecycle", before),
-            "owner": payload.get("owner", record.owner),
-        }
-    )
-    payload["history"] = history
-    return record_from_dict(payload)
-
-
-def _updated_intent(intent: IntegrationIntent, event: str, **changes: Any) -> IntegrationIntent:
-    payload = integration_intent_to_dict(intent)
-    timestamp = now_iso()
-    payload.update(changes)
-    payload["updated_at"] = timestamp
-    history = list(intent.history)
-    history.append(
-        {
-            "at": timestamp,
-            "event": event,
-            "from": intent.state,
-            "to": payload.get("state", intent.state),
-            "candidate_oid": payload.get("candidate_oid"),
-        }
-    )
-    payload["history"] = history
-    return integration_intent_from_dict(payload)
 
 
 def _scope_digest(scope_paths: tuple[str, ...]) -> str:
