@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.32.5
+
+- Poll successful publication writes through one shared five-minute visibility budget.
+  Revalidate cached GitHub/PyPI metadata, preserve exact bundle recovery and stop immediately
+  on command failures, identity drift, unknown assets or checksum mismatches.
+- Move pure integration scope hashing and overlap queries into `semantics`; retain lifecycle
+  aliases and reduce private cross-module imports from 80 to 78 without changing scope rules.
+- Keep CLI contract 61, capability versions and storage layout 5 unchanged.
+
 ## 1.32.4
 
 - Share pure release-intent selection and renewal-backoff queries in `release_intents`;

@@ -58,7 +58,7 @@ def pypi_row(row):
 def remote(release, bundle, monkeypatch):
     root, manifest = bundle
     state = {"release": None, "data": {}, "pypi": [], "mutations": [], "sleeps": [],
-             "tag_commit": manifest["commit"], "main_base": manifest["commit"]}
+             "tag_commit": manifest["commit"], "main_base": manifest["commit"], "now": 0}
 
     def api(path, missing=False):
         if path.startswith("git/ref/"):
@@ -113,8 +113,116 @@ def remote(release, bundle, monkeypatch):
     monkeypatch.setattr(release, "api", api)
     monkeypatch.setattr(release, "run", run)
     monkeypatch.setattr(release, "read_json", lambda *a, **k: {"urls": state["pypi"]} if state["pypi"] else None)
-    monkeypatch.setattr(release.time, "sleep", lambda value: state["sleeps"].append(value))
+    def sleep(value):
+        state["sleeps"].append(value)
+        state["now"] += value
+
+    monkeypatch.setattr(release.time, "sleep", sleep)
+    monkeypatch.setattr(release.time, "monotonic", lambda: state["now"])
     return state
+
+
+def delay_visibility(release, state, monkeypatch, phase, seconds):
+    api, read_json = release.api, release.read_json
+
+    def observed_api(path, **kwargs):
+        value = api(path, **kwargs)
+        item = state["release"]
+        if not item or state["now"] >= seconds or not path.startswith("releases"):
+            return value
+        if phase == "draft" and item["draft"]:
+            return [] if path.startswith("releases?") else None
+        if phase == "assets" and state["data"]:
+            if isinstance(value, list):
+                return [dict(row, assets=[]) for row in value]
+            return dict(value, assets=[]) if value else value
+        if phase == "public" and not item["draft"]:
+            if isinstance(value, list):
+                return [dict(row, draft=True) for row in value]
+            return dict(value, draft=True) if value else value
+        return value
+
+    def observed_pypi(*args, **kwargs):
+        if phase == "pypi" and state["now"] < seconds:
+            return None
+        return read_json(*args, **kwargs)
+
+    monkeypatch.setattr(release, "api", observed_api)
+    monkeypatch.setattr(release, "read_json", observed_pypi)
+    return api, read_json
+
+
+@pytest.mark.parametrize("phase", ["draft", "assets", "pypi", "public"])
+def test_delayed_readback_repeats_observations_not_writes(release, bundle, remote, monkeypatch, phase):
+    delay = 75 if phase == "pypi" else 15
+    delay_visibility(release, remote, monkeypatch, phase, delay)
+    assert release.publish(bundle[0])["status"] == "PUBLISHED_VERIFIED"
+    assert sum(remote["sleeps"]) == delay
+    assert len(remote["mutations"]) == 4
+    assert not remote["release"]["draft"]
+
+
+@pytest.mark.parametrize("phase", ["draft", "assets", "pypi", "public"])
+def test_visibility_timeout_preserves_bundle_and_resumes_without_reupload(
+    release, bundle, remote, monkeypatch, phase,
+):
+    root, _ = bundle
+    before = {p.name: p.read_bytes() for p in (root / "dist").iterdir()}
+    api, read_json = delay_visibility(release, remote, monkeypatch, phase, 600)
+    with pytest.raises(RuntimeError, match="retry with the same bundle"):
+        release.publish(root)
+    assert sum(remote["sleeps"]) == release.PUBLICATION_WAIT_SECONDS
+    retained = remote["data"].copy()
+    monkeypatch.setattr(release, "api", api)
+    monkeypatch.setattr(release, "read_json", read_json)
+    assert release.publish(root)["status"] == "PUBLISHED_VERIFIED"
+    assert len(remote["mutations"]) == 4
+    assert all(remote["data"][name] == data for name, data in retained.items())
+    assert before == {p.name: p.read_bytes() for p in (root / "dist").iterdir()}
+
+
+@pytest.mark.parametrize("phase", ["draft", "pypi"])
+def test_identity_drift_during_wait_stops_before_next_write(release, bundle, remote, monkeypatch, phase):
+    delay_visibility(release, remote, monkeypatch, phase, 75)
+    sleep = release.time.sleep
+
+    def drift(value):
+        sleep(value)
+        remote["tag_commit"] = "f" * 40
+
+    monkeypatch.setattr(release.time, "sleep", drift)
+    with pytest.raises(RuntimeError, match="tag drift"):
+        release.publish(bundle[0])
+    assert remote["sleeps"] == [5]
+    assert remote["release"]["draft"]
+    assert not any(args[:3] == ["gh", "release", "edit"] for args in remote["mutations"])
+    if phase == "draft":
+        assert remote["data"] == {} and remote["pypi"] == []
+
+
+def test_readback_requests_revalidate_caches(release, monkeypatch):
+    def urlopen(request, **kwargs):
+        assert dict((k.lower(), v) for k, v in request.header_items())["cache-control"] == "no-cache"
+        return io.BytesIO(b"{}")
+
+    def run(*args, **kwargs):
+        assert args[-2:] == ("-H", "Cache-Control: no-cache")
+        return subprocess.CompletedProcess(args, 0, "{}", "")
+
+    monkeypatch.setattr(release.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(release, "run", run)
+    assert release.read_json("https://pypi.org/example") == {}
+    assert release.api("releases") == {}
+
+
+def test_visibility_phases_share_one_wait_budget(release, bundle, remote, monkeypatch):
+    delay_visibility(release, remote, monkeypatch, "draft", 75)
+    delay_visibility(release, remote, monkeypatch, "pypi", 600)
+    with pytest.raises(RuntimeError, match="PyPI propagation"):
+        release.publish(bundle[0])
+    assert sum(remote["sleeps"]) == release.PUBLICATION_WAIT_SECONDS
+    assert len(remote["mutations"]) == 3
+    assert remote["release"]["draft"]
 
 
 def test_successful_publish_then_replay_makes_no_further_mutation(release, bundle, remote):

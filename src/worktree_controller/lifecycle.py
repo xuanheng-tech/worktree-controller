@@ -100,6 +100,8 @@ from .semantics import integration_reconciliation as _integration_reconciliation
 from .semantics import managed_record as _managed_record
 from .semantics import publication_receipt_lease_released as _publication_receipt_lease_released
 from .semantics import record_for as _record_for
+from .semantics import scope_digest as _scope_digest
+from .semantics import scopes_overlap as _scopes_overlap
 from .store import (
     INTEGRATION_INTENT_CONTRACT_VERSION,
     INTEGRATION_INTENT_SCHEMA_VERSION,
@@ -152,29 +154,10 @@ def _crash_point(name: str) -> None:
         os._exit(97)
 
 
-def _scope_digest(scope_paths: tuple[str, ...]) -> str:
-    encoded = json.dumps(list(scope_paths), ensure_ascii=True, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-
 def _intent_order(intent: IntegrationIntent) -> tuple[int, int | str, str]:
     if intent.queue_sequence > 0:
         return (1, intent.queue_sequence, intent.intent_id)
     return (0, intent.enqueued_at, intent.intent_id)
-
-
-def _scopes_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
-    if not left or not right:
-        return True
-    for left_path in left:
-        for right_path in right:
-            if (
-                left_path == right_path
-                or left_path.startswith(f"{right_path}/")
-                or right_path.startswith(f"{left_path}/")
-            ):
-                return True
-    return False
 
 
 def _released_intent_evidence(

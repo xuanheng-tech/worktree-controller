@@ -102,3 +102,16 @@ Receipts distinguish a read-only audit, `PUBLISHED_VERIFIED`, and `FRESH_INSTALL
 Skipped tests remain skipped. Local installation or activation of a maintainer's WC runtime is a
 separate operation; publishing a package does not update that runtime or authorize a production
 release in any repository governed by WC.
+
+## Publication visibility
+
+Successful writes can precede their visibility through GitHub or PyPI queries. After a successful
+create, upload or publish command, the publisher polls only the missing observation. All phases
+share one five-minute monotonic deadline, including draft, asset, PyPI and public-release visibility.
+Each network command retains its own timeout; an in-flight request can finish after that deadline.
+Metadata requests ask caches to revalidate. This does not guarantee immediate upstream visibility.
+
+Every poll rechecks the immutable tag and main containment; normal inventory and byte/hash checks
+remain active. Command errors, unknown assets, yanked files and identity/checksum drift stop
+immediately. Polls never repeat writes. If visibility still times out, the job fails and keeps the
+original bundle and current release. Audit destinations and rerun failed jobs in the same run as above.

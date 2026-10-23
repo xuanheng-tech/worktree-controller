@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -202,6 +204,25 @@ def integration_queue_order(
     if anchor.queue_sequence > 0:
         return (1, anchor.queue_sequence, phase, intent.intent_id)
     return (0, anchor.enqueued_at, phase, intent.intent_id)
+
+
+def scope_digest(scope_paths: tuple[str, ...]) -> str:
+    encoded = json.dumps(list(scope_paths), ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def scopes_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
+    if not left or not right:
+        return True
+    for left_path in left:
+        for right_path in right:
+            if (
+                left_path == right_path
+                or left_path.startswith(f"{right_path}/")
+                or right_path.startswith(f"{left_path}/")
+            ):
+                return True
+    return False
 
 
 def normalize_scope_paths(values: tuple[str, ...]) -> tuple[str, ...]:

@@ -83,3 +83,7 @@ mutation helpers, clock, lock scope, cancellation and history append unchanged. 
 uses the same query directly; lifecycle retains its existing internal aliases. A changed HEAD
 or record version still renews immediately, and repeated unchanged expiries retain the existing
 one-day backoff cap. This extraction changes no CLI, capability or storage contract.
+
+Scope digest and overlap queries live in `semantics` alongside scope normalization. Integration
+retry calls these shared pure helpers directly; lifecycle retains compatibility aliases. Their
+serialization, empty-scope interpretation and parent/child path rules remain unchanged.

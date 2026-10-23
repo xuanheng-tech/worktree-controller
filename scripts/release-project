@@ -19,6 +19,8 @@ from pathlib import Path
 REPOSITORY = "xuanheng-tech/worktree-controller"
 PYPI = "https://pypi.org/pypi/worktree-controller"
 TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+PUBLICATION_WAIT_SECONDS = 300
+PUBLICATION_POLL_SECONDS = 5
 
 
 def require(condition, message):
@@ -40,7 +42,8 @@ def run(*arguments, cwd=None, env=None, binary=False, check=True):
 
 
 def api(path, missing=False):
-    result = run("gh", "api", f"repos/{REPOSITORY}/{path}", check=False)
+    result = run("gh", "api", f"repos/{REPOSITORY}/{path}",
+                 "-H", "Cache-Control: no-cache", check=False)
     if missing and result.returncode and "HTTP 404" in result.stderr:
         return None
     require(result.returncode == 0, f"GitHub API failed: {result.stderr}")
@@ -48,7 +51,9 @@ def api(path, missing=False):
 
 
 def read_json(url, missing=False):
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    request = urllib.request.Request(
+        url, headers={"Accept": "application/json", "Cache-Control": "no-cache"}
+    )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.load(response)
@@ -184,7 +189,20 @@ def release_by_tag(tag):
         page += 1
 
 
-def github_assets(bundle, manifest, write=False):
+def wait_for_visibility(manifest, observe, ready, deadline, message):
+    """Poll only missing post-write observations; validation and command errors escape."""
+    while True:
+        check_identity(manifest)
+        observed = observe()
+        if ready(observed):
+            return observed
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, f"{message}; retry with the same bundle")
+        print(f"Waiting for {message}", file=sys.stderr, flush=True)
+        time.sleep(min(PUBLICATION_POLL_SECONDS, remaining))
+
+
+def github_assets(bundle, manifest, write=False, *, deadline=None):
     tag = manifest["tag"]
     release = release_by_tag(tag)
     files = {row["filename"]: bundle / "dist" / row["filename"] for row in manifest["files"]}
@@ -193,8 +211,10 @@ def github_assets(bundle, manifest, write=False):
         run("gh", "release", "create", tag, "--repo", REPOSITORY, "--draft", "--verify-tag",
             "--target", manifest["commit"], "--title", f"Worktree Controller {manifest['version']}",
             "--notes-file", bundle / "RELEASE-NOTES.md")
-        release = release_by_tag(tag)
-        require(release is not None, "created GitHub draft not visible; retry with the same bundle")
+        release = wait_for_visibility(
+            manifest, lambda: release_by_tag(tag), lambda value: value is not None,
+            deadline, "created GitHub draft visibility",
+        )
     observed = set()
     for asset in release["assets"] if release else []:
         name = asset["name"]
@@ -207,7 +227,10 @@ def github_assets(bundle, manifest, write=False):
     if write and missing:
         run("gh", "release", "upload", tag, "--repo", REPOSITORY, *[files[name] for name in missing])
         # Observe actual bytes again before uploading anything to PyPI.
-        return github_assets(bundle, manifest)
+        return wait_for_visibility(
+            manifest, lambda: github_assets(bundle, manifest), lambda value: not value["missing"],
+            deadline, "GitHub draft asset visibility",
+        )
     return {"exists": release is not None, "draft": release["draft"] if release else None,
             "missing": missing}
 
@@ -225,25 +248,28 @@ def publish(bundle):
     # Validate both destinations before the first write; never clobber an existing asset.
     github_assets(bundle, manifest)
     missing = pypi_missing(manifest)
-    frozen = github_assets(bundle, manifest, write=True)
+    deadline = time.monotonic() + PUBLICATION_WAIT_SECONDS
+    frozen = github_assets(bundle, manifest, write=True, deadline=deadline)
     require(not frozen["missing"], "GitHub draft assets are incomplete; retry with the same bundle")
     check_identity(manifest)
     if missing:
         run("uv", "publish", "--trusted-publishing", "always", "--no-progress",
             "--publish-url", "https://upload.pypi.org/legacy/",
             *[bundle / "dist" / name for name in missing])
-    for attempt in range(12):
-        if not pypi_missing(manifest):
-            break
-        require(attempt < 11, "PyPI propagation incomplete; rerun the publisher with the same artifact")
-        time.sleep(5)
+    wait_for_visibility(
+        manifest, lambda: pypi_missing(manifest), lambda value: not value,
+        deadline, "PyPI propagation",
+    )
     check_identity(manifest)
     observed = github_assets(bundle, manifest)
     require(not observed["missing"], "GitHub upload incomplete")
     if observed["draft"]:
         run("gh", "release", "edit", manifest["tag"], "--repo", REPOSITORY, "--draft=false", "--latest")
-    final = github_assets(bundle, manifest)
-    require(final["exists"] and not final["draft"] and not final["missing"], "release did not become public")
+    final = wait_for_visibility(
+        manifest, lambda: github_assets(bundle, manifest),
+        lambda value: value["exists"] and not value["draft"] and not value["missing"],
+        deadline, "public GitHub release visibility",
+    )
     return {"tag": manifest["tag"], "status": "PUBLISHED_VERIFIED",
             "pypi_uploaded": missing, "github": final}
 

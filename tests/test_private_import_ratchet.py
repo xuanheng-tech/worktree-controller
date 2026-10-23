@@ -41,8 +41,6 @@ BASELINE = frozenset({
     ("integration_retry", "lifecycle", "_blocking_scope_intent"),
     ("integration_retry", "lifecycle", "_emit_lifecycle_event"),
     ("integration_retry", "lifecycle", "_resolve_integration_sources"),
-    ("integration_retry", "lifecycle", "_scope_digest"),
-    ("integration_retry", "lifecycle", "_scopes_overlap"),
     ("integration_retry", "lifecycle_history", "_release_view"),
     ("keyed_document_scope", "git_backend", "_git"),
     ("lifecycle", "controller", "_warning"),

@@ -5,12 +5,12 @@ direction. Each stage needs its own tested deliverable; later ideas are not curr
 
 ## Current baseline
 
-WC 1.32.4 retains CLI contract 61 and storage layout 5. The scope and architecture documents
-are already on main. Two previous extractions reduced private cross-module imports from 93 to
-82; this batch moves pure release-intent selection/backoff queries into one module, reducing
-the baseline to 80. It retains lifecycle mutation helpers, clocks and internal aliases.
+WC 1.32.5 retains CLI contract 61 and storage layout 5. The scope and architecture documents
+are already on main. Previous extractions reduced private cross-module imports from 93 to
+82 and then 80. This batch moves pure scope hashing/overlap queries into `semantics`, reducing
+the baseline to 78. It retains lifecycle mutation helpers, clocks and internal aliases.
 
-GF 1.9.7 already consumes SR's public read API and WC's versioned publication/retirement
+GF 1.9.8 already consumes SR's public read API and WC's versioned publication/retirement
 protocols. CL 1.3.10 and SR 2.5.12 already use main on both hosting platforms. These completed
 items are not prerequisites still waiting to happen.
 
@@ -24,7 +24,7 @@ acceptance gates, and historical temporary-file impact. No historical evidence i
 | --- | --- | --- | --- |
 | Now: boundaries | Current protocol and consumer inventory, including legacy adapters | Named owner per interface, source references, explicit unknowns; no changes to supported commands | Conflicting evidence keeps the interface supported |
 | Now: WC structure | One cohesive pure release-intent query extraction | Full integration gate; existing renewal/cancellation/recovery behavior; CLI 61/storage 5 unchanged | Revert the isolated extraction if behavior differs |
-| Pilot: shared quality checks | Local release-tools candidate and CL integration packet with a full commit pin | Workflow lint, CL local quality check, then all supported Python versions on real hosted CI after publication | Restore the pinned original CL workflow; PyPI/Gitea flows remain owned by consumers |
+| Shared quality checks: delivered | CL/SR adopt release-tools with a reviewed full commit pin | Both hosted parallel pilots and final three-version checks passed; SR retains its package check | Restore the pinned original consumer workflow; PyPI/Gitea flows remain owned by consumers |
 | Next 2–6 weeks | Further WC extraction only where a shared responsibility is clear; measure maintenance burden and failures | One behavior-preserving batch at a time, consumer gates, shrinking private-import baseline | Keep injected clocks, transaction and crash hooks with their owner until an explicit migration is tested |
 | Following 6–12 weeks | Evaluate moving manifests, compatibility catalog and shared Skills from GF to a dedicated toolchain owner | Full ownership inventory, staged installer/migration, exactly one active writer, historical pin and rollback tests | No second simultaneous Skill authority; no ownership switch on file-copy evidence |
 | Following 3–6 months | Evaluate a staged GF Python core migration | Characterization of exit/status/ref effects, isolated old/new comparisons, interruption recovery and real consumer gates | No dual production writes; preserve scanner refusals and existing installation until replacement passes |
@@ -44,3 +44,8 @@ Do not introduce a shared runtime Python dependency into CL/SR, merge the tools,
 Python floor, move host-specific defaults without migration, or replace existing WC/GF protocols.
 GitHub-first release consolidation and a future toolchain repository remain design decisions,
 not permission to disable existing Gitea delivery or platform controls.
+
+This maintenance batch moves pure scope hashing and overlap queries to `semantics`, lowering
+the private-import baseline from 80 to 78. Publication metadata readback now shares a bounded
+visibility window; exact bytes, identities, failed-command outcomes and same-bundle recovery stay
+mandatory. CL/SR shared quality checks have passed their hosted parallel and final matrices.

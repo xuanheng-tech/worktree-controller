@@ -17,6 +17,8 @@ from .semantics import (
     integration_intent_abandoned,
     integration_prerequisite,
     integration_queue_order,
+    scope_digest,
+    scopes_overlap,
     unallocated_integration_conflict,
 )
 from .store import MetadataStore
@@ -57,7 +59,7 @@ def _sources(
     *,
     require_idle: bool = True,
 ) -> dict[str, Any]:
-    from .lifecycle import _resolve_integration_sources, _scope_digest
+    from .lifecycle import _resolve_integration_sources
 
     observed = _resolve_integration_sources(
         repository,
@@ -74,7 +76,7 @@ def _sources(
         intent.source_finalizer_record_ids,
         intent.source_snapshot_ids,
     )
-    if observed != expected or _scope_digest(intent.scope_paths) != intent.scope_digest:
+    if observed != expected or scope_digest(intent.scope_paths) != intent.scope_digest:
         raise ControllerError("SOURCE_EVIDENCE_MISMATCH", "retry cannot replace source or scope")
     evidence = {}
     for allocation, branch, head in zip(
@@ -227,7 +229,6 @@ def _prerequisite(
     parent: IntegrationIntent,
     child: IntegrationIntent,
 ) -> dict[str, Any]:
-    from .lifecycle import _scopes_overlap
     from .semantics import effective_intent_state
 
     if (
@@ -258,7 +259,7 @@ def _prerequisite(
         and other.allocation_id is not None
         and effective_intent_state(snapshot, other) not in {"RELEASED", "ABANDONED"}
         and other.queue_sequence > parent.queue_sequence
-        and _scopes_overlap(other.scope_paths, child.scope_paths)
+        and scopes_overlap(other.scope_paths, child.scope_paths)
         for other in snapshot.integration_intents.values()
     ):
         raise ControllerError(
