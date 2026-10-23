@@ -316,11 +316,11 @@ def _require_intent_renewal_due(
     stays blocked. The same rule as stale-intent renewal applies: a changed record or
     HEAD, or a first expiry, proceeds at once.
     """
-    from .lifecycle import _release_intents_for_allocation, _renewal_due
+    from .release_intents import release_intent_renewal_due, release_intents_for_allocation
 
     canonical = inventory(repository_path)
     snapshot = MetadataStore(canonical.common_dir).load()
-    intents = _release_intents_for_allocation(snapshot, record.allocation_id)
+    intents = release_intents_for_allocation(snapshot, record.allocation_id)
     if any(intent.status in {"PENDING", "BLOCKED_RETRYABLE"} for intent in intents):
         return  # create_release_intent reuses the live intent
     stale = [intent for intent in intents if intent.status == "STALE"]
@@ -329,7 +329,7 @@ def _require_intent_renewal_due(
     # The backoff runs from the most recent time an intent of this allocation went stale.
     latest = max(stale, key=lambda intent: (intent.updated_at, intent.created_at, intent.intent_id))
     ttl = load_policy(canonical.canonical_path).release_intent_ttl_seconds
-    if not _renewal_due(snapshot, latest, record, item.head, datetime.now(UTC), ttl):
+    if not release_intent_renewal_due(snapshot, latest, record, item.head, datetime.now(UTC), ttl):
         raise ControllerError(
             "RENEWAL_BACKOFF",
             f"unchanged handoff release intent is backing off after {latest.blocker or 'expiry'}",
