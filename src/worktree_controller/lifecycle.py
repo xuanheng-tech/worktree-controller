@@ -95,6 +95,7 @@ from .semantics import (
 from .semantics import effective_intent_state as _effective_intent_state
 from .semantics import integration_reconciliation as _integration_reconciliation
 from .semantics import managed_record as _managed_record
+from .semantics import publication_receipt_lease_released as _publication_receipt_lease_released
 from .semantics import record_for as _record_for
 from .store import (
     INTEGRATION_INTENT_CONTRACT_VERSION,
@@ -6222,32 +6223,6 @@ def _reconciliation_for_publication_receipt(
             "RECONCILIATION_DRIFT", "publication receipt has multiple reconciliation receipts"
         )
     return matches[0] if matches else None
-
-
-def _lease_release_reconciliation_for_publication_receipt(
-    snapshot: MetadataSnapshot, receipt_id: str
-) -> ReconciliationReceipt | None:
-    matches = [
-        receipt
-        for receipt in snapshot.reconciliation_receipts.values()
-        if receipt.source_receipt_id == receipt_id
-        and receipt.result == "LEASE_RELEASE_ACKNOWLEDGED"
-    ]
-    if len(matches) > 1:
-        raise ControllerError(
-            "RECONCILIATION_DRIFT", "publication receipt has multiple lease reconciliations"
-        )
-    return matches[0] if matches else None
-
-
-def _publication_receipt_lease_released(
-    snapshot: MetadataSnapshot, receipt: PublicationReceipt
-) -> bool:
-    return bool(
-        receipt.lease_released_at is not None
-        or _lease_release_reconciliation_for_publication_receipt(snapshot, receipt.receipt_id)
-        is not None
-    )
 
 
 def _publication_receipt_effectively_released(

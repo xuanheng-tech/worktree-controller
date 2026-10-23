@@ -20,6 +20,8 @@ from .models import (
     IntegrationReconciliationReceipt,
     MetadataRecord,
     MetadataSnapshot,
+    PublicationReceipt,
+    ReconciliationReceipt,
     RepositoryInventory,
     WorktreeGitState,
     WorktreePolicy,
@@ -27,6 +29,32 @@ from .models import (
 from .policy import load_policy
 
 EVIDENCE_LIFECYCLES = frozenset({"HANDOFF_READY", "PRESERVED", "INTEGRATING", "PUBLISHED"})
+
+
+def _lease_release_reconciliation_for_publication_receipt(
+    snapshot: MetadataSnapshot, receipt_id: str
+) -> ReconciliationReceipt | None:
+    matches = [
+        receipt
+        for receipt in snapshot.reconciliation_receipts.values()
+        if receipt.source_receipt_id == receipt_id
+        and receipt.result == "LEASE_RELEASE_ACKNOWLEDGED"
+    ]
+    if len(matches) > 1:
+        raise ControllerError(
+            "RECONCILIATION_DRIFT", "publication receipt has multiple lease reconciliations"
+        )
+    return matches[0] if matches else None
+
+
+def publication_receipt_lease_released(
+    snapshot: MetadataSnapshot, receipt: PublicationReceipt
+) -> bool:
+    return bool(
+        receipt.lease_released_at is not None
+        or _lease_release_reconciliation_for_publication_receipt(snapshot, receipt.receipt_id)
+        is not None
+    )
 
 
 def record_for(item: WorktreeGitState, snapshot: MetadataSnapshot) -> MetadataRecord | None:

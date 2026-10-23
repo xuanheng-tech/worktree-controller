@@ -156,7 +156,7 @@ def terminal_cleanup_evidence(store: MetadataStore, snapshot: MetadataSnapshot,
     CAS only when they froze an empty prior cleanup set.
     """
     from .cleanup_evidence import read
-    from .lifecycle import _publication_receipt_lease_released
+    from .semantics import publication_receipt_lease_released
 
     def invalid():
         return ControllerError("TERMINAL_CLEANUP_EVIDENCE_INVALID",
@@ -172,7 +172,7 @@ def terminal_cleanup_evidence(store: MetadataStore, snapshot: MetadataSnapshot,
             if (receipt.repository_id != snapshot.repository_id
                     or receipt.status not in {"REMOTE_VERIFIED", "RELEASED"}
                     or not receipt.remote_verified_at
-                    or not _publication_receipt_lease_released(snapshot, receipt)
+                    or not publication_receipt_lease_released(snapshot, receipt)
                     or receipt.candidate_oid != item.head
                     or receipt.finalizer_record_id != record.finalizer_record_id
                     or not receipt.validation_evidence_id):
