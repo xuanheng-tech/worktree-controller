@@ -12,6 +12,7 @@ development and recovery paths; exact public interfaces live in the [contract](.
 | Git observations and mutations | `git_backend.py` | Git owns registrations, refs, paths, HEAD and cleanliness |
 | State and durable evidence | `models.py`, `store.py`, `metadata_codec.py`, `record_updates.py` | Validate stored identities; serialize mutations under the repository lock; record updates bump their version, and both update helpers append history |
 | Shared identity and semantic checks | `semantics.py` | Consume the caller's snapshot, including effective intent state and terminal reconciliation; do not acquire authority or write metadata |
+| Release-intent queries | `release_intents.py` | Select from the caller's snapshot and calculate renewal backoff using its supplied time; no metadata writes or fresh observation |
 | Budget admission | `resource_admission.py` | Preserve durable request identity and host reservations across retries |
 | Writer entitlement | `writer_lease.py`, `writer_session.py`, `governance.py` | Bind the real process identity and exact operation/target |
 | Lifecycle orchestration | `lifecycle.py` and focused recovery modules | Compose existing guards and append durable transition evidence |
@@ -76,3 +77,9 @@ Further lifecycle extraction should follow one cohesive transition at a time, ke
 scope and immutable evidence together. Avoid moving mutation helpers that depend on lifecycle's
 clock, transaction state or caller-specific guards merely to reduce a line count. Public CLI,
 capability and storage changes require their own version and compatibility review.
+
+Release-intent selection and renewal backoff share a pure query module. Lifecycle keeps the
+mutation helpers, clock, lock scope, cancellation and history append unchanged. Convergence
+uses the same query directly; lifecycle retains its existing internal aliases. A changed HEAD
+or record version still renews immediately, and repeated unchanged expiries retain the existing
+one-day backoff cap. This extraction changes no CLI, capability or storage contract.

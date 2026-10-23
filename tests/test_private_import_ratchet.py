@@ -22,8 +22,6 @@ BASELINE = frozenset({
     ("cleanup_evidence", "preserved_cleanup", "_document"),
     ("cleanup_recovery", "lifecycle", "_typed_cleanup_plan_locked"),
     ("cleanup_recovery", "metadata_codec", "_validate_timestamp"),
-    ("convergence", "lifecycle", "_release_intents_for_allocation"),
-    ("convergence", "lifecycle", "_renewal_due"),
     ("convergence", "writer_lease", "_referenced_paths"),
     ("delivered_closeout", "git_backend", "_git"),
     ("delivered_closeout", "lifecycle", "_release_resource_actions"),

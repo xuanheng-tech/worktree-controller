@@ -1579,7 +1579,10 @@ def test_admission_keeps_live_bound_and_unverified_occupancy_untouched() -> None
 
 
 def test_repeated_renewal_of_an_unchanged_blocked_identity_backs_off() -> None:
-    from worktree_controller.lifecycle import RENEWAL_BACKOFF_CAP_SECONDS, _renewal_due
+    from worktree_controller.release_intents import (
+        RENEWAL_BACKOFF_CAP_SECONDS,
+        release_intent_renewal_due,
+    )
 
     with GitRepository(linked=0, policy_text=POLICY_MANUAL) as repository:
         adopt_canonical(repository)
@@ -1598,7 +1601,7 @@ def test_repeated_renewal_of_an_unchanged_blocked_identity_backs_off() -> None:
 
         def due(intents, *, record_version=record.record_version, observed=head):
             view = replace(snapshot, release_intents={i.intent_id: i for i in intents})
-            return _renewal_due(view, intents[-1], replace(record, record_version=record_version),
+            return release_intent_renewal_due(view, intents[-1], replace(record, record_version=record_version),
                                 observed, now, 3600)
 
         # The first expiry renews at once; repeats wait 1h, 2h, ... up to a day.
