@@ -227,7 +227,8 @@ def _prerequisite(
     parent: IntegrationIntent,
     child: IntegrationIntent,
 ) -> dict[str, Any]:
-    from .lifecycle import _effective_intent_state, _scopes_overlap
+    from .lifecycle import _scopes_overlap
+    from .semantics import effective_intent_state
 
     if (
         child.owner != parent.owner
@@ -255,7 +256,7 @@ def _prerequisite(
     if any(
         other.intent_id != parent.intent_id
         and other.allocation_id is not None
-        and _effective_intent_state(snapshot, other) not in {"RELEASED", "ABANDONED"}
+        and effective_intent_state(snapshot, other) not in {"RELEASED", "ABANDONED"}
         and other.queue_sequence > parent.queue_sequence
         and _scopes_overlap(other.scope_paths, child.scope_paths)
         for other in snapshot.integration_intents.values()
@@ -295,7 +296,7 @@ def _plan(
     prerequisite_id: str | None,
     reason: str,
 ) -> dict[str, Any]:
-    from .lifecycle import _effective_intent_state
+    from .semantics import effective_intent_state
 
     failure = _failure(repository, snapshot, store, intent)
     source_records = _sources(repository, snapshot, store, intent)
@@ -324,7 +325,7 @@ def _plan(
         bound = integration_prerequisite(intent)
         if bound:
             child = snapshot.integration_intents.get(bound)
-            if child is None or _effective_intent_state(snapshot, child) != "RELEASED":
+            if child is None or effective_intent_state(snapshot, child) != "RELEASED":
                 raise ControllerError(
                     "RETRY_PREREQUISITE_PENDING",
                     "prerequisite needs formal publication and release",
@@ -379,7 +380,7 @@ def _plan(
         "queue_evidence": {
             other.intent_id: _digest(integration_intent_to_dict(other))
             for other in snapshot.integration_intents.values()
-            if _effective_intent_state(snapshot, other) not in {"RELEASED", "ABANDONED"}
+            if effective_intent_state(snapshot, other) not in {"RELEASED", "ABANDONED"}
         },
     }
     return {**value, "plan_id": _digest(value)}

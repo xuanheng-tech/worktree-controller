@@ -17,6 +17,7 @@ from .git_backend import (
 from .models import (
     ControllerError,
     IntegrationIntent,
+    IntegrationReconciliationReceipt,
     MetadataRecord,
     MetadataSnapshot,
     RepositoryInventory,
@@ -77,6 +78,29 @@ def integration_intent_abandoned(intent: IntegrationIntent) -> bool:
         and bool(intent.history)
         and intent.history[-1].get("event") == "PREPARATION_ABANDONED"
     )
+
+
+def integration_reconciliation(
+    snapshot: MetadataSnapshot, intent_id: str
+) -> IntegrationReconciliationReceipt | None:
+    matches = [
+        receipt
+        for receipt in snapshot.integration_reconciliation_receipts.values()
+        if receipt.intent_id == intent_id and receipt.result == "STALE_INTENT_TERMINAL_ACKNOWLEDGED"
+    ]
+    if len(matches) > 1:
+        raise ControllerError(
+            "INVALID_METADATA", "integration intent has multiple terminal reconciliations"
+        )
+    return matches[0] if matches else None
+
+
+def effective_intent_state(snapshot: MetadataSnapshot, intent: IntegrationIntent) -> str:
+    """Interpret terminal evidence from the caller's snapshot without changing authority."""
+    receipt = integration_reconciliation(snapshot, intent.intent_id)
+    if receipt is not None:
+        return receipt.effective_terminal_state
+    return "ABANDONED" if integration_intent_abandoned(intent) else intent.state
 
 
 def _current_attempt(intent: IntegrationIntent) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

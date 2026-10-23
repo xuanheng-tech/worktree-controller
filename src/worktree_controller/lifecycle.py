@@ -92,6 +92,8 @@ from .semantics import (
     path_scope_issues,
     publication_ref,
 )
+from .semantics import effective_intent_state as _effective_intent_state
+from .semantics import integration_reconciliation as _integration_reconciliation
 from .semantics import managed_record as _managed_record
 from .semantics import record_for as _record_for
 from .store import (
@@ -169,28 +171,6 @@ def _scopes_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
             ):
                 return True
     return False
-
-
-def _integration_reconciliation(
-    snapshot: MetadataSnapshot, intent_id: str
-) -> IntegrationReconciliationReceipt | None:
-    matches = [
-        receipt
-        for receipt in snapshot.integration_reconciliation_receipts.values()
-        if receipt.intent_id == intent_id and receipt.result == "STALE_INTENT_TERMINAL_ACKNOWLEDGED"
-    ]
-    if len(matches) > 1:
-        raise ControllerError(
-            "INVALID_METADATA", "integration intent has multiple terminal reconciliations"
-        )
-    return matches[0] if matches else None
-
-
-def _effective_intent_state(snapshot: MetadataSnapshot, intent: IntegrationIntent) -> str:
-    receipt = _integration_reconciliation(snapshot, intent.intent_id)
-    if receipt is not None:
-        return receipt.effective_terminal_state
-    return "ABANDONED" if integration_intent_abandoned(intent) else intent.state
 
 
 def _released_intent_evidence(

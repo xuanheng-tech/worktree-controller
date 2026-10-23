@@ -1754,9 +1754,17 @@ def test_wait_timeout_terminates_only_its_gate_and_child_processes(
         assert canary.poll() is None
         child = json.loads(marker.read_text())
         status = Path(f"/proc/{child['pid']}/stat")
-        if status.exists():
-            raw = status.read_text()
-            assert raw[raw.rfind(")") + 2:].split()[0] == "Z"
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                raw = status.read_text()
+            except (FileNotFoundError, ProcessLookupError):
+                break
+            fields = raw[raw.rfind(")") + 2:].split()
+            if int(fields[19]) != child["ticks"] or fields[0] in {"Z", "X"}:
+                break
+            assert time.monotonic() < deadline, "gate child did not exit"
+            time.sleep(0.01)
     finally:
         canary.terminate()
         canary.wait(timeout=5)

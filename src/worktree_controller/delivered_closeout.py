@@ -345,11 +345,11 @@ def _eligible(
     for_typed_cleanup: bool = False,
 ) -> dict[str, str]:
     from .lifecycle import (
-        _effective_intent_state,
         _typed_runtime_blockers,
         _typed_runtime_evidence,
         _validate_release_environment,
     )
+    from .semantics import effective_intent_state
 
     if for_typed_cleanup and (state != "RETAINED" or require_publication):
         raise ControllerError("INVALID_LIFECYCLE", "typed cleanup does not authorize publication")
@@ -410,7 +410,7 @@ def _eligible(
             record.allocation_id in intent.source_allocations
             and (
                 not (
-                    (effective_state := _effective_intent_state(snapshot, intent)) == "ABANDONED"
+                    (effective_state := effective_intent_state(snapshot, intent)) == "ABANDONED"
                     or (not require_publication and effective_state == "RELEASED")
                 )
                 or not is_ancestor(

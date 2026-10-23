@@ -1103,7 +1103,7 @@ def test_late_exit_recovery_preserves_the_next_run(
             try:
                 if stat.read_text().rsplit(")", 1)[1].split()[0] in {"Z", "X"}:
                     break
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 break
             assert time.monotonic() < deadline, "holder child did not exit"
             time.sleep(0.01)

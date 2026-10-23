@@ -199,13 +199,13 @@ def _is_candidate(record: MetadataRecord) -> bool:
 
 
 def _integration_bound(snapshot: MetadataSnapshot, record: MetadataRecord) -> bool:
-    from .lifecycle import _effective_intent_state
+    from .semantics import effective_intent_state
 
     return any(
         intent.allocation_id == record.allocation_id
         or record.allocation_id in intent.source_allocations
         for intent in snapshot.integration_intents.values()
-        if _effective_intent_state(snapshot, intent) not in TERMINAL_INTEGRATION_STATES
+        if effective_intent_state(snapshot, intent) not in TERMINAL_INTEGRATION_STATES
     ) or any(
         other.lifecycle != "RELEASED" and record.allocation_id in other.source_allocations
         for other in snapshot.records.values()

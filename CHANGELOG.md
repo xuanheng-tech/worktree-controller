@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.32.2
+
+- Share history-preserving record and intent updates through `record_updates`, and interpret
+  effective integration state through `semantics`. Preserve lifecycle aliases and existing
+  terminal-evidence refusal rules while reducing cross-module private imports from 93 to 82.
+- Handle disappearing `/proc` children and asynchronous signal delivery in session-recovery
+  and rollout-test helpers; retain the same live-process checks and verify eventual child exit.
+- Keep CLI contract 61 and storage layout 5 unchanged.
+
 ## 1.32.1
 
 - Preserve keyed integration preparation for the QP Nexus progress document and its exact

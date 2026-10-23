@@ -11,7 +11,7 @@ development and recovery paths; exact public interfaces live in the [contract](.
 | CLI parsing and routing | `cli.py`, command modules | Dispatch explicit operations; do not duplicate authority decisions |
 | Git observations and mutations | `git_backend.py` | Git owns registrations, refs, paths, HEAD and cleanliness |
 | State and durable evidence | `models.py`, `store.py`, `metadata_codec.py`, `record_updates.py` | Validate stored identities; serialize mutations under the repository lock; every record or intent update bumps its version and appends history |
-| Shared identity and semantic checks | `semantics.py` | Consume the caller's snapshot; do not acquire authority or write metadata |
+| Shared identity and semantic checks | `semantics.py` | Consume the caller's snapshot, including effective intent state and terminal reconciliation; do not acquire authority or write metadata |
 | Budget admission | `resource_admission.py` | Preserve durable request identity and host reservations across retries |
 | Writer entitlement | `writer_lease.py`, `writer_session.py`, `governance.py` | Bind the real process identity and exact operation/target |
 | Lifecycle orchestration | `lifecycle.py` and focused recovery modules | Compose existing guards and append durable transition evidence |

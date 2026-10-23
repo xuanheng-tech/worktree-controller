@@ -33,9 +33,9 @@ from .mount_diagnostics import diagnose_mounts, mount_warnings
 from .policy import load_policy
 from .semantics import (
     EVIDENCE_LIFECYCLES,
+    effective_intent_state,
     evidence_head_issues,
     integration_candidate_issues,
-    integration_intent_abandoned,
     integration_queue_order,
     normalize_scope_paths,
     path_scope_issues,
@@ -248,22 +248,6 @@ def _intent_for_allocation(snapshot: MetadataSnapshot, allocation_id: str | None
     return matches[0] if matches else None
 
 
-def _effective_intent_state(snapshot: MetadataSnapshot, intent: Any) -> str:
-    reconciliations = [
-        receipt
-        for receipt in snapshot.integration_reconciliation_receipts.values()
-        if receipt.intent_id == intent.intent_id
-        and receipt.result == "STALE_INTENT_TERMINAL_ACKNOWLEDGED"
-    ]
-    if len(reconciliations) > 1:
-        raise ControllerError(
-            "INVALID_METADATA", "integration intent has multiple terminal reconciliations"
-        )
-    if reconciliations:
-        return reconciliations[0].effective_terminal_state
-    return "ABANDONED" if integration_intent_abandoned(intent) else intent.state
-
-
 def _integration_intent_order(intent: Any) -> tuple[int, int | str, str]:
     if intent.queue_sequence > 0:
         return (1, intent.queue_sequence, intent.intent_id)
@@ -400,7 +384,7 @@ def _repository_payload(
         (
             intent
             for intent in snapshot.integration_intents.values()
-            if _effective_intent_state(snapshot, intent) in {"QUEUED", "WAITING_SCOPE"}
+            if effective_intent_state(snapshot, intent) in {"QUEUED", "WAITING_SCOPE"}
         ),
         key=lambda value: integration_queue_order(snapshot, value),
     )
@@ -543,7 +527,7 @@ def _worktree_payload(
         "source_allocations": list(record.source_allocations) if record else [],
         "integration_intent_id": intent.intent_id if intent else None,
         "integration_intent_state": (
-            _effective_intent_state(snapshot, intent)
+            effective_intent_state(snapshot, intent)
             if intent is not None and snapshot is not None
             else None
         ),
@@ -1317,7 +1301,7 @@ def _semantic_warnings(
         "RELEASED": {"RELEASED"},
     }
     for intent in snapshot.integration_intents.values():
-        effective_state = _effective_intent_state(snapshot, intent)
+        effective_state = effective_intent_state(snapshot, intent)
         if effective_state in {"QUEUED", "WAITING_SCOPE", "ABANDONED"}:
             continue
         if unallocated_integration_conflict(intent):
