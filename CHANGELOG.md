@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.32.4
+
+- Share pure release-intent selection and renewal-backoff queries in `release_intents`;
+  retain lifecycle clocks, locks, mutations, aliases and history. Reduce private cross-module
+  imports from 82 to 80 without changing release or recovery behavior.
+- Keep publication lease-reconciliation queries in the existing shared semantics module,
+  preserving terminal-cleanup proof checks and the private-import regression gate.
+- Correct the consumer inventory, document existing WC/GF public boundaries and record the
+  staged maintenance roadmap. Existing session and recovery commands remain supported.
+- Keep CLI contract 61, capability versions and storage layout 5 unchanged.
+
 ## 1.32.3
 
 - Allow exact preserved-tree cleanup for published integrations with verified producer

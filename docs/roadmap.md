@@ -5,7 +5,7 @@ direction. Each stage needs its own tested deliverable; later ideas are not curr
 
 ## Current baseline
 
-WC 1.32.3 retains CLI contract 61 and storage layout 5. The scope and architecture documents
+WC 1.32.4 retains CLI contract 61 and storage layout 5. The scope and architecture documents
 are already on main. Two previous extractions reduced private cross-module imports from 93 to
 82; this batch moves pure release-intent selection/backoff queries into one module, reducing
 the baseline to 80. It retains lifecycle mutation helpers, clocks and internal aliases.
