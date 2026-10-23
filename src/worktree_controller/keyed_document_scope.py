@@ -1,4 +1,4 @@
-"""Prove independent Handbook records from frozen Git objects, never working files.
+"""Prove independent Nexus records from frozen Git objects, never working files.
 
 This refines only the known keyed-document overlap. It does not choose merge results,
 change declared ownership, or replace candidate validation and main publication CAS.
@@ -13,8 +13,11 @@ from pathlib import Path
 from .git_backend import _git
 from .models import ControllerError
 
-PROGRESS_PATH = "docs/handbook/business-progress.json"
-_ATTRIBUTE = f"{PROGRESS_PATH} merge=qp-handbook-progress"
+PROGRESS_PATH = "docs/nexus/business-progress.json"
+PROGRESS_PROFILES = {
+    PROGRESS_PATH: "qp-nexus-progress",
+    "docs/handbook/business-progress.json": "qp-handbook-progress",
+}
 _COLLECTIONS = {
     "tasks": "authority_key",
     "development_lines": "id",
@@ -105,11 +108,11 @@ def _blob(repo: Path, commit: str, path: str, *, limit: int = _MAX_BYTES) -> byt
     return raw
 
 
-def _progress(repo: Path, commit: str) -> tuple[str, bytes]:
+def _progress(repo: Path, commit: str, path: str) -> tuple[str, bytes]:
     attributes = _blob(repo, commit, ".gitattributes", limit=64 * 1024).decode("utf-8")
-    if _ATTRIBUTE not in attributes.splitlines():
+    if f"{path} merge={PROGRESS_PROFILES[path]}" not in attributes.splitlines():
         raise ValueError("keyed merge protocol is not declared")
-    return attributes, _blob(repo, commit, PROGRESS_PATH)
+    return attributes, _blob(repo, commit, path)
 
 
 def independent_progress_scopes(
@@ -133,7 +136,10 @@ def independent_progress_scopes(
         for right in right_paths
         if left == right or left.startswith(right + "/") or right.startswith(left + "/")
     }
-    if overlaps != {(PROGRESS_PATH, PROGRESS_PATH)}:
+    if len(overlaps) != 1:
+        return False
+    path, other = next(iter(overlaps))
+    if path != other or path not in PROGRESS_PROFILES:
         return False
     if len(left_sources) > 8 or len(right_sources) > 8:
         return False
@@ -148,9 +154,9 @@ def independent_progress_scopes(
                 base = bases[0].decode("ascii")
                 if not _OID.fullmatch(base) or base in (left, right):
                     return False
-                attributes, original = _progress(repo, base)
-                left_attributes, left_document = _progress(repo, left)
-                right_attributes, right_document = _progress(repo, right)
+                attributes, original = _progress(repo, base, path)
+                left_attributes, left_document = _progress(repo, left, path)
+                right_attributes, right_document = _progress(repo, right, path)
                 if attributes != left_attributes or attributes != right_attributes:
                     return False
                 left_keys = _changed_keys(original, left_document)

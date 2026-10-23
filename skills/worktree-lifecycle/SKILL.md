@@ -112,7 +112,7 @@ responsibilities. Preserve the caller's commit, push, remote, and destructive-op
    repeated claim of a clean unchanged `PREPARING_INTEGRATION` candidate observes the same allocation;
    changed owner/path/branch/HEAD or source evidence still blocks. `RESOURCE_WAIT` retains the queued
    request without a candidate, prepared receipt or publication lease. Keep scope and budget gates.
-   With `integration_keyed_document_scope_version` 1, Controller may prove distinct QP Handbook
+   With `integration_keyed_document_scope_version` 1, Controller may prove distinct QP Nexus (or historical Handbook)
    records from frozen Git commits when the only overlap is the exact known progress document.
    Use the normal claim/reconciler on the original intent; do not edit frozen scopes or queue order.
    Unknown evidence, shared records, code/broad-path overlaps and publishing/recovery/attention

@@ -1478,9 +1478,10 @@ checkout rejects feature writes. `READY_TO_PUBLISH` is write-fenced until explic
 out-of-band HEAD, content, record, or binding drift makes old evidence unusable.
 
 The bounded `integration-keyed-document-scope/v1` refinement applies only when the entire
-overlap is the exact `docs/handbook/business-progress.json` path. Every pair of frozen source
-commits must have one non-ancestor merge base and the same committed `.gitattributes` declaring
-`merge=qp-handbook-progress`. QP schema 2 records are compared by whole `tasks.authority_key`
+overlap is exactly `docs/nexus/business-progress.json` with `merge=qp-nexus-progress`, or
+the historical `docs/handbook/business-progress.json` with `merge=qp-handbook-progress`.
+Cross-path moves retain the ordinary file fence. Every pair of frozen source commits must have
+one non-ancestor merge base and the same committed `.gitattributes` declaring the matching profile. QP schema 2 records are compared by whole `tasks.authority_key`
 or `development_lines/modules/decisions.id`, including additions and deletions. All changed key
 sets must be disjoint. Metadata, schema, ordering, duplicate keys, missing/oversized/non-regular
 blobs, unknown evidence, broad paths and code overlaps keep the ordinary file fence. Explicit

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
 from dataclasses import replace
 
 import pytest
@@ -19,6 +20,7 @@ from tests.test_shadow import GitRepository, git
 from worktree_controller.git_backend import inventory
 from worktree_controller.keyed_document_scope import (
     PROGRESS_PATH,
+    PROGRESS_PROFILES,
     _changed_keys,
     independent_progress_scopes,
 )
@@ -28,6 +30,12 @@ from worktree_controller.lifecycle import (
     refresh_integration,
 )
 from worktree_controller.store import MetadataStore
+
+
+@pytest.fixture(autouse=True, params=tuple(PROGRESS_PROFILES))
+def progress_profile(request, monkeypatch):
+    """Run actual queue and publication guards against both committed protocols."""
+    monkeypatch.setattr(sys.modules[__name__], "PROGRESS_PATH", request.param)
 
 
 def _document() -> dict:
@@ -54,7 +62,9 @@ def _seed(repository: GitRepository) -> dict:
     path = repository.repo / PROGRESS_PATH
     path.parent.mkdir(parents=True)
     path.write_bytes(_raw(doc))
-    (repository.repo / ".gitattributes").write_text(f"{PROGRESS_PATH} merge=qp-handbook-progress\n")
+    (repository.repo / ".gitattributes").write_text(
+        f"{PROGRESS_PATH} merge={PROGRESS_PROFILES[PROGRESS_PATH]}\n"
+    )
     git(repository.repo, "add", PROGRESS_PATH, ".gitattributes")
     git(repository.repo, "commit", "-m", "synthetic keyed document")
     adopt_canonical(repository)
@@ -168,7 +178,7 @@ def test_unproved_committed_protocol_keeps_file_fence(mutation: str) -> None:
             path.write_bytes(b" " * (2 * 1024 * 1024 + 1))
         else:
             (left_path / ".gitattributes").write_text(
-                f"{PROGRESS_PATH} merge=qp-handbook-progress\n* -merge\n"
+                f"{PROGRESS_PATH} merge={PROGRESS_PROFILES[PROGRESS_PATH]}\n* -merge\n"
             )
         git(left_path, "add", PROGRESS_PATH, ".gitattributes")
         git(left_path, "commit", "-m", "synthetic unproved protocol")

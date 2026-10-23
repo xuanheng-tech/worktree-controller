@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.32.1
+
+- Preserve keyed integration preparation for the QP Nexus progress document and its exact
+  merge profile. Historical Handbook commits remain readable under their original profile;
+  moves, broad overlaps, shared records and ambiguous evidence retain the file fence.
+
+
 ## 1.32.0
 
 - Add a versioned exported-release history handover and receipt-bound rollback to the existing
