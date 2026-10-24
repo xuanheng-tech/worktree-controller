@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Place shared bounded, FD-bound evidence document reads in `cleanup_evidence`, updating
+  preservation, recovery and migration consumers. Retain raw-byte hashes, file and ancestor
+  identity checks, size limits and refusal codes; remove four private cross-module imports.
 - Separate ordinary installed upgrade acceptance from the two historical restoration cases,
   requiring declared staging provenance and matching CLI/capability prerequisites before running.
 - Preserve staged source bindings in disposable fixtures and cover wrong-source and identity-drift

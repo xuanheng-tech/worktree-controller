@@ -14,7 +14,6 @@ from . import preservation as p
 from .git_backend import inventory
 from .models import ControllerError, MetadataRecord
 from .preserved_cleanup import (
-    _document,
     common_source_root,
     completed_actions,
     coverage,
@@ -99,7 +98,7 @@ def _generation_metadata(bound: dict[str, Any]) -> list[dict[str, Any]]:
                         if filename != "manifest.json":
                             raise _blocked("completed generation metadata is missing") from None
                         continue
-                    metadata, digest = _document(directory, filename)
+                    metadata, digest = e.read_document(directory, filename)
                     if filename == "receipt.json" and (
                         metadata.get("receipt_id") != name
                         or metadata.get("generation") != str(allocation / name)

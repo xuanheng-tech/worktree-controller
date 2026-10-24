@@ -1,12 +1,16 @@
 # Maintenance roadmap
 
-Execution baseline: 2026-10-24. This is the WC portion of the approved four-tool maintenance
+Execution baseline: 2026-10-25. This is the WC portion of the approved four-tool maintenance
 direction. Each stage needs its own tested deliverable; later ideas are not current behavior.
 
 ## Current baseline
 
 WC 1.32.6 completed the runtime-visibility fix and the previously planned allocation-to-intent
-query extraction. Private cross-module imports remain at 76. Software version 1.32.7 retains
+query extraction. Unreleased source maintenance places shared bounded, FD-bound document reads
+in the existing cleanup evidence module, removing four private imports (76 to 72). Raw-byte
+hashes, file/ancestor checks, limits and refusal codes stay unchanged; mutation and crash hooks
+retain their original owners. This source batch joins a future planned release; the installed
+1.32.7 runtime remains unchanged. Software version 1.32.7 retains
 CLI contract 61, the existing capability versions and storage layout 5, and serializes doctor
 snapshot reads with normal Controller mutations. Diagnostics refresh Git inventory after taking
 the shared repository lock, then retain it through semantic, transaction and retirement checks.
@@ -31,9 +35,9 @@ acceptance gates, and historical temporary-file impact. No historical evidence i
 | Stage | Deliverable | Exit evidence | Stop or rollback boundary |
 | --- | --- | --- | --- |
 | Now: boundaries | Current protocol and consumer inventory, including legacy adapters | Named owner per interface, source references, explicit unknowns; no changes to supported commands | Conflicting evidence keeps the interface supported |
-| WC structure: delivered | Pure release-intent, scope and allocation-to-intent queries | Existing behavior retained; private-import baseline 76; CLI 61/storage 5 unchanged | Preserve clocks, mutation and crash-hook ownership |
+| WC structure: delivered | Pure release-intent, scope and allocation-to-intent queries; shared FD-bound evidence reader | Existing behavior retained; private-import baseline 72; CLI 61/storage 5 unchanged; reader byte/race characterizations | Preserve clocks, mutation and crash-hook ownership; batch unreleased source changes |
 | Diagnostic stability: delivered | One coherent doctor snapshot across guarded lifecycle changes | 1.32.7 released and installed; real concurrent release, fresh inventory and negative API/CLI controls | Retain missing-commit and ownership refusals; preserve original incident uncertainty |
-| Now: upgrade acceptance | Ordinary and historical cohorts with declared staging provenance | Matching installed pins, all selected cases pass; explicit prerequisite refusals and source/identity negative controls | Never infer provenance from origin, skip a selected failure or relax activation gates |
+| Upgrade acceptance: delivered | Ordinary and historical cohorts with declared staging provenance | Matching installed pins, all selected cases pass; explicit prerequisite refusals and source/identity negative controls | Never infer provenance from origin, skip a selected failure or relax activation gates |
 | Shared quality checks: delivered | CL/SR adopt release-tools with a reviewed full commit pin | Both hosted parallel pilots and final three-version checks passed; SR retains its package check | Restore the pinned original consumer workflow; PyPI/Gitea flows remain owned by consumers |
 | Next 2–6 weeks | Further WC extraction only where a shared responsibility is clear; measure maintenance burden and failures | One behavior-preserving batch at a time, consumer gates, shrinking private-import baseline | Keep injected clocks, transaction and crash hooks with their owner until an explicit migration is tested |
 | Following 6–12 weeks | Evaluate moving manifests, compatibility catalog and shared Skills from GF to a dedicated toolchain owner | Full ownership inventory, staged installer/migration, exactly one active writer, historical pin and rollback tests | No second simultaneous Skill authority; no ownership switch on file-copy evidence |

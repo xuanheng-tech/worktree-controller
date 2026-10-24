@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import re
 import stat
@@ -12,34 +10,16 @@ from pathlib import Path
 from typing import Any
 
 from . import preservation as p
+from .cleanup_evidence import read_document
 from .disposable import _delete_fd_tree, _fd_inventory, _unlink_leaf
 from .git_backend import head_paths, path_is_ignored, tracked_paths
 from .models import ControllerError, MetadataRecord
 
 CONTRACT = "legacy-preserved-state-cleanup/v1"
-MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
 
 
 def _blocked(message: str) -> ControllerError:
     return ControllerError("PRESERVATION_COVERAGE_INVALID", message)
-
-
-def _document(directory: p._Directory, name: str) -> tuple[dict[str, Any], str]:
-    metadata = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
-    if metadata.st_size > MAX_EVIDENCE_BYTES:
-        raise _blocked("preservation evidence exceeds its bound")
-    with (
-        p._regular_fd(directory.fd, name, p._identity(metadata)) as fd,
-        os.fdopen(os.dup(fd), "rb") as stream,
-    ):
-        raw = stream.read(MAX_EVIDENCE_BYTES + 1)
-    if len(raw) > MAX_EVIDENCE_BYTES:
-        raise _blocked("preservation evidence exceeds its bound")
-    directory.check()
-    value = json.loads(raw)
-    if not isinstance(value, dict):
-        raise _blocked("invalid preservation document")
-    return value, hashlib.sha256(raw).hexdigest()
 
 
 def coverage(
@@ -80,11 +60,11 @@ def _coverage(
     generation = receipt_path.parent
     with p._absolute_directory(generation) as chain:
         directory = chain[-1]
-        receipt, actual_receipt_sha = _document(directory, "receipt.json")
+        receipt, actual_receipt_sha = read_document(directory, "receipt.json")
         if actual_receipt_sha != receipt_sha256:
             raise _blocked("preservation receipt bytes changed")
-        plan, _ = _document(directory, "plan.json")
-        manifest, manifest_sha = _document(directory, "manifest.json")
+        plan, _ = read_document(directory, "plan.json")
+        manifest, manifest_sha = read_document(directory, "manifest.json")
         bound = plan["authority"]["identity"]
         if identity is not None and bound != identity:
             raise _blocked("preservation belongs to another allocation/worktree identity")
@@ -453,8 +433,8 @@ def _require_completion_coverage(
                     os.stat("receipt.json", dir_fd=directory.fd, follow_symlinks=False)
                 except FileNotFoundError:
                     continue
-                receipt, _raw_sha = _document(directory, "receipt.json")
-                plan, _ = _document(directory, "plan.json")
+                receipt, _raw_sha = read_document(directory, "receipt.json")
+                plan, _ = read_document(directory, "plan.json")
                 if (
                     receipt.get("contract") not in {p.CONTRACT, SOURCE_CONTRACT}
                     or receipt.get("contract") != plan.get("contract")
@@ -636,7 +616,7 @@ def cleanup_receipts(
                 )
         for path in sorted(store.completion_receipts_dir.glob("*.json")):
             with p._absolute_directory(path.parent) as chain:
-                receipt, raw_sha = _document(chain[-1], path.name)
+                receipt, raw_sha = read_document(chain[-1], path.name)
             plan = receipt.get("plan", {})
             if plan.get("allocation_id") != record.allocation_id:
                 continue

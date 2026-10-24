@@ -441,7 +441,7 @@ class LayoutMigration:
                 # Original journals/receipts are moved back byte for byte.
                 with p._absolute_directory(old) as chain:
                     if relocation.RECORD in os.listdir(chain[-1].fd):
-                        value, _ = relocation._document(chain[-1], relocation.RECORD)
+                        value, _ = evidence.read_document(chain[-1], relocation.RECORD)
                         if value != row["references"]:
                             raise LayoutError("relocation evidence changed before rollback")
                         os.unlink(relocation.RECORD, dir_fd=chain[-1].fd)

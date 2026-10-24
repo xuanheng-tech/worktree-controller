@@ -21,10 +21,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import preservation as p
+from .cleanup_evidence import read_document
 from .disposable import _Directory, _inode, _open_directory
 from .git_backend import _git
 from .models import ControllerError
-from .preserved_cleanup import _document
 from .store import MetadataStore
 
 CONTRACT = "tracked-source-preservation/v1"
@@ -579,9 +579,9 @@ def _verify_generation(plan: dict, receipt_sha256: str, state_root: Path | None 
                 or st.st_nlink != 1
             ):
                 raise _fail("SOURCE_GENERATION_NOT_SEALED")
-        receipt, receipt_digest = _document(generation, "receipt.json")
-        manifest, manifest_digest = _document(generation, "manifest.json")
-        saved_plan, saved_plan_digest = _document(generation, "plan.json")
+        receipt, receipt_digest = read_document(generation, "receipt.json")
+        manifest, manifest_digest = read_document(generation, "manifest.json")
+        saved_plan, saved_plan_digest = read_document(generation, "plan.json")
         if (
             receipt_digest != receipt_sha256
             or receipt.get("contract") != CONTRACT

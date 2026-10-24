@@ -12,9 +12,9 @@ import stat
 from pathlib import Path
 
 from . import preservation as p
+from .cleanup_evidence import read_document
 from .disposable import _inode, _open_directory
 from .models import ControllerError
-from .preserved_cleanup import _document
 from .store import ROOT_NAME, VERSION_NAME
 
 CONTRACT = "metadata-reference-relocation/v1"
@@ -46,7 +46,7 @@ def inventory(root: Path) -> dict[str, str]:
                 with _open_directory(directory.fd, name, _inode(info)) as child:
                     walk(child, relative)
             elif stat.S_ISREG(info.st_mode) and name.endswith(".json"):
-                _, result[relative] = _document(directory, name)
+                _, result[relative] = read_document(directory, name)
             else:
                 raise _blocked()
         directory.check()
@@ -78,7 +78,7 @@ def prepare(old: Path, new: Path) -> dict:
 
 def _record(root: Path) -> dict:
     with p._absolute_directory(root) as chain:
-        value, _ = _document(chain[-1], RECORD)
+        value, _ = read_document(chain[-1], RECORD)
         info = os.fstat(chain[-1].fd)
     old = Path(value["previous_root"])
     if (
