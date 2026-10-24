@@ -285,6 +285,14 @@ the output directory for diagnosis. Keep that evidence outside the checkout and 
 its owning temporary-directory workflow after review. `scripts/check-project` remains the complete
 release gate, including builds and installed smokes.
 
+The development [cross-tool acceptance cohorts](../CONTRIBUTING.md#cross-tool-acceptance)
+declare staging provenance and distinguish ordinary predecessors from historical capability/CLI
+migrations. An explicitly selected cohort with unmet prerequisites refuses before dependency or
+output changes. Every selected case must pass without skips; unrequested cohorts are reported
+separately. This does not replace the deployment gate or grant activation authority.
+Test/check-script and documentation maintenance can be integrated on main for a later release;
+keep the installed runtime pin when its payload and public contracts are unchanged.
+
 Deliver tool changes through reviewed source, contracts and source-owned Skills, then supported
 stage, rollout and activation. CLI, capability and storage versions are independent checks.
 Use the existing rollback flow; never repoint the active runtime by hand or activate another

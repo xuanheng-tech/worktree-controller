@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Separate ordinary installed upgrade acceptance from the two historical restoration cases,
+  requiring declared staging provenance and matching CLI/capability prerequisites before running.
+- Preserve staged source bindings in disposable fixtures and cover wrong-source and identity-drift
+  refusal. Keep every selected case mandatory; record unrequested cohorts without counting passes.
+- Test/document decision-aware consumers and keep runtime behavior, software version 1.32.7,
+  CLI 61, capability versions and storage layout 5 unchanged.
+
 ## 1.32.7
 
 - Hold one shared repository lock through doctor snapshot diagnostics and refresh Git inventory

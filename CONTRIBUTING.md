@@ -75,6 +75,32 @@ Linting uses [ruff](https://docs.astral.sh/ruff/) (line length 100, target `py31
 Run `scripts/check-cross-tool --help` for the current arguments. Gates whose environment is not
 available should be recorded as skipped rather than claimed as passing.
 
+For ordinary upgrade/rollback acceptance, add `--rollout-previous-controller` with the actual
+commit-pinned predecessor and `--rollout-git-source` with the exact Git source used by staging
+(for example `file:///path/to/source`). The harness does not infer staging provenance from
+`origin`. It preserves each staged source binding and tests mismatched source and identity refusal.
+This selects 20 ordinary process cases in addition to the 45 companion-tool cases.
+
+Two historical restoration cases additionally require `--rollout-historical-controller`:
+the current and historical runtimes must have distinct CLI contracts and advertise
+`terminal_preserved_cleanup_version` 1 and 0 respectively. For the released 1.32.7 runtime,
+1.32.6 is an ordinary predecessor and 1.30.4 is a suitable historical predecessor. All selected
+runtimes must be staged from the same declared Git source; stage them normally and never edit
+their receipts. A mismatched explicitly selected cohort exits 2 with a prerequisite explanation
+before creating output or syncing dependencies; it is neither a passed test nor a silent skip.
+The result receipt distinguishes passed cohorts from those not requested. Every selected case
+must pass without skips; failures, missing/duplicate results and tool drift remain failures.
+Each selected cohort has its own 900-second limit and JUnit report. The aggregate `pytest.xml`
+and success receipt are written only after every selected cohort passes; adding rollout cases
+does not consume the companion cohort's existing time budget.
+
+Direct pytest opt-in uses `WORKTREE_CONTROLLER_ACCEPTANCE`,
+`WORKTREE_CONTROLLER_ROLLOUT_PREVIOUS`, `WORKTREE_CONTROLLER_ROLLOUT_GIT_SOURCE`, and (for the
+two historical cases) `WORKTREE_CONTROLLER_ROLLOUT_HISTORICAL`. Always use a new explicit
+`--basetemp`. Fixture activation and rollback affect only disposable state, never the user's
+active runtime. Exit 0 alone is insufficient: consumers must also accept the command's exact
+decision and evidence, including each checkout's result for session closeout.
+
 ## Package releases
 
 Use the [publishing guide](docs/publishing.md) for the checked, resumable GitHub/PyPI workflow and

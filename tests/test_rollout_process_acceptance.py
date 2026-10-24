@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -155,6 +156,7 @@ class RolloutFixture:
     def __init__(self, installed, previous, repository, directory):
         self.installed, self.previous = installed, previous
         self.repository, self.directory = repository, directory
+        self.git_source = os.environ["WORKTREE_CONTROLLER_ROLLOUT_GIT_SOURCE"]
         self.home = directory / "home"
         self.home.mkdir()
         self.environment = {
@@ -180,6 +182,11 @@ class RolloutFixture:
             alias.mkdir(parents=True)
             for name in ("bin", "lib", "uv-receipt.toml"):
                 (alias / name).symlink_to(runtime / name)
+            manifest = runtime / "controller-source.json"
+            if manifest.exists() or manifest.is_symlink():
+                assert manifest.is_file() and not manifest.is_symlink()
+                (alias / manifest.name).write_bytes(manifest.read_bytes())
+                (alias / manifest.name).chmod(0o600)
             self.runtimes.append(alias)
         self.active = self.root / "active"
         self.active.symlink_to(self.runtimes[0])
@@ -309,9 +316,6 @@ class RolloutFixture:
             if scenario == "lock" and self.attempts == 1:
                 self.hold_lock()
         elif kind == "probe-before":
-            if scenario == "lock" and self.attempts == 1:
-                self.lock_handle.close()
-                self.lock_handle = None
             if scenario == "churn" or (scenario in {"add", "failure"} and self.attempts == 1):
                 self.add_transaction(f"added-{self.attempts}")
             elif scenario == "complete" and self.attempts == 1:
@@ -332,6 +336,10 @@ class RolloutFixture:
                 os.replace(replacement, self.active)
         elif kind == "gate-result":
             self.results.append(message)
+            if scenario == "lock" and self.attempts == 1:
+                # A locked metadata gate refuses before issuing any probe.
+                self.lock_handle.close()
+                self.lock_handle = None
         elif kind == "frozen-gate":
             expected = subprocess.check_output([
                 "git", "-C", str(ROOT), "show",
@@ -353,7 +361,7 @@ class RolloutFixture:
                 if scenario == "restore-recovery":
                     self.interrupt_release()
                 elif scenario == "restore-consumer":
-                    self.declare_consumer(extra_requirements={"canonical_refresh_version": 1})
+                    self.declare_consumer(extra_requirements={"terminal_preserved_cleanup_version": 1})
                 elif scenario == "restore-catalog":
                     self.publish_catalog(review_previous=False)
                 elif scenario == "restore-drift":
@@ -366,13 +374,13 @@ class RolloutFixture:
             self.interrupt_release()
         config = self.directory / "config.json"
         socket_name = f"wc-rollout-{os.getpid()}-{uuid.uuid4().hex}"
-        budget = 1 if scenario == "timeout" else 5 if scenario == "churn" else 20
+        # Leave time for the real probe to start, then block it until the native deadline.
+        budget = 5 if scenario in {"timeout", "churn"} else 20
         config.write_text(json.dumps({"socket": socket_name, "target": self.target_runtime.parent.name,
                                      "action": self.action,
                                      "budget": budget, "consumer": str(self.consumer)}))
-        source_url = subprocess.check_output(["git", "-C", str(ROOT), "remote", "get-url", "origin"], text=True).strip()
         environment = {**self.environment, "CONTROLLER_ROLLOUT_REPO": str(ROOT),
-                       "CONTROLLER_ROLLOUT_GIT_SOURCE": source_url,
+                       "CONTROLLER_ROLLOUT_GIT_SOURCE": self.git_source,
                        "CONTROLLER_ROLLOUT_GOVERNED": str(self.repository.repo)}
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
             # Abstract Linux sockets keep IPC names below the filesystem path limit
@@ -463,10 +471,10 @@ class RolloutFixture:
             self.catalog_owner.close()
 
 
-@pytest.fixture
-def rollout(tmp_path):
+@contextmanager
+def configured_rollout(tmp_path, previous_variable):
     configured = [os.environ.get(name) for name in (
-        "WORKTREE_CONTROLLER_ACCEPTANCE", "WORKTREE_CONTROLLER_ROLLOUT_PREVIOUS",
+        "WORKTREE_CONTROLLER_ACCEPTANCE", previous_variable,
     )]
     if not all(configured):
         pytest.skip("set both installed Controller pins for rollout process acceptance")
@@ -475,12 +483,50 @@ def rollout(tmp_path):
 
     installed, previous = map(Path, configured)
     assert all(p.is_absolute() and p.is_file() and os.access(p, os.X_OK) for p in (installed, previous))
+    source = os.environ.get("WORKTREE_CONTROLLER_ROLLOUT_GIT_SOURCE")
+    if not source:
+        pytest.fail("installed rollout acceptance requires WORKTREE_CONTROLLER_ROLLOUT_GIT_SOURCE")
+    if previous_variable == "WORKTREE_CONTROLLER_ROLLOUT_HISTORICAL":
+        checks = runpy.run_path(str(ROOT / "scripts/check-cross-tool"))
+        checks["historical_rollout_tests"](
+            checks["rollout_capabilities"](installed, source),
+            checks["rollout_capabilities"](previous, source),
+        )
     with GitRepository(linked=0, policy_text=POLICY_V5) as repository:
         fixture = RolloutFixture(installed, previous, repository, tmp_path)
         try:
             yield fixture
         finally:
             fixture.close()
+
+
+@pytest.fixture
+def rollout(tmp_path):
+    with configured_rollout(tmp_path, "WORKTREE_CONTROLLER_ROLLOUT_PREVIOUS") as fixture:
+        yield fixture
+
+
+@pytest.fixture
+def historical_rollout(tmp_path):
+    with configured_rollout(tmp_path, "WORKTREE_CONTROLLER_ROLLOUT_HISTORICAL") as fixture:
+        yield fixture
+
+
+def test_installed_rollout_refuses_wrong_git_source(rollout):
+    rollout.git_source += "/wrong-source"
+    assert rollout.run("stable") != 0, rollout.output
+    assert "staged receipt does not record the governed git source" in rollout.output
+    assert rollout.active.resolve() == rollout.runtimes[0]
+    assert not rollout.frozen_gates and not rollout.results
+
+
+def test_installed_rollout_refuses_source_identity_drift(rollout):
+    binding = rollout.runtimes[0] / "controller-source.json"
+    binding.write_text(json.dumps({"commit": "f" * 40}) + "\n")
+    assert rollout.run("stable") != 0, rollout.output
+    assert "runtime source binding changed from its frozen source" in rollout.output
+    assert rollout.active.resolve() == rollout.runtimes[0]
+    assert not rollout.frozen_gates and not rollout.results
 
 
 def test_installed_rollout_retries_added_transactions(rollout):
@@ -530,7 +576,7 @@ def test_installed_rollout_timeout_kills_only_its_gate_tree(rollout):
         try:
             assert rollout.run("timeout") == 2, rollout.output
             assert rollout.attempts == 1 and len(rollout.identities) == 2
-            assert "timed out after 1s" in rollout.output
+            assert "timed out after 5s" in rollout.output
             assert rollout.active.resolve() == rollout.runtimes[0]
             assert canary.poll() is None
         finally:
@@ -576,18 +622,19 @@ def test_installed_rollback_retries_real_mutation_lock(rollback):
     assert_rollback_ready(rollback)
 
 
-def test_installed_rollback_preserves_legacy_transaction_refusal(rollback):
-    assert rollback.run("add") == 2, rollback.output
-    assert rollback.attempts == len(rollback.results) == 1
+def test_installed_rollback_retries_changed_transactions(rollback):
+    assert rollback.run("add") == 0, rollback.output
+    assert rollback.attempts == len(rollback.results) == 2
     assert rollback.results[0]["payload"]["blockers"] == [
-        f"CONTROLLER_TRANSACTION_UNFINISHED:{rollback.repository.repo.name}"
+        f"CONTROLLER_TRANSACTION_SET_CHANGED:{rollback.repository.repo.name}"
     ]
     diagnostic, = rollback.results[0]["payload"]["transaction_diagnostics"]
-    assert diagnostic["error"]["code"] == "ROLLOUT_CHECK_INCOMPATIBLE"
+    assert diagnostic["error"]["code"] == "ROLLOUT_TRANSACTION_SET_CHANGED"
+    assert rollback.results[0]["returncode"] == 2
     assert rollback.probes[0]["returncode"] == 0
     assert rollback.probes[0]["payload"]["decision"]["code"] == "ROLLOUT_RECOVERY_COMPATIBLE"
-    assert rollback.active.resolve() == rollback.runtimes[1]
-    assert "active runtime is now" not in rollback.output
+    assert_rollback_ready(rollback)
+    assert rollback.output.count("active runtime is now") == 1
 
 
 def test_installed_rollback_stops_on_real_recovery_error(rollback):
@@ -634,7 +681,7 @@ def test_installed_rollback_timeout_kills_only_its_gate_tree(rollback):
         try:
             assert rollback.run("timeout") == 2, rollback.output
             assert rollback.attempts == 1 and len(rollback.identities) == 2
-            assert "timed out after 1s" in rollback.output
+            assert "timed out after 5s" in rollback.output
             assert rollback.active.resolve() == rollback.runtimes[1]
             assert canary.poll() is None
         finally:
@@ -688,19 +735,21 @@ def test_installed_restoration_refuses_new_recovery_error(rollout):
     assert "rolled back to the previously active runtime" not in rollout.output
 
 
-def test_installed_restoration_enforces_changed_consumer_minimum(rollout):
-    assert rollout.cli("capabilities")["decision"]["canonical_refresh_version"] == 1
-    assert rollout.cli("capabilities", binary=rollout.previous)["decision"].get("canonical_refresh_version", 0) == 0
+def test_installed_restoration_enforces_changed_consumer_minimum(historical_rollout):
+    rollout = historical_rollout
+    assert rollout.cli("capabilities")["decision"]["terminal_preserved_cleanup_version"] == 1
+    assert rollout.cli("capabilities", binary=rollout.previous)["decision"].get("terminal_preserved_cleanup_version", 0) == 0
     assert rollout.run("restore-consumer") == 2, rollout.output
     assert_real_postcheck_failure(rollout)
     assert_previous_gate(rollout)
     assert rollout.results[-1]["returncode"] == 0
     assert rollout.results[-1]["payload"]["decision"] == "CLIENTS_READY"
-    assert "CONSUMER_REQUIRES_CAPABILITY:" in rollout.output and "canonical_refresh_version>=1" in rollout.output
+    assert "CONSUMER_REQUIRES_CAPABILITY:" in rollout.output and "terminal_preserved_cleanup_version>=1" in rollout.output
     assert rollout.active.resolve() == rollout.target_runtime and len(rollout.postchecks) == 1
 
 
-def test_installed_restoration_rechecks_published_catalog(rollout):
+def test_installed_restoration_rechecks_published_catalog(historical_rollout):
+    rollout = historical_rollout
     rollout.configure_catalog()
     assert rollout.run("restore-catalog") == 2, rollout.output
     assert_real_postcheck_failure(rollout)
@@ -724,7 +773,7 @@ def test_installed_restoration_preserves_concurrent_pointer(rollout):
 
 def test_rollout_selection_requires_every_selected_case(tmp_path):
     helpers = runpy.run_path(str(ROOT / "scripts/check-cross-tool"))
-    selected = helpers["TESTS"] + helpers["ROLLOUT_TESTS"]
+    selected = helpers["TESTS"] + helpers["ROLLOUT_TESTS"] + helpers["HISTORICAL_ROLLOUT_TESTS"]
     cases = [f'<testcase name="{node.rsplit("::", 1)[1]}" />' for node in selected]
     report = tmp_path / "pytest.xml"
     report.write_text("<testsuite>" + "".join(cases[:-1]) + "</testsuite>")
@@ -742,7 +791,8 @@ def test_invalid_rollout_pin_stops_before_creating_output(tmp_path):
          "--controller", str(script), "--controller-version", "fixture",
          "--git-finalizer", str(script), "--finalizer-version", "fixture",
          "--retirement-companion", str(script),
-         "--rollout-previous-controller", str(tmp_path / "missing")],
+         "--rollout-previous-controller", str(tmp_path / "missing"),
+         "--rollout-git-source", "file:///fixture/source"],
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 2 and "rollout runtime pins" in result.stderr

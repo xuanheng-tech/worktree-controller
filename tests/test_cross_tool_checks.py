@@ -176,3 +176,98 @@ def test_pinned_gate_rejects_tool_mismatch_with_optimization(tmp_path, mode, mis
     assert not (root / "output/cross-tool.json").exists()
     if mismatch != "drift":
         assert not (root / "dependencies-touched").exists()
+
+
+def rollout_runtime(tmp_path, *, source="file:///fixture/source", reply=None, exit_code=0):
+    runtime = tmp_path / "versions" / ("a" * 40) / "worktree-controller"
+    (runtime / "bin").mkdir(parents=True)
+    binary = runtime / "bin/worktree-controller"
+    payload = reply if reply is not None else {
+        "decision": {"code": "CAPABILITIES", "contract_version": 61}, "errors": [],
+    }
+    binary.write_text(f"#!{sys.executable}\nprint({json.dumps(payload)!r})\n"
+                      f"raise SystemExit({exit_code})\n")
+    binary.chmod(0o755)
+    (runtime / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{name = "worktree-controller", git = '
+        + json.dumps(source + "?rev=" + "a" * 40) + '}]\n',
+    )
+    return binary
+
+
+@pytest.mark.parametrize("source", ["file:///fixture/source", "ssh://git@example.invalid/wc.git"])
+def test_rollout_pin_uses_declared_staged_source(tmp_path, source):
+    binary = rollout_runtime(tmp_path, source=source)
+    helpers = runpy.run_path(str(SCRIPT))
+    assert helpers["rollout_capabilities"](binary, source)["contract_version"] == 61
+    with pytest.raises(ValueError, match="declared Git source and commit"):
+        helpers["rollout_capabilities"](binary, source + "/other")
+
+
+def test_rollout_pin_rejects_receipt_commit_drift(tmp_path):
+    binary = rollout_runtime(tmp_path)
+    receipt = binary.parent.parent / "uv-receipt.toml"
+    receipt.write_text(receipt.read_text().replace("a" * 40, "b" * 40))
+    with pytest.raises(ValueError, match="declared Git source and commit"):
+        runpy.run_path(str(SCRIPT))["rollout_capabilities"](binary, "file:///fixture/source")
+
+
+@pytest.mark.parametrize("reply,exit_code", [
+    ({"decision": {"code": "RETIREMENT_STALE", "contract_version": 61}, "errors": []}, 0),
+    ({"decision": {"code": "CAPABILITIES"}, "errors": [{"code": "ERROR"}]}, 0),
+    ({"decision": {"code": "CAPABILITIES"}, "errors": []}, 2),
+    ({"decision": [], "errors": []}, 0),
+    ([], 0),
+])
+def test_rollout_pin_requires_successful_decision_not_just_zero_exit(tmp_path, reply, exit_code):
+    binary = rollout_runtime(tmp_path, reply=reply, exit_code=exit_code)
+    with pytest.raises(ValueError, match="successful CAPABILITIES decision"):
+        runpy.run_path(str(SCRIPT))["rollout_capabilities"](binary, "file:///fixture/source")
+
+
+@pytest.mark.parametrize("current,previous", [
+    ({"contract_version": 61, "terminal_preserved_cleanup_version": 1}, {"contract_version": 61}),
+    ({"contract_version": 61, "terminal_preserved_cleanup_version": 1},
+     {"contract_version": 60, "terminal_preserved_cleanup_version": 1}),
+    ({"contract_version": 61}, {"contract_version": 60}),
+])
+def test_historical_cohort_refuses_unsuitable_version_pairs(current, previous):
+    helpers = runpy.run_path(str(SCRIPT))
+    with pytest.raises(ValueError, match="historical rollout cohort not applicable"):
+        helpers["historical_rollout_tests"](current, previous)
+
+
+def test_historical_cases_are_separate_and_require_a_real_capability_gap():
+    helpers = runpy.run_path(str(SCRIPT))
+    historical = helpers["historical_rollout_tests"](
+        {"contract_version": 61, "terminal_preserved_cleanup_version": 1},
+        {"contract_version": 60},
+    )
+    assert historical == helpers["HISTORICAL_ROLLOUT_TESTS"]
+    assert len(historical) == 2 and len(helpers["ROLLOUT_TESTS"]) == 20
+    assert set(historical).isdisjoint(helpers["ROLLOUT_TESTS"])
+
+
+@pytest.mark.parametrize("extra", [
+    ["--rollout-previous-controller", "/fixture/previous"],
+    ["--rollout-git-source", "file:///fixture/source"],
+    ["--rollout-historical-controller", "/fixture/historical"],
+])
+def test_rollout_prerequisites_stop_before_output_or_dependencies(tmp_path, extra):
+    destination = tmp_path / "output"
+    result = subprocess.run(arguments(destination, SCRIPT, SCRIPT, SCRIPT) + extra,
+                            capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 2 and "requires --rollout-" in result.stderr
+    assert not destination.exists()
+
+
+def test_unsuitable_historical_pin_is_not_misreported_as_passed_or_silently_skipped(tmp_path):
+    binary = rollout_runtime(tmp_path)
+    destination = tmp_path / "output"
+    result = subprocess.run(arguments(destination, binary, SCRIPT, SCRIPT) + [
+        "--rollout-previous-controller", str(binary),
+        "--rollout-historical-controller", str(binary),
+        "--rollout-git-source", "file:///fixture/source",
+    ], capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 2 and "historical rollout cohort not applicable" in result.stderr
+    assert not destination.exists() and not result.stdout

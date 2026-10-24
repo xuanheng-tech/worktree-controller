@@ -32,7 +32,8 @@ acceptance gates, and historical temporary-file impact. No historical evidence i
 | --- | --- | --- | --- |
 | Now: boundaries | Current protocol and consumer inventory, including legacy adapters | Named owner per interface, source references, explicit unknowns; no changes to supported commands | Conflicting evidence keeps the interface supported |
 | WC structure: delivered | Pure release-intent, scope and allocation-to-intent queries | Existing behavior retained; private-import baseline 76; CLI 61/storage 5 unchanged | Preserve clocks, mutation and crash-hook ownership |
-| Now: diagnostic stability | One coherent doctor snapshot across guarded lifecycle changes | Real concurrent release, fresh inventory and negative API/CLI controls; full integration gate | Retain missing-commit and ownership refusals; preserve original incident uncertainty |
+| Diagnostic stability: delivered | One coherent doctor snapshot across guarded lifecycle changes | 1.32.7 released and installed; real concurrent release, fresh inventory and negative API/CLI controls | Retain missing-commit and ownership refusals; preserve original incident uncertainty |
+| Now: upgrade acceptance | Ordinary and historical cohorts with declared staging provenance | Matching installed pins, all selected cases pass; explicit prerequisite refusals and source/identity negative controls | Never infer provenance from origin, skip a selected failure or relax activation gates |
 | Shared quality checks: delivered | CL/SR adopt release-tools with a reviewed full commit pin | Both hosted parallel pilots and final three-version checks passed; SR retains its package check | Restore the pinned original consumer workflow; PyPI/Gitea flows remain owned by consumers |
 | Next 2–6 weeks | Further WC extraction only where a shared responsibility is clear; measure maintenance burden and failures | One behavior-preserving batch at a time, consumer gates, shrinking private-import baseline | Keep injected clocks, transaction and crash hooks with their owner until an explicit migration is tested |
 | Following 6–12 weeks | Evaluate moving manifests, compatibility catalog and shared Skills from GF to a dedicated toolchain owner | Full ownership inventory, staged installer/migration, exactly one active writer, historical pin and rollback tests | No second simultaneous Skill authority; no ownership switch on file-copy evidence |
@@ -54,9 +55,11 @@ Python floor, move host-specific defaults without migration, or replace existing
 GitHub-first release consolidation and a future toolchain repository remain design decisions,
 not permission to disable existing Gitea delivery or platform controls.
 
-The allocation-to-intent maintenance task and the 1.32.6 delivery are complete. Use the real
-diagnostic-stability maintenance task to observe checkpoint pause, fresh-executor resume,
-Finalizer handoff, integration and release; preserve pending results instead of interpreting
-an advisory success as completion. The released publication visibility window keeps exact bytes,
+The allocation-to-intent maintenance task and the 1.32.7 delivery are complete. The real
+diagnostic-stability task verified checkpoint pause, fresh-executor resume, Finalizer handoff,
+integration and release. Use normal maintenance tasks for further observations; preserve pending
+results instead of interpreting an advisory success as completion. Batch test-only maintenance
+on main without republishing or activating an unchanged runtime.
+The released publication visibility window keeps exact bytes,
 identities, failed-command outcomes and same-bundle recovery mandatory. CL/SR shared quality checks
 have passed their hosted parallel and final matrices.
