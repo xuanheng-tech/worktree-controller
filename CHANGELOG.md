@@ -13,6 +13,8 @@
   refusal. Keep every selected case mandatory; record unrequested cohorts without counting passes.
 - Test/document decision-aware consumers. Keep CLI contract 61, capability versions and
   storage layout 5 unchanged.
+- Scope the installed exit/rescan fixture's process enumeration to its real child so unrelated
+  protected host processes cannot decide the result. Retain real procfs and refusal checks.
 
 ## 1.32.7
 

@@ -211,6 +211,14 @@ def scan_exit(mode, root):
     transient = mode == "transient"
     child = start("child-exiting")
     original, original_sleep = environment._strict_process_references, time.sleep
+    original_path = environment.Path
+
+    class FixtureProcesses:
+        def iterdir(self):
+            return iter((Path(f"/proc/{child.pid}"),))
+
+    # Enumerate only our child; its identity, permissions and exit still use real procfs.
+    environment.Path = lambda value: FixtureProcesses() if value == "/proc" else Path(value)
     issues, rescans = [], []
     try:
         assert line(child) == "ready"
@@ -258,6 +266,7 @@ def scan_exit(mode, root):
         assert len(rescans) == (1 if transient else environment._MAX_PROCESS_ATTEMPTS - 1), rescans
         return {"identity": asdict(identity), "issues": issues, "rescans": rescans, "outcome": outcome}
     finally:
+        environment.Path = original_path
         environment._strict_process_references = original
         environment.time.sleep = original_sleep
         stop(child)
