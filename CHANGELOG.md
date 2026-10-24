@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.32.6
+
+- Report uncertain runtime visibility as `RUNTIME_SCAN_UNCERTAIN`, separately from positive
+  `RUNTIME_OCCUPIED` evidence. Both retain runtime bindings and execution reservations.
+- Isolate parent-side procfs in the command-exit regression, retaining real command/lease
+  execution. Verify repeated refusal, public CLI exit codes, later ordinary reconciliation,
+  idempotency and preservation of commits, untracked files and generated output without retries.
+- Share allocation-to-integration-intent lookup in `semantics`, retaining lifecycle aliases
+  and identity checks. Reduce private cross-module imports from 78 to 76.
+- Keep CLI contract 61, capability versions and storage layout 5 unchanged.
+
 ## 1.32.5
 
 - Poll successful publication writes through one shared five-minute visibility budget.

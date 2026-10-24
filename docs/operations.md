@@ -83,6 +83,21 @@ original invocation and current observations; do not automatically apply the mai
 to an unrelated identity change. An unchanged clean PREPARING candidate can be observed again with
 its exact original claim without allocating another checkout.
 
+## Finished commands and runtime reconciliation
+
+A command exit releases its writer entitlement; runtime occupancy remains until ordinary
+reconciliation proves it clear. `RUNTIME_OCCUPIED` means positive holder, group or path-use
+evidence. `RUNTIME_SCAN_UNCERTAIN` means visibility or identity evidence is incomplete. Both
+retain the binding and execution reservation; neither proves task completion or permits cleanup.
+
+After resolving the reported uncertainty or waiting for the actual workload to finish, rerun
+`admission-queue --repo <canonical-repo> --apply --json` with the original request intact.
+Inspect its per-request outcomes: exit 0 reports a successful queue observation even when a row
+still has a blocker. Direct `binding-remove` returns exit 2 on either refusal. Once clear,
+ordinary reconciliation removes the binding and releases the execution budget; commits and local
+files remain in their checkout. Do not remove bindings manually, loosen guards or treat a retry
+count as proof that the runtime must already be clear.
+
 ## Recovery guidance and session closeout
 
 When `capabilities --json` advertises `recovery_guidance_version` 1, inspect one checkout:

@@ -92,8 +92,10 @@ def assert_runtime_clear(target: Path, holders: tuple[WriterHolder, ...]) -> Non
         if (not holders or process is None or any(holder.boot_id != boot_id()
                 or process.start_ticks >= holder.start_ticks for holder in holders)):
             observed.append(reference)
-    if observed or any(evidence[key] for key in ("managed_references", "managed_visibility_uncertainties", "scan_uncertainties")):
+    if observed or evidence["managed_references"]:
         raise ControllerError("RUNTIME_OCCUPIED", "runtime remains until managed and observed use is clear")
+    if evidence["managed_visibility_uncertainties"] or evidence["scan_uncertainties"]:
+        raise ControllerError("RUNTIME_SCAN_UNCERTAIN", "runtime visibility remains uncertain")
 
 
 def foreign_runtime_bindings(record: MetadataRecord, holder: WriterHolder, lease_id: str | None) -> tuple[str, ...]:

@@ -8,15 +8,17 @@ import select
 import signal
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
 
 from tests.test_retention_admission import _record, _store
+from tests.test_runtime_scan import procfs as procfs
+from tests.test_shadow import git
 from tests.test_write_admission import ROOT
 from tests.test_write_admission import task as task
 from worktree_controller import resource_admission, writer_lease, writer_session
+from worktree_controller.cli import main as controller_main
 
 SESSION_ENTRYPOINT = """
 import signal
@@ -82,7 +84,10 @@ def invoke(
 
 
 @pytest.mark.parametrize("client", ["terminal", "executor-a", "any.executor:17"])
-def test_same_contract_checks_host_identity_and_preserves_exit_status(task, tmp_path, client):
+@pytest.mark.parametrize("uncertain", [False, True], ids=["clear", "uncertain"])
+def test_same_contract_checks_host_identity_and_preserves_exit_status(
+    task, tmp_path, client, procfs, uncertain, capsys,
+):
     repo, path, allocation = task
     home = tmp_path / "empty-home"
     home.mkdir()
@@ -97,30 +102,68 @@ def test_same_contract_checks_host_identity_and_preserves_exit_status(task, tmp_
     result = invoke(path, home, client, [sys.executable, "-B", "-c", child])
     assert result.returncode == 37, result.stderr
     assert json.loads(result.stdout)["client_id"] == client
-    assert (path / "mine.txt").read_text() == "owned change"
+    assert (path / "mine.txt").read_bytes() == b"owned change"
     assert allocation not in _store(repo).load().writer_leases
-    assert _record(repo, allocation).external_bindings
+    bindings = _record(repo, allocation).external_bindings
+    assert bindings
     request_id = next(
         key for key, row in resource_admission.AdmissionLedger().read()["requests"].items()
         if row["request"].get("kind") == "execution"
     )
-    # Concurrent procfs changes can conservatively retain an exited execution.
-    # Retry the ordinary guard only for runtime occupancy/visibility blockers.
-    for _ in range(3):
-        reconciled = resource_admission.reconcile(apply=True)
-        if not _record(repo, allocation).external_bindings:
-            break
-        outcome = next(
-            row for row in reconciled["decision"]["outcomes"]
-            if row["request_id"] == request_id
-        )
-        assert outcome.get("blocker") in {"RUNTIME_OCCUPIED", "RUNTIME_SCAN_UNCERTAIN"}, reconciled
-        time.sleep(0.05)
+    kept = {"mine.txt": b"owned change", "untracked.txt": b"keep this",
+            "generated/cache.bin": b"\x00checkpoint"}
+    for name in ("untracked.txt", "generated/cache.bin"):
+        destination = path / name
+        destination.parent.mkdir(exist_ok=True)
+        destination.write_bytes(kept[name])
+    head = git(path, "rev-parse", "HEAD")
+    # The command/lease use real processes. Only the parent-side visibility scan
+    # uses controlled procfs: host churn cannot promise clearance within a deadline.
+    if uncertain:
+        _, _, create = procfs
+        process = create()
+        (process / "maps").write_text("malformed\n")
+        record = _record(repo, allocation)
+        assert controller_main([
+            "binding-remove", "--repo", str(repo.repo), "--path", str(path),
+            "--owner", record.owner, "--expected-record-version", str(record.record_version),
+            "--binding", bindings[0], "--json",
+        ]) == 2
+        assert json.loads(capsys.readouterr().out)["errors"][0]["code"] == "RUNTIME_SCAN_UNCERTAIN"
+        for public_cli in (False, True):
+            if public_cli:
+                assert controller_main([
+                    "admission-queue", "--repo", str(repo.repo), "--apply", "--json",
+                ]) == 0
+                refused = json.loads(capsys.readouterr().out)
+            else:
+                refused = resource_admission.reconcile(apply=True)
+            outcome = next(row for row in refused["decision"]["outcomes"]
+                           if row["request_id"] == request_id)
+            assert outcome.get("blocker") == "RUNTIME_SCAN_UNCERTAIN", refused
+            assert _record(repo, allocation).external_bindings == bindings
+            assert resource_admission.AdmissionLedger().read()["requests"][request_id]["state"] == "ALLOCATED"
+            assert git(path, "rev-parse", "HEAD") == head
+            assert {name: (path / name).read_bytes() for name in kept} == kept
+        (process / "maps").write_bytes(b"00001000-00002000 r--p 00000000 00:00 0\n")
+    assert controller_main([
+        "admission-queue", "--repo", str(repo.repo), "--apply", "--json",
+    ]) == 0
+    reconciled = json.loads(capsys.readouterr().out)
+    outcome = next(row for row in reconciled["decision"]["outcomes"]
+                   if row["request_id"] == request_id)
+    assert outcome["result"]["code"] == "EXECUTION_RESOURCES_RELEASED", reconciled
     assert not _record(repo, allocation).external_bindings, reconciled
     assert _record(repo, allocation).lifecycle != "RELEASED"
     rows = [row for row in resource_admission.AdmissionLedger().read()["requests"].values()
             if row["request"].get("kind") == "execution"]
     assert len(rows) == 1 and rows[0]["state"] == "RELEASED"
+    settled = _record(repo, allocation)
+    resource_admission.reconcile(apply=True)
+    assert _record(repo, allocation) == settled
+    assert resource_admission.AdmissionLedger().read()["requests"][request_id] == rows[0]
+    assert git(path, "rev-parse", "HEAD") == head
+    assert {name: (path / name).read_bytes() for name in kept} == kept
     assert list(home.iterdir()) == []
 
 

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from worktree_controller import environment
+from worktree_controller import environment, writer_lease
 from worktree_controller.models import ControllerError, WriterHolder
 
 
@@ -778,3 +778,25 @@ def test_lenient_scan_treats_denied_same_uid_entries_as_a_visibility_gap(procfs)
     finally:
         (process / "fd").chmod(0o700)
         (process / "maps").chmod(0o600)
+
+
+@pytest.mark.parametrize(("positive", "uncertain", "code"), [
+    (False, False, None),
+    (False, True, "RUNTIME_SCAN_UNCERTAIN"),
+    (True, False, "RUNTIME_OCCUPIED"),
+    (True, True, "RUNTIME_OCCUPIED"),
+])
+def test_runtime_clear_distinguishes_occupancy_from_uncertainty(procfs, positive, uncertain, code):
+    root, _, create = procfs
+    process = create()
+    if positive:
+        (process / "cwd").unlink()
+        (process / "cwd").symlink_to(root)
+    if uncertain:
+        (process / "maps").write_text("malformed\n")
+    if code is None:
+        writer_lease.assert_runtime_clear(root, ())
+    else:
+        with pytest.raises(ControllerError) as refused:
+            writer_lease.assert_runtime_clear(root, ())
+        assert refused.value.code == code
