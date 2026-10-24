@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.32.7
+
+- Hold one shared repository lock through doctor snapshot diagnostics and refresh Git inventory
+  after acquiring it. Guarded release/refresh cannot invalidate a checkout while its semantic
+  or transaction evidence is being read.
+- Cover a real concurrent guarded release, mutation before lock acquisition, and genuinely
+  missing commits through both API and CLI, retaining commit/ref evidence and refusal codes.
+- Update the maintenance baseline after the 1.32.6 delivery and keep CLI contract 61,
+  capability versions and storage layout 5 unchanged.
+
 ## 1.32.6
 
 - Report uncertain runtime visibility as `RUNTIME_SCAN_UNCERTAIN`, separately from positive

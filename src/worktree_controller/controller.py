@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 from collections import defaultdict
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1603,27 +1604,43 @@ def doctor(repository_path: Path, *, namespace_pid: int | None = None) -> dict[s
 
         policy = default_policy(repository.canonical_path)
     store = MetadataStore(repository.common_dir)
-    try:
-        snapshot = store.load()
-    except ControllerError as exc:
-        error = _environment_first(exc, diagnosis)
-        result["repository"] = {
-            "canonical_path": str(repository.canonical_path),
-            "common_dir": str(repository.common_dir),
-            "worktree_count": len(repository.worktrees),
-            "normal_limit": policy.normal_limit,
-            "hard_limit": policy.hard_limit,
-            "metadata_path": str(store.root),
-        }
-        result["errors"].append({"code": error.code, "message": str(error)})
-        result["decision"] = {
-            "code": "FAIL",
-            "reason": "repository environment or controller metadata is unavailable",
-            "primary_diagnosis": _primary_diagnosis(
-                diagnosis, result["warnings"] + result["errors"], failed=True
-            ),
-        }
-        return result
+    with ExitStack() as stack:
+        try:
+            # Release/refresh must not invalidate Git paths while the snapshot's
+            # semantic and transaction evidence is still being read.
+            stack.enter_context(store.lock(exclusive=False))
+            repository = inventory(repository_path)
+            snapshot = store.load()
+        except ControllerError as exc:
+            error = _environment_first(exc, diagnosis)
+            result["repository"] = {
+                "canonical_path": str(repository.canonical_path),
+                "common_dir": str(repository.common_dir),
+                "worktree_count": len(repository.worktrees),
+                "normal_limit": policy.normal_limit,
+                "hard_limit": policy.hard_limit,
+                "metadata_path": str(store.root),
+            }
+            result["errors"].append({"code": error.code, "message": str(error)})
+            result["decision"] = {
+                "code": "FAIL",
+                "reason": "repository environment or controller metadata is unavailable",
+                "primary_diagnosis": _primary_diagnosis(
+                    diagnosis, result["warnings"] + result["errors"], failed=True
+                ),
+            }
+            return result
+        return _doctor_snapshot(result, repository, policy, store, snapshot)
+
+
+def _doctor_snapshot(
+    result: dict[str, Any],
+    repository: RepositoryInventory,
+    policy: WorktreePolicy,
+    store: MetadataStore,
+    snapshot: MetadataSnapshot,
+) -> dict[str, Any]:
+    diagnosis = result["environment_diagnosis"]
     warnings = _metadata_warnings(repository, policy, snapshot)
     result["repository"] = _repository_payload(repository, policy, snapshot)
     result["worktrees"] = _observed_worktrees(

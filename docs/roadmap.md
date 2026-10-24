@@ -1,17 +1,22 @@
 # Maintenance roadmap
 
-Execution baseline: 2026-10-23. This is the WC portion of the approved four-tool maintenance
+Execution baseline: 2026-10-24. This is the WC portion of the approved four-tool maintenance
 direction. Each stage needs its own tested deliverable; later ideas are not current behavior.
 
 ## Current baseline
 
-WC 1.32.5 retains CLI contract 61 and storage layout 5. The scope and architecture documents
-are already on main. Previous extractions reduced private cross-module imports from 93 to
-82 and then 80; pure scope hashing/overlap queries lowered it to 78. This maintenance batch
-moves allocation-to-intent lookup into `semantics`, reducing the baseline to 76 while retaining
-its duplicate-identity refusal and lifecycle alias. Mutation helpers, clocks and lock scope stay
-with their existing owner. Batch this source maintenance into the next planned release; it does
-not declare a new package release or change the installed 1.32.5 runtime.
+WC 1.32.6 completed the runtime-visibility fix and the previously planned allocation-to-intent
+query extraction. Private cross-module imports remain at 76. Software version 1.32.7 retains
+CLI contract 61, the existing capability versions and storage layout 5, and serializes doctor
+snapshot reads with normal Controller mutations. Diagnostics refresh Git inventory after taking
+the shared repository lock, then retain it through semantic, transaction and retirement checks.
+The regression uses a real guarded release and verifies the retained commit and branch; a truly
+missing commit still refuses through both the API and CLI.
+
+The original intermittent commit-resolution report did not retain enough per-command evidence
+to establish its exact cause. The isolated concurrency defect is reproducible; that does not
+prove the historical report had the same cause. Site-specific owner actions remain separate
+from WC repairs and package deployment.
 
 GF 1.9.8 already consumes SR's public read API and WC's versioned publication/retirement
 protocols. CL 1.3.10 and SR 2.5.12 already use main on both hosting platforms. These completed
@@ -26,7 +31,8 @@ acceptance gates, and historical temporary-file impact. No historical evidence i
 | Stage | Deliverable | Exit evidence | Stop or rollback boundary |
 | --- | --- | --- | --- |
 | Now: boundaries | Current protocol and consumer inventory, including legacy adapters | Named owner per interface, source references, explicit unknowns; no changes to supported commands | Conflicting evidence keeps the interface supported |
-| Now: WC structure | One cohesive pure release-intent query extraction | Full integration gate; existing renewal/cancellation/recovery behavior; CLI 61/storage 5 unchanged | Revert the isolated extraction if behavior differs |
+| WC structure: delivered | Pure release-intent, scope and allocation-to-intent queries | Existing behavior retained; private-import baseline 76; CLI 61/storage 5 unchanged | Preserve clocks, mutation and crash-hook ownership |
+| Now: diagnostic stability | One coherent doctor snapshot across guarded lifecycle changes | Real concurrent release, fresh inventory and negative API/CLI controls; full integration gate | Retain missing-commit and ownership refusals; preserve original incident uncertainty |
 | Shared quality checks: delivered | CL/SR adopt release-tools with a reviewed full commit pin | Both hosted parallel pilots and final three-version checks passed; SR retains its package check | Restore the pinned original consumer workflow; PyPI/Gitea flows remain owned by consumers |
 | Next 2–6 weeks | Further WC extraction only where a shared responsibility is clear; measure maintenance burden and failures | One behavior-preserving batch at a time, consumer gates, shrinking private-import baseline | Keep injected clocks, transaction and crash hooks with their owner until an explicit migration is tested |
 | Following 6–12 weeks | Evaluate moving manifests, compatibility catalog and shared Skills from GF to a dedicated toolchain owner | Full ownership inventory, staged installer/migration, exactly one active writer, historical pin and rollback tests | No second simultaneous Skill authority; no ownership switch on file-copy evidence |
@@ -48,9 +54,9 @@ Python floor, move host-specific defaults without migration, or replace existing
 GitHub-first release consolidation and a future toolchain repository remain design decisions,
 not permission to disable existing Gitea delivery or platform controls.
 
-The current maintenance task moves allocation-to-intent lookup to `semantics`, lowering the
-private-import baseline from 78 to 76. Use its real task to observe checkpoint pause, fresh-executor
-resume, Finalizer handoff, integration and release; preserve pending results instead of interpreting
+The allocation-to-intent maintenance task and the 1.32.6 delivery are complete. Use the real
+diagnostic-stability maintenance task to observe checkpoint pause, fresh-executor resume,
+Finalizer handoff, integration and release; preserve pending results instead of interpreting
 an advisory success as completion. The released publication visibility window keeps exact bytes,
 identities, failed-command outcomes and same-bundle recovery mandatory. CL/SR shared quality checks
 have passed their hosted parallel and final matrices.

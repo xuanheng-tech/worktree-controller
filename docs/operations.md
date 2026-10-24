@@ -29,6 +29,19 @@ uses the public Snapshot Runner package. Context Loader and `tool-skill-sync` ar
 4. Register rebuildable environments while ACTIVE. Run focused tests, the required project gate,
    and Snapshot review before Git Finalizer commits or publishes the task branch.
 
+## Concurrent diagnostic reads
+
+`doctor` refreshes Git inventory after acquiring the repository's shared lock and retains that
+lock through metadata, semantic, transaction and retirement diagnostics. Normal Controller
+mutations wait until those reads finish, so a guarded release cannot remove an inspected checkout
+halfway through its scope or ancestry checks. This lock coordinates Controller operations; direct
+Git changes and external processes still have their own observation boundaries.
+
+A genuinely unavailable commit still refuses through the existing API/CLI contract. Keep the
+original exit code and request, and compare the exact repository and checkout used by the failed
+Git command before concluding that an object was lost. Repeating a diagnostic does not recover a
+lifecycle, replace frozen source evidence or settle another owner's outstanding authorization.
+
 ## Handoff and integrate
 
 Publish the source branch, hand off its exact commit and scope, then enqueue one integration intent.
