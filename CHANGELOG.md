@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.32.8
+
 - Place shared bounded, FD-bound evidence document reads in `cleanup_evidence`, updating
   preservation, recovery and migration consumers. Retain raw-byte hashes, file and ancestor
   identity checks, size limits and refusal codes; remove four private cross-module imports.
@@ -9,8 +11,8 @@
   requiring declared staging provenance and matching CLI/capability prerequisites before running.
 - Preserve staged source bindings in disposable fixtures and cover wrong-source and identity-drift
   refusal. Keep every selected case mandatory; record unrequested cohorts without counting passes.
-- Test/document decision-aware consumers and keep runtime behavior, software version 1.32.7,
-  CLI 61, capability versions and storage layout 5 unchanged.
+- Test/document decision-aware consumers. Keep CLI contract 61, capability versions and
+  storage layout 5 unchanged.
 
 ## 1.32.7
 
