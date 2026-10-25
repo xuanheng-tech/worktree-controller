@@ -418,6 +418,29 @@ def test_unknown_receipt_returns_no_evidence():
         )
 
 
+@pytest.mark.parametrize("selector", ["release_receipt_id", "allocation_id", "task_key", "authority_key"])
+def test_missing_original_plan_refuses_without_rewriting_receipt(selector, capsys):
+    with GitRepository(linked=0) as repository:
+        adopt_canonical(repository)
+        _, allocation, receipt = _closed(repository)
+        store = MetadataStore(inventory(repository.repo).common_dir)
+        snapshot = store.load()
+        plan_id = snapshot.release_receipts[receipt].plan_id
+        receipt_path = store.release_receipts_dir / f"{receipt}.json"
+        original = receipt_path.read_bytes()
+        # Only the isolated fixture loses its original plan, as in the legacy incident.
+        (store.release_plans_dir / f"{plan_id}.json").unlink()
+        value = {"release_receipt_id": receipt, "allocation_id": allocation,
+                 "task_key": "history-task", "authority_key": "history-authority"}[selector]
+        assert main(["lifecycle-history", "--repo", str(repository.repo),
+                     "--" + selector.replace("_", "-"), value, "--json"]) == 2
+        result = json.loads(capsys.readouterr().out)
+        assert result["errors"] == [{"code": "HISTORY_EVIDENCE_INCOMPLETE",
+                                     "message": "release receipt has no release plan"}]
+        assert receipt_path.read_bytes() == original
+        assert not (store.release_plans_dir / f"{plan_id}.json").exists()
+
+
 @pytest.mark.parametrize("json_output", [False, True])
 def test_cli_invalid_query_reports_error_without_traceback(tmp_path, capsys, json_output):
     arguments = ["lifecycle-history", "--repo", str(tmp_path), "--task-key", "a", "--limit", "0"]

@@ -989,6 +989,29 @@ def test_an_exclusive_mutation_lock_blocks(task, tmp_path):
     assert f"CONTROLLER_MUTATION_IN_FLIGHT:{repository.repo.name}" in payload["blockers"]
 
 
+def test_typed_cleanup_fences_activation_before_any_journal_exists(task, tmp_path):
+    from worktree_controller.store import MetadataStore
+
+    repository, _, _ = task
+    store = MetadataStore(repository.repo / ".git")
+    with store.cleanup_lock():
+        assert not list(store.transactions_dir.glob("*.json"))
+        payload, code = run_gate(gate_home(tmp_path), repository.repo)
+    assert code == 2
+    assert f"CONTROLLER_MUTATION_IN_FLIGHT:{repository.repo.name}" in payload["blockers"]
+
+
+def test_idle_cleanup_journal_directory_does_not_fence_activation(task, tmp_path):
+    from worktree_controller.store import MetadataStore
+
+    repository, _, _ = task
+    store = MetadataStore(repository.repo / ".git")
+    with store.cleanup_lock():
+        pass
+    payload, code = run_gate(gate_home(tmp_path), repository.repo)
+    assert code == 0 and payload["decision"] == "CLIENTS_READY", payload
+
+
 def test_a_compatible_surviving_writer_is_reported_not_blocked(task, tmp_path):
     repository, path, allocation = task
     holder(path, repository=repository)

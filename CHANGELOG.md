@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.32.10
+
+- Keep closed lifecycle history available during typed resource cleanup. Hold the existing
+  repository lock shared to exclude metadata writers and serialize cleanup on the existing
+  transactions directory. Preserve every owner/CAS, preservation, hardlink, runtime, action,
+  journal and completion check, including interruption and repeated-call refusals.
+- Keep doctor filesystem/journal diagnostics coherent and refuse activation while the cleanup
+  gate is held, including its preflight and post-scan boundaries. Introduce no new persistent
+  path, query cache, public command, capability or storage schema; retain CLI 61 / storage 5.
+- Document that missing historical release plans require trusted original evidence; existing
+  publication reconciliation and interrupted-release replay cannot synthesize that evidence.
+
 ## 1.32.9
 
 - Avoid full Git worktree inventory for exact release-receipt queries and other lifecycle

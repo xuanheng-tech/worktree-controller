@@ -31,6 +31,17 @@ uses the public Snapshot Runner package. Context Loader and `tool-skill-sync` ar
 
 ## Concurrent diagnostic reads
 
+From 1.32.10, `resource-clean --typed` holds the existing repository lock shared and an
+exclusive lock on the existing transactions directory. Exact closed `lifecycle-history`
+queries continue to validate all metadata and evidence while cleanup runs. Ordinary mutations
+and a second cleanup wait; activation refuses the live cleanup even before its journal exists.
+No lock is released during an action, and cleanup never changes allocation/publication metadata.
+Doctor also takes the cleanup observation gate, so its filesystem and journal diagnostics wait
+for a coherent boundary. A dry-run may observe changing ignored content and refuse; rerun it
+after cleanup. Registered-venv cleanup, checkout release and publication retain their exclusive
+repository lock. This patch improves read availability; it does not promise a faster cleanup or
+bound unrelated publication, release, storage or operating-system waits.
+
 `doctor` refreshes Git inventory after acquiring the repository's shared lock and retains that
 lock through metadata, semantic, transaction and retirement diagnostics. Normal Controller
 mutations wait until those reads finish, so a guarded release cannot remove an inspected checkout
@@ -41,6 +52,15 @@ A genuinely unavailable commit still refuses through the existing API/CLI contra
 original exit code and request, and compare the exact repository and checkout used by the failed
 Git command before concluding that an object was lost. Repeating a diagnostic does not recover a
 lifecycle, replace frozen source evidence or settle another owner's outstanding authorization.
+
+If history returns `HISTORY_EVIDENCE_INCOMPLETE` because a release receipt's original plan is
+missing, keep the citation unverified. `reconcile receipts` acknowledges existing publication
+evidence; it does not reconstruct release plans. `release-recovery-inspect` requires both the
+original pending journal and its plan and refuses an already completed receipt. First locate
+trusted original plan bytes and prove their exact identity against the receipt. Existing task,
+branch, ancestry, teardown evidence or a newly generated plan cannot replace that original.
+No original evidence means there is no supported recovery to execute; preserve the receipt and
+report the gap rather than copying metadata by hand or manufacturing completion.
 
 ## Handoff and integrate
 

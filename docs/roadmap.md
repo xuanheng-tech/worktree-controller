@@ -12,7 +12,8 @@ hashes, file/ancestor checks, limits and refusal codes stay unchanged; mutation 
 retain their original owners. Release acceptance covers the exact installed candidate, ordinary
 1.32.7 upgrades and historical 1.30.4 restoration. Publication and local activation remain
 separate verified steps. The 1.32.9 patch skips unrelated live Git inventory for closed lifecycle selectors while
-retaining full locked metadata and immutable evidence validation. Software version 1.32.9 retains
+retaining full locked metadata and immutable evidence validation. The 1.32.10 patch keeps closed history readable during typed cleanup while preserving writer,
+cleanup, diagnostic and activation serialization. Software version 1.32.10 retains
 CLI contract 61, the existing capability versions and storage layout 5, and serializes doctor
 snapshot reads with normal Controller mutations. Diagnostics refresh Git inventory after taking
 the shared repository lock, then retain it through semantic, transaction and retirement checks.

@@ -1608,7 +1608,7 @@ def doctor(repository_path: Path, *, namespace_pid: int | None = None) -> dict[s
         try:
             # Release/refresh must not invalidate Git paths while the snapshot's
             # semantic and transaction evidence is still being read.
-            stack.enter_context(store.lock(exclusive=False))
+            stack.enter_context(store.cleanup_observation_lock())
             repository = inventory(repository_path)
             snapshot = store.load()
         except ControllerError as exc:

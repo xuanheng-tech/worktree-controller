@@ -5002,7 +5002,7 @@ def cleanup_typed_disposable(
 
     store = MetadataStore(inventory(repository_path).common_dir)
     receipt_id = None
-    with store.lock(exclusive=not dry_run):
+    with (store.lock(exclusive=False) if dry_run else store.cleanup_lock()):
         repository = inventory(repository_path)
         snapshot = store._load_unlocked()
         item, record = _managed_record(repository, snapshot, target)

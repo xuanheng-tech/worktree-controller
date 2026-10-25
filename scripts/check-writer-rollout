@@ -164,6 +164,26 @@ def metadata_quiet(
             blockers.append(f"CONTROLLER_MUTATION_IN_FLIGHT:{repository.name}")
             return
 
+    # Typed cleanup retains a shared repository fence so history can read its
+    # unchanged allocation metadata. Its exclusive journal-directory lock also
+    # covers preflight and post-scan, including the no-journal boundaries.
+    try:
+        cleanup_fd = _os.open(common / "transactions", _os.O_RDONLY | _os.O_DIRECTORY | _os.O_NOFOLLOW | _os.O_CLOEXEC)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        blockers.append(f"REPOSITORY_LOCK_UNUSABLE:{repository.name}")
+        return
+    else:
+        try:
+            try:
+                fcntl.flock(cleanup_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except OSError:
+                blockers.append(f"CONTROLLER_MUTATION_IN_FLIGHT:{repository.name}")
+                return
+        finally:
+            _os.close(cleanup_fd)
+
     def _journal_names(directory):
         # Same predicate as worktree_controller.transaction_scope.is_atomic_temp:
         # interrupted _atomic_json writes (.<name>.<8>.tmp) never became records.

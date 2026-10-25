@@ -349,6 +349,99 @@ class MetadataStore:
             finally:
                 os.close(descriptor)
 
+    @contextmanager
+    def cleanup_observation_lock(self) -> Iterator[None]:
+        """Keep filesystem/journal diagnostics coherent with typed cleanup.
+
+        History needs only repo.lock; doctor also reads the mutable cleanup
+        journal and filesystem. Take the directory gate before repo.lock so a
+        waiting diagnostic never obstructs the cleanup it is waiting for.
+        """
+        with self.lock(exclusive=False):
+            if not self.transactions_dir.exists():
+                # Cleanup must first take repo.lock exclusively to create it.
+                yield
+                return
+        try:
+            descriptor = os.open(
+                self.transactions_dir,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+        except OSError as exc:
+            raise ControllerError(
+                "RESOURCE_CLEANUP_LOCK_UNAVAILABLE", "cleanup journal directory cannot be observed"
+            ) from exc
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH)
+            except OSError as exc:
+                raise ControllerError(
+                    "RESOURCE_CLEANUP_LOCK_UNAVAILABLE", "cleanup observation lock cannot be acquired"
+                ) from exc
+            with self.lock(exclusive=False):
+                try:
+                    opened = os.fstat(descriptor)
+                    named = os.stat(self.transactions_dir, follow_symlinks=False)
+                except OSError as exc:
+                    raise ControllerError(
+                        "RESOURCE_CLEANUP_LOCK_UNAVAILABLE", "cleanup journal directory disappeared"
+                    ) from exc
+                if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                    raise ControllerError(
+                        "RESOURCE_CLEANUP_LOCK_UNAVAILABLE", "cleanup journal directory changed"
+                    )
+                yield
+        finally:
+            os.close(descriptor)
+
+    @contextmanager
+    def cleanup_lock(self) -> Iterator[None]:
+        """Fence typed filesystem cleanup while keeping metadata readers available.
+
+        Cleanup changes only its atomic journal, append-only action/completion
+        evidence and the authorized ignored trees, never allocation metadata.
+        The existing transactions directory serializes these cleanup executions;
+        a shared repo.lock excludes every ordinary writer, including old runtimes.
+        Both locks stay held through the final scan or failure receipt. There is
+        no lock conversion or unlocked action boundary.
+        """
+        descriptor = None
+        try:
+            # Require the real mutation arbiter before initializing the existing
+            # journal directory. Never bootstrap a missing repository lock here.
+            try:
+                with self.lock(exclusive=True):
+                    self.transactions_dir.mkdir(mode=0o700, exist_ok=True)
+                    descriptor = os.open(
+                        self.transactions_dir,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    )
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            except OSError as exc:
+                raise ControllerError(
+                    "RESOURCE_CLEANUP_LOCK_UNAVAILABLE", "cleanup journal directory cannot be locked"
+                ) from exc
+            with self.lock(exclusive=False):
+                if not self.flock_held:
+                    raise ControllerError("MISSING_REPOSITORY_LOCK", "cleanup requires the repository lock")
+                try:
+                    opened = os.fstat(descriptor)
+                    named = os.stat(self.transactions_dir, follow_symlinks=False)
+                except OSError as exc:
+                    raise ControllerError(
+                        "RESOURCE_CLEANUP_LOCK_UNAVAILABLE", "cleanup journal directory disappeared"
+                    ) from exc
+                if (opened.st_dev, opened.st_ino, opened.st_mode) != (
+                    named.st_dev, named.st_ino, named.st_mode
+                ):
+                    raise ControllerError(
+                        "RESOURCE_CLEANUP_LOCK_UNAVAILABLE", "cleanup journal directory changed"
+                    )
+                yield
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
     def _decoded(
         self, path: Path | os.DirEntry[str], decode: Callable[[Mapping[str, Any]], _Decoded]
     ) -> _Decoded:

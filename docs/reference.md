@@ -957,6 +957,18 @@ keeps resolving after the move.
 
 ## Unified release plan and disposable resources
 
+From 1.32.10, typed cleanup serializes on the existing transactions-directory inode while
+holding `repo.lock` shared. This excludes normal metadata writers and older exclusive cleanup
+implementations for the entire operation, while closed history readers retain their existing
+shared repository lock and full evidence checks. Only the existing atomic cleanup journal,
+append-only action/completion evidence and exact authorized ignored resources may change.
+Allocation, binding, release and publication metadata stay stable. Doctor additionally takes a
+shared transactions-directory gate before its repository lock; activation probes the exclusive
+cleanup gate. The directory is initialized under the normal exclusive repository lock; it adds
+no pathname or storage format. Cleanup gates are process-owned file locks, released by the kernel
+on exit; partial operations retain their original recovery evidence and never gain release authority.
+Registered-venv cleanup and physical checkout release keep their exclusive repository locks.
+
 Clean `RETAINED` feature/audit checkouts can use `close-delivered` when their committed
 content is already published. First run `close-delivered --path PATH
 --expected-record-version N --owner-release OWNER --actor ACTOR --dry-run --json`.
