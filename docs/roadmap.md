@@ -6,12 +6,13 @@ direction. Each stage needs its own tested deliverable; later ideas are not curr
 ## Current baseline
 
 WC 1.32.6 completed the runtime-visibility fix and the previously planned allocation-to-intent
-query extraction. The 1.32.8 maintenance candidate places shared bounded, FD-bound document reads
+query extraction. The 1.32.8 maintenance release places shared bounded, FD-bound document reads
 in the existing cleanup evidence module, removing four private imports (76 to 72). Raw-byte
 hashes, file/ancestor checks, limits and refusal codes stay unchanged; mutation and crash hooks
 retain their original owners. Release acceptance covers the exact installed candidate, ordinary
 1.32.7 upgrades and historical 1.30.4 restoration. Publication and local activation remain
-separate verified steps. Software version 1.32.8 retains
+separate verified steps. The 1.32.9 patch skips unrelated live Git inventory for closed lifecycle selectors while
+retaining full locked metadata and immutable evidence validation. Software version 1.32.9 retains
 CLI contract 61, the existing capability versions and storage layout 5, and serializes doctor
 snapshot reads with normal Controller mutations. Diagnostics refresh Git inventory after taking
 the shared repository lock, then retain it through semantic, transaction and retirement checks.

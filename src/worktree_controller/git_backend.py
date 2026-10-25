@@ -219,8 +219,7 @@ def _observe_each[T](function: Callable[[Path], T], paths: Sequence[Path]) -> li
         return [pool.submit(function, item) for item in paths]
 
 
-def inventory(path: Path) -> RepositoryInventory:
-    requested_root, common = resolve_repository(path)
+def _registered_worktrees(requested_root: Path, common: Path) -> list[dict[str, str | bool]]:
     raw = _git(requested_root, "worktree", "list", "--porcelain", "-z").stdout
     parsed = _parse_porcelain(raw)
     # Git's main entry can name the common directory itself after
@@ -245,6 +244,21 @@ def inventory(path: Path) -> RepositoryInventory:
         ):
             raise ControllerError("GIT_DRIFT", "separate Git directory canonical mapping differs")
         parsed[0]["path"] = os.fspath(canonical)
+    return parsed
+
+
+def canonical_checkout(path: Path) -> Path:
+    """Resolve Git's canonical checkout without observing live worktree contents."""
+    requested_root, common = resolve_repository(path)
+    parsed = _registered_worktrees(requested_root, common)
+    if parsed[0].get("bare") is True:
+        raise ControllerError("GIT_ERROR", "bare worktrees are unsupported")
+    return Path(str(parsed[0]["path"])).resolve(strict=True)
+
+
+def inventory(path: Path) -> RepositoryInventory:
+    requested_root, common = resolve_repository(path)
+    parsed = _registered_worktrees(requested_root, common)
     canonical_path = Path(str(parsed[0]["path"])).resolve(strict=True)
     present = [
         record.get("bare") is not True and Path(str(record["path"])).exists() for record in parsed

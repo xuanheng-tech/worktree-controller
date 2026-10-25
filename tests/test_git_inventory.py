@@ -64,13 +64,17 @@ def test_separate_git_directory_preserves_canonical_checkout_identity(configured
         assert state.common_dir == common
         assert state.canonical_path == state.worktrees[0].path == repository.repo
         assert state.worktrees[0].git_dir == common
+        assert git_backend.canonical_checkout(repository.repo) == repository.repo
         linked = repository.root / "linked-separate"
         git(repository.repo, "worktree", "add", "-b", "linked-separate", str(linked))
         if configured:
             assert git_backend.inventory(linked).canonical_path == repository.repo
+            assert git_backend.canonical_checkout(linked) == repository.repo
         else:
             with pytest.raises(ControllerError, match="core.worktree canonical mapping"):
                 git_backend.inventory(linked)
+            with pytest.raises(ControllerError, match="core.worktree canonical mapping"):
+                git_backend.canonical_checkout(linked)
 
 
 def test_replacement_refs_cannot_invent_ancestry_or_change_tree_evidence():

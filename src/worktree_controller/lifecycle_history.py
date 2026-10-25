@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .controller import envelope
-from .git_backend import inventory, resolve_repository
+from .git_backend import canonical_checkout, inventory, resolve_repository
 from .models import (
     ControllerError,
     MetadataRecord,
@@ -246,7 +246,6 @@ def lifecycle_history(
     store = MetadataStore(common)
     with store.lock(exclusive=False):
         snapshot = store._load_unlocked()
-        repository = inventory(repository_path)
         wanted = None
         if integration_intent_id is not None:
             intent = snapshot.integration_intents.get(integration_intent_id)
@@ -266,6 +265,23 @@ def lifecycle_history(
                 and (authority_key is None or identity["authority_key"] == authority_key)
                 and (task_key is None or identity["task_key"] == task_key)
             )
+
+        # A receipt query has no live projection; other selectors only need Git
+        # inventory when a matching record is still bound to a checkout. Keep the
+        # full locked metadata validation even for entirely closed history.
+        bound_records = (
+            snapshot.records.get(allocation) for allocation in set(snapshot.bindings.values())
+        )
+        needs_live_inventory = release_receipt_id is None and any(
+            record is not None and matches(asdict(record)) for record in bound_records
+        )
+        if needs_live_inventory:
+            repository = inventory(repository_path)
+            canonical_path = repository.canonical_path
+            worktrees = repository.worktrees
+        else:
+            canonical_path = canonical_checkout(repository_path)
+            worktrees = ()
 
         closed = []
         matching_count = 0
@@ -301,7 +317,7 @@ def lifecycle_history(
                     closed.append(row)
         live = []
         if release_receipt_id is None:
-            for item in repository.worktrees:
+            for item in worktrees:
                 record = snapshot.records.get(snapshot.bindings.get(item.key, ""))
                 if record is not None and matches(asdict(record)):
                     live.append(
@@ -339,7 +355,7 @@ def lifecycle_history(
     payload = envelope("lifecycle-history")
     payload["repository"] = {
         "repository_id": snapshot.repository_id,
-        "canonical_path": str(repository.canonical_path),
+        "canonical_path": str(canonical_path),
         "common_dir": str(common),
         "metadata_path": str(store.root),
     }

@@ -17,6 +17,7 @@ from tests.test_integration_pipeline import (
     _validate,
 )
 from tests.test_shadow import GitRepository, git
+from worktree_controller import git_backend
 from worktree_controller import lifecycle_history as history_module
 from worktree_controller.cli import main
 from worktree_controller.controller import status
@@ -190,7 +191,8 @@ def test_missing_legacy_receipt_is_incomplete_and_never_backfilled():
         assert _bytes(store.root) == before
 
 
-def test_conflicting_release_identity_fails_closed(monkeypatch):
+@pytest.mark.parametrize("exact_receipt", [False, True])
+def test_conflicting_release_identity_fails_closed(monkeypatch, exact_receipt):
     with GitRepository(linked=0) as repository:
         adopt_canonical(repository)
         _, allocation, receipt_id = _closed(repository)
@@ -200,8 +202,81 @@ def test_conflicting_release_identity_fails_closed(monkeypatch):
         snapshot.release_receipts[receipt_id] = replace(receipt, branch="feature/unrelated")
         monkeypatch.setattr(MetadataStore, "_load_unlocked", lambda self: snapshot)
         with pytest.raises(ControllerError) as error:
-            lifecycle_history(repository.repo, allocation_id=allocation)
+            lifecycle_history(
+                repository.repo,
+                **({"release_receipt_id": receipt_id} if exact_receipt else {"allocation_id": allocation}),
+            )
         assert error.value.code == "HISTORY_EVIDENCE_CONFLICT"
+
+
+def test_exact_receipt_keeps_proof_without_live_worktree_observations(monkeypatch, capsys):
+    with GitRepository(linked=0) as repository:
+        adopt_canonical(repository)
+        _, allocation, receipt_id = _closed(repository)
+        live, acquired = acquire_one(repository, task="live-task", authority="live-authority")
+        (live / "untracked").write_text("preserve\n")
+        expected = lifecycle_history(live, release_receipt_id=receipt_id)
+        before = _bytes(repository.repo / ".git")
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("exact receipts must not observe live checkout contents")
+
+        monkeypatch.setattr(git_backend, "_status_counts", forbidden)
+        monkeypatch.setattr(git_backend, "_linked_git_dir", forbidden)
+        monkeypatch.setattr(history_module, "inventory", forbidden)
+        assert lifecycle_history(live, release_receipt_id=receipt_id) == expected
+        assert expected["repository"]["canonical_path"] == str(repository.repo)
+        assert main([
+            "lifecycle-history", "--repo", str(repository.repo),
+            "--release-receipt-id", receipt_id, "--json",
+        ]) == 0
+        assert json.loads(capsys.readouterr().out) == expected
+        assert lifecycle_history(repository.repo, release_receipt_id="missing")["decision"][
+            "closed_releases"
+        ] == []
+        with pytest.raises(AssertionError, match="live checkout"):
+            lifecycle_history(repository.repo, allocation_id=acquired["decision"]["allocation_id"])
+        closed = lifecycle_history(repository.repo, allocation_id=allocation)["decision"]
+        assert closed["closed_releases"] == expected["decision"]["closed_releases"]
+        assert _bytes(repository.repo / ".git") == before
+        assert (live / "untracked").read_text() == "preserve\n"
+
+
+def test_exact_receipt_keeps_full_metadata_validation_and_lock_boundary(monkeypatch, capsys):
+    with GitRepository(linked=0) as repository:
+        adopt_canonical(repository)
+        _, _, receipt_id = _closed(repository)
+        store = MetadataStore(inventory(repository.repo).common_dir)
+        canonical = history_module.canonical_checkout
+        load = MetadataStore._load_unlocked
+        locked = []
+
+        def locked_load(self):
+            assert self._flock_depth > 0
+            locked.append(self)
+            return load(self)
+
+        def locked_canonical(path):
+            assert locked[-1]._flock_depth > 0
+            return canonical(path)
+
+        monkeypatch.setattr(MetadataStore, "_load_unlocked", locked_load)
+        monkeypatch.setattr(history_module, "canonical_checkout", locked_canonical)
+        assert lifecycle_history(repository.repo, release_receipt_id=receipt_id)["decision"][
+            "closed_releases"
+        ][0]["proof_status"] == "COMPLETE"
+        # Even an unrelated malformed document still refuses; no selective store
+        # loader or cached verdict can hide invalid metadata on this faster path.
+        bad = store.records_dir / "malformed.json"
+        bad.write_text("{}\n")
+        before = _bytes(store.root)
+        assert main([
+            "lifecycle-history", "--repo", str(repository.repo),
+            "--release-receipt-id", receipt_id, "--json",
+        ]) == 2
+        response = json.loads(capsys.readouterr().out)
+        assert response["errors"][0]["code"] == "INVALID_METADATA"
+        assert _bytes(store.root) == before
 
 
 def test_task_selector_and_receipt_cursor_preserve_exact_identity():
@@ -251,6 +326,29 @@ def published_history(monkeypatch):
             snapshot.release_receipts[repeated.receipt_id] = repeated
         monkeypatch.setattr(MetadataStore, "_load_unlocked", lambda self: snapshot)
         yield repository, snapshot
+
+
+def test_closed_selectors_skip_live_inventory(published_history, monkeypatch):
+    repository, snapshot = published_history
+    receipt = next(iter(snapshot.release_receipts.values()))
+    intent_id = next(iter(snapshot.publication_receipts.values())).intent_id
+    queries = [
+        {"allocation_id": receipt.allocation_id},
+        {"authority_key": "history-index-source"},
+        {"task_key": "history-index-source"},
+        {"integration_intent_id": intent_id},
+    ]
+    expected = [lifecycle_history(repository.repo, **query) for query in queries]
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("closed selectors must not inventory unrelated live worktrees")
+
+    monkeypatch.setattr(history_module, "inventory", forbidden)
+    for query, previous in zip(queries, expected, strict=True):
+        result = lifecycle_history(repository.repo, **query)
+        assert result == previous
+        assert result["decision"]["live_allocations"] == []
+        assert result["decision"]["closed_releases"]
 
 
 def test_history_pagination_serializes_only_returned_deliveries(published_history, monkeypatch):

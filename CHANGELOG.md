@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.32.9
+
+- Avoid full Git worktree inventory for exact release-receipt queries and other lifecycle
+  selectors with no matching live checkout binding. Retain canonical Git identity, the shared
+  repository lock, full metadata validation and all immutable evidence/conflict checks.
+- Keep live projections on the existing inventory path. Preserve query output, CLI contract 61,
+  capability versions and storage layout 5; introduce no cache, service or storage format.
+
 ## 1.32.8
 
 - Place shared bounded, FD-bound evidence document reads in `cleanup_evidence`, updating
