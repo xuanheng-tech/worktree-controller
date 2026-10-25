@@ -125,11 +125,18 @@ def test_exact_export_handover_repeat_and_explicit_rollback(handover):
     generated = item.root / "governed/generated"
     generated.mkdir()
     (generated / "part").write_bytes(b"generated evidence")
+    # Reading a symlink may update atime. Force an old access time so the
+    # read-only plan must preserve identity and contents without relying on it.
+    os.utime(item.module.ACTIVE, ns=(0, item.module.ACTIVE.lstat().st_mtime_ns),
+             follow_symlinks=False)
     original = item.module.ACTIVE.lstat()
     plan, code = invoke(item)
     assert code == 0 and plan["code"] == "HISTORY_HANDOVER_READY"
     assert not Path(plan["receipt"]).exists()
-    assert item.module.ACTIVE.lstat() == original
+    observed = item.module.ACTIVE.lstat()
+    assert observed[:7] == original[:7]
+    assert (observed.st_mtime_ns, observed.st_ctime_ns) == (original.st_mtime_ns, original.st_ctime_ns)
+    assert item.module.ACTIVE.readlink() == item.module.runtime_path(item.previous)
     result, code = apply(item)
     assert code == 0 and result["operation_complete"] and result["activation_performed"]
     assert item.module.active_version() == item.target

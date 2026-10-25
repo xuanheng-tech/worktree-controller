@@ -9,6 +9,8 @@
   repository lock, full metadata validation and all immutable evidence/conflict checks.
 - Keep live projections on the existing inventory path. Preserve query output, CLI contract 61,
   capability versions and storage layout 5; introduce no cache, service or storage format.
+- Correct the history-handover fixture's read-only check to allow filesystem access-time updates
+  while retaining symlink identity, target, ownership, size and nanosecond modification/change checks.
 
 ## 1.32.8
 
