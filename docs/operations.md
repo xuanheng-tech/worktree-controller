@@ -7,6 +7,27 @@ the [getting started guide](getting-started.md) provides an isolated first run.
 Client implementers can follow the [AI client integration guide](client-integration.md) and its
 offline cross-client continuation example.
 
+## Repository lock availability
+
+Capability `repository_lock_admission_version` 1 adds an entry gate for cooperating runtimes.
+A writer that has entered the gate waits for current readers without admitting later readers
+ahead of it. The existing `repo.lock` still excludes every metadata mutation, including calls
+from older runtimes. Diagnostics retain their coherent snapshot through all checks.
+
+Typed cleanup keeps a separate active marker while holding its shared repository lock, so
+ordinary history queries remain available even when a metadata writer is waiting. Doctor
+continues to wait for cleanup's filesystem/journal gate. A cleanup waiting to start does not
+grant this read bypass. The entry gate and active marker use existing directories and kernel
+flocks, introduce no persistent record, and disappear automatically when their process exits.
+
+This is not a strict FIFO or a wait-time guarantee. A long existing check or cleanup can still
+delay writers. Older calls do not join the new entry ordering or active marker; mixed-runtime
+operation preserves exclusion but cannot promise the same read availability and ordering.
+Let those owners finish normally, retain their original request and evidence, then reobserve.
+Do not terminate another owner, remove locks, change authority or extend consumer timeouts to
+declare recovery. A completed candidate release can precede its source releases: inspect every
+`source_release_trigger.outcomes` entry and the original receipt query.
+
 ## Start or resume development
 
 For everyday feature/audit work, the [task entrypoints](daily-workflow.md) resolve the original

@@ -7,6 +7,40 @@ For a first run, use the [getting started guide](getting-started.md). This refer
 the detailed contracts, historical compatibility notes and benchmark evidence previously in the README.
 The [CLI contract](../tool_cli_contract.json) is authoritative for exact interfaces.
 
+## Repository lock admission (1.32.12)
+
+`repository_lock_admission_version: 1` retains CLI contract 61 and storage layout 5. All new
+entrants take an exclusive flock on the existing metadata-root directory before acquiring
+`repo.lock`, then release that entry gate once admitted. A writer waiting for current readers
+therefore excludes later cooperating readers. A shared read already held by the same PID and
+thread can nest across `MetadataStore` instances without waiting behind its own writer.
+
+Typed cleanup still serializes on the transactions directory and holds `repo.lock` shared.
+After admission, it holds a flock on the existing cleanup-actions directory until its final
+scan or failure receipt completes. Readers that find the entry gate occupied can confirm that
+active marker and take their compatible shared `repo.lock`; filesystem/journal diagnostics
+retain their separate cleanup-observation gate. The marker is not release or write authority.
+These locks use the same Linux directory-flock support as the existing cleanup gate.
+Lock diagnostics should include `repository.metadata_path` itself, `repo.lock`,
+`transactions` and `cleanup-actions`; new waiters can be at the entry directory before
+reaching `repo.lock`.
+
+The admission gate does not provide strict global FIFO or a finite latency bound. Old code
+continues to obey `repo.lock` but ignores the new entry gate and active marker. Its exclusion
+is preserved; mixed-runtime ordering and history availability can remain limited until those
+calls finish. No lease, receipt, metadata migration, new database or service is introduced.
+
+Repeated cleanup checks retain only the allocation scope of unrelated completion documents
+inside the current thread's outermost repository flock, including fresh `MetadataStore`
+instances used by one diagnostic. Each reuse pins and rechecks the regular file and
+ancestor identities, including inode, size, mtime and ctime. Replacement, in-place mutation,
+ownership/type change or symlink substitution forces a fresh read or refusal. Relevant
+documents always receive full byte/hash, plan, action and generation verification; this is
+neither a cached verdict nor a source-tree cache. The scope map clears when the outer flock
+exits. An isolated six-check fixture with sixteen 1 MiB unrelated receipts reduced full document
+reads from 96 to 16 with equal results; this does not establish a production latency bound or
+explain every historical long-held lock.
+
 ## Optional integrations and dependencies
 
 The core control plane has a single runtime dependency (`websockets>=15,<16`) and works standalone

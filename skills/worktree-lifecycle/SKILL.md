@@ -432,6 +432,13 @@ allocation; hosted session-ending calls remain refused.
   or the host resource ledger to clear a fence. Interrupted journals close only through
   published terminal evidence or the typed verbs. Storage layout is an independently versioned
   contract for external consumers, not something inferred from the namespace directory name.
+- With `repository_lock_admission_version` 1, cooperating readers cannot bypass a writer
+  already admitted to the entry gate. Same-thread nested reads and history reads during active
+  typed cleanup retain their compatible access; doctor keeps its filesystem/journal fence.
+  Existing calls from older runtimes preserve `repo.lock` exclusion but do not join the new
+  ordering or active marker. This promises neither strict FIFO nor bounded wait times. Preserve
+  the original request and let its owner finish; never remove a lock, stop another owner or
+  change authority to clear contention. Inspect each source-release outcome after publication.
 - Host resource recovery is typed: `host-execution --action inspect` publishes the
   canonical holder digest and required terminal-evidence shape, and only `clear
   --recover-dead-holder` may release a provably dead or orphaned reservation. A

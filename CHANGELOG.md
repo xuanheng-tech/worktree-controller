@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.32.12
+
+- Add `repository_lock_admission_version` 1. Cooperating readers and writers enter through
+  the existing metadata directory before taking `repo.lock`; an admitted writer prevents
+  later readers from continually bypassing it. Nested shared reads in the same thread remain
+  safe. Keep `repo.lock` as the metadata mutation authority and retain CLI 61 / storage 5.
+- Keep typed-cleanup history readable even with a queued writer. Mark active cleanup using
+  a flock on the existing cleanup-actions directory only after its shared repository lock is
+  held. Kernel locks release on process exit; interrupted operations retain their existing
+  journal recovery requirements.
+  Older runtimes retain exclusion but do not participate in the new admission ordering or marker.
+- During one held flock, reuse only the unchanged allocation scope of unrelated completion
+  documents. Recheck FD-bound inode/ancestor identities, including ctime, and decode changed
+  files again. Relevant receipts, byte hashes, action chains and preservation trees are always
+  fully verified. Retain no receipt verdict or scope mapping after the flock ends.
+- This prevents a reproduced reader-bypass pattern and reduces repeated unrelated receipt
+  decoding; it does not promise strict FIFO, fixed wait times or faster payload verification.
+
 ## 1.32.11
 
 - Recover an already removed, RELEASED-recorded feature/audit release when its own retained

@@ -14,12 +14,42 @@ from .cleanup_evidence import read_document
 from .disposable import _delete_fd_tree, _fd_inventory, _unlink_leaf
 from .git_backend import head_paths, path_is_ignored, tracked_paths
 from .models import ControllerError, MetadataRecord
+from .store import MetadataStore
 
 CONTRACT = "legacy-preserved-state-cleanup/v1"
 
 
 def _blocked(message: str) -> ControllerError:
     return ControllerError("PRESERVATION_COVERAGE_INVALID", message)
+
+
+def _completion_for_allocation(
+    store: MetadataStore, path: Path, allocation: str,
+) -> tuple[dict[str, Any], str] | None:
+    """Reuse only unrelated scope, never a receipt or a validation verdict.
+
+    Cleanup rechecks its plan between actions. Large unrelated completions need
+    not be decoded on each check while the same repository flock is held. Pin
+    and recheck their complete inode identity even on a negative scope hit;
+    relevant bytes and every preservation generation still receive full checks.
+    """
+    with p._absolute_directory(path.parent) as chain:
+        directory = chain[-1]
+        identity = p._identity(os.stat(path.name, dir_fd=directory.fd, follow_symlinks=False))
+        scopes = store._completion_scopes
+        previous = None if scopes is None else scopes.get(path)
+        if previous is not None and previous[0] == tuple(identity) and previous[1] != allocation:
+            with p._regular_fd(directory.fd, path.name, identity):
+                return None
+        receipt, raw_sha = read_document(directory, path.name)
+        if scopes is not None:
+            scope = receipt.get("plan", {}).get("allocation_id")
+            # Allocation IDs are canonical UUIDs. Unknown larger/nonstring values
+            # cannot match one; do not retain arbitrary payloads in this small map.
+            scopes[path] = (
+                tuple(identity), scope if isinstance(scope, str) and len(scope) == 36 else None
+            )
+        return receipt, raw_sha
 
 
 def coverage(
@@ -615,8 +645,10 @@ def cleanup_receipts(
                     if _preservation_source_relative(plan, item.path) in original_completed
                 )
         for path in sorted(store.completion_receipts_dir.glob("*.json")):
-            with p._absolute_directory(path.parent) as chain:
-                receipt, raw_sha = read_document(chain[-1], path.name)
+            completion_entry = _completion_for_allocation(store, path, record.allocation_id)
+            if completion_entry is None:
+                continue
+            receipt, raw_sha = completion_entry
             plan = receipt.get("plan", {})
             if plan.get("allocation_id") != record.allocation_id:
                 continue

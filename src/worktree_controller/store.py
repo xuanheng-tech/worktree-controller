@@ -9,6 +9,7 @@ import json
 import os
 import stat
 import tempfile
+import threading
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
@@ -118,6 +119,11 @@ _HISTORY_CACHE: dict[
 ] | None = None
 # CLI decoding retains its byte-reader error contract even without reuse.
 _BYTE_READS = False
+# A nested read in the same thread is already admitted. Making it queue behind
+# a writer that is waiting for its outer read would deadlock that writer.
+_SHARED_LOCKS: dict[tuple[int, int, int, int], int] = {}
+_CompletionScopes = dict[Path, tuple[tuple[int, ...], str | None]]
+_LOCK_SCOPES: dict[tuple[int, int, int, int], tuple[int, _CompletionScopes]] = {}
 
 
 @contextmanager
@@ -246,10 +252,73 @@ class MetadataStore:
         self.lock_file = self.root / "repo.lock"
         self._flock_depth = 0
 
+    def _cleanup_active(self) -> bool:
+        """Only the active cleanup's directory flock admits bypassing the entry gate."""
+        try:
+            descriptor = os.open(
+                self.cleanup_actions_dir,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+        except FileNotFoundError:
+            return False
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(descriptor)
+
+    @contextmanager
+    def _entry_gate(self, key: tuple[int, int, int, int], *, exclusive: bool) -> Iterator[None]:
+        """Serialize entry, retaining repo.lock as the sole metadata mutation arbiter.
+
+        A writer keeps this gate while waiting for existing readers. Typed cleanup
+        has a distinct active marker: compatible history readers can still enter
+        during its long shared flock. Old runtimes keep their existing exclusion;
+        they do not participate in this new reader-admission ordering.
+        """
+        if not exclusive and _SHARED_LOCKS.get(key):
+            yield
+            return
+        descriptor = os.open(
+            self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+        held = False
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if not exclusive and self._cleanup_active():
+                    yield
+                    return
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            held = True
+            yield
+        finally:
+            try:
+                if held:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
     @property
     def flock_held(self) -> bool:
         """True only while this process actually holds the repository flock."""
         return self._flock_depth > 0
+
+    @property
+    def _completion_scopes(self) -> _CompletionScopes | None:
+        """A fresh Store may share only this thread's actually held inode view."""
+        try:
+            opened = os.stat(self.lock_file, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        key = (os.getpid(), threading.get_ident(), opened.st_dev, opened.st_ino)
+        view = _LOCK_SCOPES.get(key)
+        return None if view is None else view[1]
 
     @contextmanager
     def lock(self, *, exclusive: bool, create: bool = False) -> Iterator[None]:
@@ -327,18 +396,36 @@ class MetadataStore:
         if descriptor is None:
             yield
             return
+        opened = os.fstat(descriptor)
+        key = (os.getpid(), threading.get_ident(), opened.st_dev, opened.st_ino)
         held = False
         try:
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+                with self._entry_gate(key, exclusive=exclusive):
+                    fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
             except OSError as exc:
                 raise access_error(exc) from exc
             held = True
+            if not exclusive:
+                _SHARED_LOCKS[key] = _SHARED_LOCKS.get(key, 0) + 1
+            depth, scopes = _LOCK_SCOPES.get(key, (0, {}))
+            _LOCK_SCOPES[key] = (depth + 1, scopes)
             self._flock_depth += 1
             try:
                 yield
             finally:
                 self._flock_depth -= 1
+                depth, scopes = _LOCK_SCOPES[key]
+                if depth == 1:
+                    scopes.clear()
+                    del _LOCK_SCOPES[key]
+                else:
+                    _LOCK_SCOPES[key] = (depth - 1, scopes)
+                if not exclusive:
+                    if _SHARED_LOCKS[key] == 1:
+                        del _SHARED_LOCKS[key]
+                    else:
+                        _SHARED_LOCKS[key] -= 1
         finally:
             try:
                 if held:
@@ -406,14 +493,20 @@ class MetadataStore:
         no lock conversion or unlocked action boundary.
         """
         descriptor = None
+        active = None
         try:
             # Require the real mutation arbiter before initializing the existing
             # journal directory. Never bootstrap a missing repository lock here.
             try:
                 with self.lock(exclusive=True):
                     self.transactions_dir.mkdir(mode=0o700, exist_ok=True)
+                    self.cleanup_actions_dir.mkdir(mode=0o700, exist_ok=True)
                     descriptor = os.open(
                         self.transactions_dir,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    )
+                    active = os.open(
+                        self.cleanup_actions_dir,
                         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
                     )
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
@@ -437,8 +530,16 @@ class MetadataStore:
                     raise ControllerError(
                         "RESOURCE_CLEANUP_LOCK_UNAVAILABLE", "cleanup journal directory changed"
                     )
-                yield
+                # Set the marker only after the cleanup actually holds its shared
+                # repo.lock; a cleanup waiting to enter grants no reader bypass.
+                fcntl.flock(active, fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(active, fcntl.LOCK_UN)
         finally:
+            if active is not None:
+                os.close(active)
             if descriptor is not None:
                 os.close(descriptor)
 

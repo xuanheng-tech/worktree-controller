@@ -20,6 +20,12 @@ the shared repository lock, then retain it through semantic, transaction and ret
 The regression uses a real guarded release and verifies the retained commit and branch; a truly
 missing commit still refuses through both the API and CLI.
 
+The 1.32.12 patch adds cooperating reader/writer entry ordering and an active-cleanup marker
+on existing directories, while retaining CLI 61 / storage 5. Repeated cleanup checks reuse only
+unchanged unrelated receipt scopes inside one flock. Late-reader bypass and repeated decoding
+are independently reproduced; long-held checks, mixed old runtimes and exact site latency
+remain separate observations, not a claim that every historical delay has been explained.
+
 The original intermittent commit-resolution report did not retain enough per-command evidence
 to establish its exact cause. The isolated concurrency defect is reproducible; that does not
 prove the historical report had the same cause. Site-specific owner actions remain separate

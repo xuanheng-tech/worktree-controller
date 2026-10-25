@@ -1039,6 +1039,7 @@ def _main(argv: list[str] | None) -> int:
                 "canonical_transition_retirement_version": 1,
                 "closed_lifecycle_query_version": 1,
                 "source_release_summary_version": 1,
+                "repository_lock_admission_version": 1,
                 "tracked_source_progress_recovery_version": 1,
                 "published_checkout_recovery_version": 1,
                 "published_handoff_resource_registration_version": 1,

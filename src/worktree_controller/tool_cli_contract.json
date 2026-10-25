@@ -1071,7 +1071,7 @@
   "session_launcher_entrypoint": "worktree-session",
   "session_entrypoint": "worktree-session-end",
   "tool_name": "worktree-controller",
-  "tool_version": "1.32.11",
+  "tool_version": "1.32.12",
   "delivered_closeout_version": 1,
   "retained_archive_version": 1,
   "retention_convergence_version": 2,
@@ -1458,6 +1458,7 @@
     "storage_layout_version": 4
   },
   "source_release_summary_version": 1,
+  "repository_lock_admission_version": 1,
   "source_release_summary_contract": {
     "version": 1,
     "field": "source_release_trigger.outcomes",
