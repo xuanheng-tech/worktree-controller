@@ -7820,6 +7820,7 @@ def _release_transaction(
     *,
     target_path: str,
     allocation_id: str | None = None,
+    removed_release_recovery: bool = False,
 ) -> dict[str, Any] | None:
     if not store.transactions_dir.exists():
         return None
@@ -7836,6 +7837,14 @@ def _release_transaction(
         and transaction.get("target_path") == target_path
         and (allocation_id is None or transaction.get("allocation_id") == allocation_id)
     ]
+    if removed_release_recovery and len(matches) == 1 and len(transactions) == 2:
+        from .transaction_scope import acquire_precedes_removed_release
+
+        other, = (row for row in transactions if row is not matches[0])
+        if other.get("command") == "acquire" and acquire_precedes_removed_release(
+            store, other["transaction_id"], matches[0]
+        ):
+            transactions = matches
     if len(matches) > 1 or len(matches) != len(transactions):
         raise ControllerError(
             "INTERRUPTED_TRANSACTION", "another controller transaction requires recovery"
@@ -8561,7 +8570,9 @@ def _recover_or_replay_removed_release(
             raise ControllerError(
                 "BLOCK_DRIFT", "release target remains registered but is unavailable"
             )
-        transaction = _release_transaction(store, target_path=target_path)
+        transaction = _release_transaction(
+            store, target_path=target_path, removed_release_recovery=not dry_run,
+        )
         if transaction is None:
             matches = [
                 receipt

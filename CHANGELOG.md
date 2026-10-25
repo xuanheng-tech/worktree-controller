@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.32.11
+
+- Recover an already removed, RELEASED-recorded feature/audit release when its own retained
+  METADATA_WRITTEN acquire journal would otherwise require the not-yet-written release receipt.
+  Require the original release plan, exact allocation/path/branch/base lineage, acquired and
+  released history, +1 record CAS, retained HEAD and absent checkout/binding/writer lease.
+  Preserve the acquire journal; only the completed immutable release receipt makes it terminal.
+- Keep other transactions, ambiguous predecessors, request/owner/intent drift, changed history,
+  retained refs and incomplete release phases blocked. Keep the original guarded release CLI,
+  CLI contract 61, capability versions and storage layout 5.
+
 ## 1.32.10
 
 - Keep closed lifecycle history available during typed resource cleanup. Hold the existing

@@ -957,6 +957,14 @@ keeps resolving after the move.
 
 ## Unified release plan and disposable resources
 
+From 1.32.11, removed-release replay also admits its exact retained acquire predecessor
+only for a feature/audit `RELEASED_RECORDED` release. Original plan/journal identity, acquired
+and released history, +1 record CAS, retained HEAD, absence of checkout/binding/writer lease,
+and all existing request/resource recovery guards remain mandatory. No journal is classified
+terminal or changed by that admission; complete immutable release evidence is still required.
+Other transactions and unsupported partial phases remain refused. This changes no command,
+option, capability, CLI contract or storage format.
+
 From 1.32.10, typed cleanup serializes on the existing transactions-directory inode while
 holding `repo.lock` shared. This excludes normal metadata writers and older exclusive cleanup
 implementations for the entire operation, while closed history readers retain their existing

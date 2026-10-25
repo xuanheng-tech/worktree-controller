@@ -83,7 +83,7 @@ This selects 20 ordinary process cases in addition to the 45 companion-tool case
 
 Two historical restoration cases additionally require `--rollout-historical-controller`:
 the current and historical runtimes must have distinct CLI contracts and advertise
-`terminal_preserved_cleanup_version` 1 and 0 respectively. For the 1.32.10 runtime,
+`terminal_preserved_cleanup_version` 1 and 0 respectively. For the 1.32.11 runtime,
 1.32.7 is an ordinary predecessor and 1.30.4 is a suitable historical predecessor. All selected
 runtimes must be staged from the same declared Git source; stage them normally and never edit
 their receipts. A mismatched explicitly selected cohort exits 2 with a prerequisite explanation

@@ -290,6 +290,24 @@ belongs to the delegated reconciler. Dirty or active work stays with its owner; 
 and immutable receipts are not disposable checkout payloads. For an interrupted release, use
 `release-recovery-inspect` and replay its exact published recovery arguments.
 
+From 1.32.11, an already removed feature/audit checkout at `RELEASED_RECORDED` may finish
+its original receipt with its own retained `METADATA_WRITTEN` acquire journal present. The
+original plan and both journal identities must agree with the acquired/released history,
+exact +1 record CAS, retained HEAD and absent checkout, binding and writer lease. Other
+transactions, changed requests and earlier incomplete phases remain blocked. The acquire
+journal is preserved and stays nonterminal until the immutable release receipt is complete.
+This recovery completes evidence only; it does not grant owner authority or business acceptance.
+
+If that exact pending release blocks a normal runtime rollout, first deliver and verify the
+repair through source review, tests and normal publication, then stage the exact published
+release through `controller-activate stage`. Its versioned `bin/worktree-controller` is the
+ordinary public CLI: an independently authorized operator may invoke only the original
+`release-recovery-inspect` / returned `release` request with that pinned installed binary.
+Check the public version, staged source manifest and published commit first. No candidate
+activation, active-pin edit, journal edit or rollout exception is involved. Require complete
+exact receipt history, then rerun normal activation with the full governed repository set.
+
+
 `reconcile release-plans` keeps plans referenced by durable release receipts. They remain part
 of closed lifecycle and branch-retirement evidence after the checkout is gone. It retires only
 unreferenced leftover plans for already released allocations with durable release evidence.

@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from tests.test_auto_release import POLICY_MANUAL, _publish_source
 from tests.test_cleanup_recovery import metadata_bytes
 from tests.test_controlled import (
+    _acquire_arguments,
     _cli,
     _configure_remote,
     _prepare_teardown_target,
@@ -226,7 +228,18 @@ def test_journal_symlink_is_refused_without_following_it(interrupted):
     assert path.is_symlink() and preserved.read_bytes() == before[path.relative_to(store.root)]
 
 
-def test_release_intent_identity_is_preserved_in_public_cli_replay():
+@pytest.mark.parametrize("retain_acquire", [False, True])
+def test_release_intent_identity_is_preserved_in_public_cli_replay(monkeypatch, retain_acquire):
+    remove_transaction = MetadataStore.remove_transaction
+
+    def finish(store, transaction):
+        journal = json.loads((store.transactions_dir / f"{transaction}.json").read_text())
+        if (retain_acquire and journal.get("command") == "acquire"
+                and journal.get("target_path", "").endswith("/intent-source")):
+            return
+        remove_transaction(store, transaction)
+
+    monkeypatch.setattr(MetadataStore, "remove_transaction", finish)
     with GitRepository(linked=0, policy_text=POLICY_MANUAL) as repository:
         adopt_canonical(repository)
         _configure_remote(repository)
@@ -243,7 +256,10 @@ def test_release_intent_identity_is_preserved_in_public_cli_replay():
                      "--expected-record-version", str(record.record_version), "--intent-id", intent, "--json"]
         crashed = _cli(arguments, crash_at="release_metadata_written")
         assert crashed.returncode == 97, crashed.stdout + crashed.stderr
-        path, = store.transactions_dir.glob("*.json")
+        path, = (p for p in store.transactions_dir.glob("*.json")
+                 if json.loads(p.read_text()).get("command") == "release")
+        acquire_bytes = {p: p.read_bytes() for p in store.transactions_dir.glob("*.json") if p != path}
+        assert len(acquire_bytes) == int(retain_acquire)
         before = metadata_bytes(store)
         inspected = inspect(repository, path.stem)
         assert inspected.returncode == 0, inspected.stdout + inspected.stderr
@@ -256,6 +272,12 @@ def test_release_intent_identity_is_preserved_in_public_cli_replay():
         assert recovered.returncode == 0, recovered.stdout + recovered.stderr
         assert json.loads(recovered.stdout)["decision"]["release_receipt_id"] == path.stem
         assert not path.exists() and not target.exists()
+
+        assert all(p.read_bytes() == raw for p, raw in acquire_bytes.items())
+        history = _cli(["lifecycle-history", "--repo", str(repository.repo),
+                        "--release-receipt-id", path.stem, "--json"])
+        assert history.returncode == 0, history.stdout + history.stderr
+        assert json.loads(history.stdout)["decision"]["closed_releases"][0]["proof_status"] == "COMPLETE"
 
 
 @pytest.mark.parametrize("crash_at", [
@@ -298,3 +320,137 @@ def test_publication_cli_parameter_uses_existing_live_release_guards(leased):
     assert released.returncode == 0, released.stdout + released.stderr
     assert json.loads(released.stdout)["decision"]["code"] == "RELEASED"
     assert not target.exists()
+
+
+@pytest.fixture
+def release_with_retained_acquire():
+    with GitRepository(linked=0) as repository:
+        adopt_canonical(repository)
+        crashed = _cli(_acquire_arguments(repository, task="new-task", authority="new-authority"),
+                       crash_at="acquire_metadata_written")
+        assert crashed.returncode == 97
+        target = repository.root / "new-task"
+        store = MetadataStore(inventory(repository.repo).common_dir)
+        acquire_path, = store.transactions_dir.glob("*.json")
+        git(target, "commit", "--allow-empty", "-m", "completed feature")
+        handoff_one(repository, target)
+        crashed = _cli(_release_arguments(repository, target), crash_at="release_metadata_written")
+        assert crashed.returncode == 97
+        release_path, = (p for p in store.transactions_dir.glob("*.json") if p != acquire_path)
+        assert not target.exists()
+        yield repository, target, store, acquire_path, release_path
+
+
+def test_removed_release_replays_with_its_original_acquire_journal(release_with_retained_acquire):
+    repository, target, store, acquire_path, release_path = release_with_retained_acquire
+    acquire_bytes = acquire_path.read_bytes()
+    original = json.loads(inspect(repository, release_path.stem).stdout)["decision"]
+    retained = git(repository.repo, "rev-parse", "refs/heads/feature/new-task")
+    from worktree_controller.transaction_scope import pending
+    with store.lock(exclusive=False):
+        assert len(pending(store)) == 2
+    before = metadata_bytes(store)
+    dry_run = _cli([*original["release_argv"], "--dry-run"])
+    assert dry_run.returncode == 2
+    assert json.loads(dry_run.stdout)["errors"][0]["code"] == "INTERRUPTED_TRANSACTION"
+    assert metadata_bytes(store) == before
+    result = _cli(original["release_argv"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout)["decision"]["code"] == "RELEASE_RECOVERED"
+    assert not target.exists() and not release_path.exists()
+    assert acquire_path.read_bytes() == acquire_bytes
+    assert git(repository.repo, "rev-parse", "refs/heads/feature/new-task") == retained
+    receipt = store.load().release_receipts[release_path.stem]
+    assert receipt.plan_id == original["release_plan_id"]
+    history = _cli(["lifecycle-history", "--repo", str(repository.repo),
+                    "--release-receipt-id", receipt.receipt_id, "--json"])
+    assert history.returncode == 0, history.stdout + history.stderr
+    assert json.loads(history.stdout)["decision"]["closed_releases"][0]["proof_status"] == "COMPLETE"
+    with store.lock(exclusive=False):
+        assert pending(store) == []
+    before = metadata_bytes(store)
+    repeated = _cli(original["release_argv"])
+    assert repeated.returncode == 0, repeated.stdout + repeated.stderr
+    assert json.loads(repeated.stdout)["decision"]["code"] == "ALREADY_RELEASED"
+    assert metadata_bytes(store) == before
+
+
+@pytest.mark.parametrize("mutation", [
+    "acquire_allocation", "acquire_branch", "acquire_base", "acquire_phase",
+    "record_cas", "record_owner", "record_authority", "record_base", "missing_history",
+    "acquired_event", "released_event", "release_phase", "release_plan_id", "overlapping_transaction",
+    "request_cas", "request_owner", "request_intent", "retained_ref",
+])
+def test_acquire_exception_refuses_drift_without_writes(release_with_retained_acquire, mutation):
+    repository, target, store, acquire_path, release_path = release_with_retained_acquire
+    query = inspect(repository, release_path.stem)
+    assert query.returncode == 0, query.stdout + query.stderr
+    arguments = json.loads(query.stdout)["decision"]["release_argv"]
+    acquire = json.loads(acquire_path.read_text())
+    release = json.loads(release_path.read_text())
+    record_path = store.records_dir / f"{release['allocation_id']}.json"
+    record = json.loads(record_path.read_text())
+    if mutation.startswith("acquire_"):
+        field, value = {
+            "acquire_allocation": ("allocation_id", str(uuid.uuid4())),
+            "acquire_branch": ("branch", "feature/other"),
+            "acquire_base": ("expected_head", "0" * 40),
+            "acquire_phase": ("phase", "WORKTREE_ADDED"),
+        }[mutation]
+        acquire[field] = value
+        acquire_path.write_text(json.dumps(acquire))
+    elif mutation.startswith("record_"):
+        field, value = {
+            "record_cas": ("record_version", 4), "record_owner": ("owner", "other-owner"),
+            "record_authority": ("authority_key", "other-authority"),
+            "record_base": ("base_commit", "0" * 40),
+        }[mutation]
+        record[field] = value
+        record_path.write_text(json.dumps(record))
+    elif mutation in {"acquired_event", "released_event", "missing_history"}:
+        if mutation == "missing_history":
+            record["history"] = []
+        else:
+            record["history"][0 if mutation == "acquired_event" else -1]["event"] = "REVIEWED"
+        record_path.write_text(json.dumps(record))
+    elif mutation == "release_phase":
+        release["phase"] = "WORKTREE_REMOVED"
+        release_path.write_text(json.dumps(release))
+    elif mutation == "release_plan_id":
+        release["release_plan_id"] = ["not-a-plan-id"]
+        release_path.write_text(json.dumps(release))
+    elif mutation == "overlapping_transaction":
+        acquire["transaction_id"] = str(uuid.uuid4())
+        (store.transactions_dir / f"{acquire['transaction_id']}.json").write_text(json.dumps(acquire))
+    elif mutation in {"request_cas", "request_owner"}:
+        option, value = ("--expected-record-version", "3") if mutation == "request_cas" else (
+            "--owner-release", "other-owner",
+        )
+        arguments[arguments.index(option) + 1] = value
+    elif mutation == "request_intent":
+        arguments.extend(("--intent-id", str(uuid.uuid4())))
+    elif mutation == "retained_ref":
+        git(repository.repo, "update-ref", "refs/heads/feature/new-task", acquire["expected_head"])
+    before, refs = metadata_bytes(store), git(repository.repo, "show-ref")
+    result = _cli(arguments)
+    assert result.returncode == 2, result.stdout + result.stderr
+    code = json.loads(result.stdout)["errors"][0]["code"]
+    expected = "RELEASE_RECOVERY_MISMATCH" if mutation.startswith("request_") else "INTERRUPTED_TRANSACTION"
+    assert code == expected
+    assert metadata_bytes(store) == before
+    assert git(repository.repo, "show-ref") == refs
+    assert not target.exists()
+
+
+def test_removed_release_concurrent_replay_creates_one_receipt(release_with_retained_acquire):
+    repository, _, store, acquire_path, release_path = release_with_retained_acquire
+    arguments = json.loads(inspect(repository, release_path.stem).stdout)["decision"]["release_argv"]
+    acquire_bytes = acquire_path.read_bytes()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(_cli, [arguments, arguments]))
+    assert [r.returncode for r in results] == [0, 0], [(r.stdout, r.stderr) for r in results]
+    assert {json.loads(r.stdout)["decision"]["code"] for r in results} == {
+        "RELEASE_RECOVERED", "ALREADY_RELEASED",
+    }
+    assert list(store.load().release_receipts) == [release_path.stem]
+    assert acquire_path.read_bytes() == acquire_bytes

@@ -453,6 +453,64 @@ def _acquire_task_progress(store: MetadataStore, journal: dict, head: str) -> st
         return None
 
 
+def acquire_precedes_removed_release(store: MetadataStore, transaction: str, release: dict) -> bool:
+    """Permit receipt recovery, never terminal classification, for this exact predecessor.
+
+    A retained acquire cannot become terminal until the release receipt exists. Only a
+    release already recorded at its exact +1 CAS may finish that receipt in its presence.
+    Both journals stay authoritative; ordinary mutations and rollout still see them pending.
+    """
+    _require_flock(store)
+    acquire = _journal_preconditions(
+        store, transaction, "acquire", frozenset({"METADATA_WRITTEN"})
+    )
+    if acquire is None or release.get("phase") != "RELEASED_RECORDED":
+        return False
+    identity = ("repository_id", "allocation_id", "target_path", "branch")
+    if any(acquire.get(key) != release.get(key) for key in identity):
+        return False
+    plan_id = release.get("release_plan_id")
+    if not isinstance(plan_id, str):
+        return False
+    snapshot = store._load_unlocked()
+    plan = snapshot.release_plans.get(plan_id)
+    record = snapshot.records.get(acquire["allocation_id"])
+    if plan is None or record is None or not record.history:
+        return False
+    if any(release.get(key) != getattr(plan, key) for key in (
+        *identity, "expected_head", "expected_record_version",
+    )):
+        return False
+    first, last = record.history[0], record.history[-1]
+    if (
+        record.role not in {"feature", "audit"}
+        or record.role != plan.role
+        or record.authority_key != plan.authority_key
+        or record.base_commit != acquire["expected_head"]
+        or record.task_commit != plan.expected_head
+        or record.lifecycle != "RELEASED"
+        or record.owner != "unassigned"
+        or record.record_version != plan.expected_record_version + 1
+        or first.get("event") != "ACQUIRED"
+        or first.get("from") is not None
+        or first.get("to") != "ACTIVE"
+        or first.get("at") != record.created_at
+        or last.get("event") not in {"RELEASED", "RELEASE_RECOVERED"}
+        or last.get("from") != plan.lifecycle
+        or last.get("to") != "RELEASED"
+        or _target_state(Path(plan.target_path)) != "absent"
+        or _worktree_registration(store.root.parents[1], Path(plan.target_path))[2] != "absent"
+        or _allocation_bound_anywhere(store, plan.allocation_id) != "unbound"
+        or (store.writer_leases_dir / f"{plan.allocation_id}.json").exists()
+        or _branch_ref_state(store.root.parents[1], f"refs/heads/{plan.branch}")
+        != (plan.expected_head, "resolved")
+    ):
+        return False
+    from .git_backend import is_ancestor
+
+    return is_ancestor(store.root.parents[1], acquire["expected_head"], plan.expected_head)
+
+
 def acquire_evidence_terminal(store: MetadataStore, transaction: str) -> str | None:
     """Close an interrupted acquire only on positive current-state proof.
 
