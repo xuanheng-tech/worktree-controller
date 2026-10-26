@@ -9,7 +9,7 @@ from typing import Any
 from . import hardlinks
 from . import preservation as p
 from .models import ControllerError
-from .store import now_iso
+from .store import MetadataStore, now_iso
 
 MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
 
@@ -31,6 +31,35 @@ def read_document(directory: p._Directory, name: str) -> tuple[dict[str, Any], s
     if not isinstance(value, dict):
         raise ControllerError("PRESERVATION_COVERAGE_INVALID", "invalid preservation document")
     return value, hashlib.sha256(raw).hexdigest()
+
+
+def completion_for_allocation(
+    store: MetadataStore, path: Path, allocation: str,
+) -> tuple[dict[str, Any], str] | None:
+    """Reuse only unrelated scope, never a receipt or a validation verdict.
+
+    Cleanup rechecks its plan between actions. Large unrelated completions need
+    not be decoded on each check while the same repository flock is held. Pin
+    and recheck their complete inode identity even on a negative scope hit;
+    relevant bytes and every preservation generation still receive full checks.
+    """
+    with p._absolute_directory(path.parent) as chain:
+        directory = chain[-1]
+        identity = p._identity(os.stat(path.name, dir_fd=directory.fd, follow_symlinks=False))
+        scopes = store._completion_scopes
+        previous = None if scopes is None else scopes.get(path)
+        if previous is not None and previous[0] == tuple(identity) and previous[1] != allocation:
+            with p._regular_fd(directory.fd, path.name, identity):
+                return None
+        receipt, raw_sha = read_document(directory, path.name)
+        if scopes is not None:
+            scope = receipt.get("plan", {}).get("allocation_id")
+            # Allocation IDs are canonical UUIDs. Unknown larger/nonstring values
+            # cannot match one; do not retain arbitrary payloads in this small map.
+            scopes[path] = (
+                tuple(identity), scope if isinstance(scope, str) and len(scope) == 36 else None
+            )
+        return receipt, raw_sha
 
 
 def write(directory: Path, name: str, value: dict[str, Any]) -> dict[str, str]:

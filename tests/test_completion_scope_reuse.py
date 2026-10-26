@@ -8,6 +8,8 @@ import pytest
 
 from tests.test_controlled import adopt_canonical
 from tests.test_shadow import GitRepository
+from worktree_controller import cleanup_evidence
+from worktree_controller import delivered_closeout as dc
 from worktree_controller import preserved_cleanup as pc
 from worktree_controller.git_backend import inventory
 from worktree_controller.models import ControllerError
@@ -39,6 +41,7 @@ def completions(monkeypatch):
             return original(directory, name)
 
         monkeypatch.setattr(pc, "read_document", counted)
+        monkeypatch.setattr(cleanup_evidence, "read_document", counted)
 
         def observe(reader=store):
             return pc.cleanup_receipts(reader, item, record, snapshot.repository_id)
@@ -110,3 +113,63 @@ def test_same_thread_store_instances_reuse_the_actual_held_flock(completions, ex
     # The second Store never owned that flock and cannot keep its view afterward.
     assert observe(nested) == observe(nested) == []
     assert len(reads) == 3 * len(paths)
+
+
+def test_no_change_and_preserved_cleanup_share_only_unrelated_scope(completions):
+    store, paths, reads, observe, record = completions
+    nested = MetadataStore(store.root.parents[1])
+    with store.lock(exclusive=False):
+        assert observe() == []
+        assert not dc._has_pre_completion_cleanup(store, record)
+        assert not dc._has_pre_completion_cleanup(nested, record)
+        assert len(reads) == len(paths)
+    with store.lock(exclusive=False):
+        assert not dc._has_pre_completion_cleanup(store, record)
+        assert len(reads) == 2 * len(paths)
+    assert not dc._has_pre_completion_cleanup(nested, record)
+    assert len(reads) == 3 * len(paths)
+
+
+@pytest.mark.parametrize("replacement", ["atomic", "in-place-restored-mtime"])
+def test_no_change_detects_new_pre_completion_cleanup(completions, replacement):
+    store, paths, reads, _, record = completions
+    path = paths[0]
+    with store.lock(exclusive=False):
+        assert not dc._has_pre_completion_cleanup(store, record)
+        value = json.loads(path.read_text())
+        value["plan"]["allocation_id"] = record.allocation_id
+        if replacement == "atomic":
+            store._atomic_json(path, value)
+        else:
+            metadata = path.stat()
+            path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+            os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+            assert path.stat().st_size == metadata.st_size
+        assert dc._has_pre_completion_cleanup(store, record)
+        assert reads.count(path.name) == 2
+
+
+def test_no_change_relevant_payload_is_rechecked_on_each_lookup(completions):
+    store, paths, reads, _, record = completions
+    path = paths[0]
+    value = json.loads(path.read_text())
+    value["plan"].update(allocation_id=record.allocation_id, terminal_evidence={"kind": "no_change"})
+    store._atomic_json(path, value)
+    with store.lock(exclusive=False):
+        assert not dc._has_pre_completion_cleanup(store, record)
+        assert not dc._has_pre_completion_cleanup(store, record)
+        assert reads.count(path.name) == 2
+
+
+@pytest.mark.parametrize("fault", ["symlink", "malformed"])
+def test_no_change_rejects_changed_unrelated_payload(completions, fault):
+    store, paths, _, _, record = completions
+    with store.lock(exclusive=False):
+        assert not dc._has_pre_completion_cleanup(store, record)
+        if fault == "symlink":
+            paths[0].unlink()
+            paths[0].symlink_to(paths[1])
+        else:
+            paths[0].write_text("not JSON")
+        with pytest.raises((ControllerError, ValueError)):
+            dc._has_pre_completion_cleanup(store, record)

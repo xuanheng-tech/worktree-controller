@@ -41,6 +41,24 @@ exits. An isolated six-check fixture with sixteen 1 MiB unrelated receipts reduc
 reads from 96 to 16 with equal results; this does not establish a production latency bound or
 explain every historical long-held lock.
 
+## No-change preservation history reads (1.32.13)
+
+Terminal no-change checks now use the same lock-scoped allocation filter as preserved
+cleanup. This includes the check for cleanup completed before the original no-change
+transition: it previously decoded unrelated completion documents again in each nested
+verification. Relevant documents are still read and checked on every lookup. Only unrelated
+allocation scopes with unchanged file identities may be reused, never a receipt verdict;
+the map expires at the end of the outermost flock. A new authority lock reads those bytes again.
+
+An isolated preservation plan for five files totaling 27,479 bytes, with eight unrelated
+2 MiB completion documents, reduced unrelated full-document reads from 64 to 16
+(approximately 128 MiB to 32 MiB decoded). Both authority observations, the source scan,
+original completion proof and existing refusal conditions remain mandatory. The fixture
+also included 16 MiB of ignored files outside the selected source. This addresses repeated
+history decoding; the first scan, preservation-tree verification, Git observation and
+retirement authority scans retain their existing costs. It establishes no site latency
+bound and does not identify the cause of a historical timeout.
+
 ## Optional integrations and dependencies
 
 The core control plane has a single runtime dependency (`websockets>=15,<16`) and works standalone

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.32.13
+
+- Reuse the existing lock-scoped unrelated completion allocation filter in terminal
+  no-change cleanup checks. Preserve full relevant-document validation and re-read changed
+  files, including in-place changes with restored mtime. Retain no receipt verdict or
+  cross-lock cache; keep owner, HEAD, record CAS, lifecycle and preservation gates unchanged.
+- Cover the public small-source preservation plan and cross-consumer scope reuse. An
+  isolated eight-receipt fixture reduces unrelated document reads from 64 to 16 while
+  retaining both authority observations. First-read, tree verification and retirement
+  costs remain separate. Keep CLI contract 61, capability versions and storage layout 5.
+
 ## 1.32.12
 
 - Add `repository_lock_admission_version` 1. Cooperating readers and writers enter through

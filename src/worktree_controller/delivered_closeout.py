@@ -137,10 +137,13 @@ def _legacy_no_change(store: MetadataStore, item: WorktreeGitState, record: Meta
 
 
 def _has_pre_completion_cleanup(store: MetadataStore, record: MetadataRecord) -> bool:
-    from .cleanup_evidence import read
+    from .cleanup_evidence import completion_for_allocation
 
     for path in sorted(store.completion_receipts_dir.glob("*.json")):
-        value, _ = read(path)
+        entry = completion_for_allocation(store, path, record.allocation_id)
+        if entry is None:
+            continue
+        value, _ = entry
         plan = value.get("plan", {})
         if plan.get("allocation_id") == record.allocation_id and plan.get("terminal_evidence") is None:
             return True

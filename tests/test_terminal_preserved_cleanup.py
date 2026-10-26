@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -133,3 +134,46 @@ def test_terminal_proof_change_after_cleanup_blocks_release(terminal):
     with pytest.raises(ControllerError):
         lifecycle.release(repository.repo, target=target, expected_record_version=record.record_version, owner_release=record.owner)
     assert target.exists()
+
+
+@pytest.mark.parametrize("terminal", ["no_change"], indirect=True)
+def test_small_terminal_preservation_does_not_redecode_unrelated_history(terminal, monkeypatch):
+    from worktree_controller import cleanup_evidence, preserved_cleanup
+
+    repository, target, store, record, proof = terminal
+    original_proof = proof.read_bytes()
+    small = target / "unknown/small"
+    small.mkdir()
+    for index, size in enumerate([5500, 5500, 5500, 5500, 5479]):
+        (small / str(index)).write_bytes(b"s" * size)
+    unrelated = set()
+    for _ in range(3):
+        path = store.completion_receipts_dir / f"{uuid4()}.json"
+        store._atomic_json(path, {
+            "contract": "legacy-preserved-state-cleanup/v1",
+            "plan": {"allocation_id": str(uuid4())}, "opaque": "x" * 65536,
+        })
+        unrelated.add(path.name)
+    reads = []
+    original = cleanup_evidence.read_document
+
+    def counted(directory, name):
+        if name in unrelated:
+            reads.append(name)
+        return original(directory, name)
+
+    monkeypatch.setattr(cleanup_evidence, "read_document", counted)
+    monkeypatch.setattr(preserved_cleanup, "read_document", counted)
+    planned = p.plan_preservation(
+        repository.repo, target, record.allocation_id, record.owner, record.record_version,
+        source_relative="unknown/small",
+    )
+    assert planned["ready"]
+    assert planned["source_tree"]["inventory"]["regular_files"] == 5
+    assert planned["source_tree"]["inventory"]["total_regular_file_bytes"] == 27479
+    # Planning takes separate authority locks before and after scanning the source.
+    # Each sees unrelated receipt bytes once, despite nested terminal checks.
+    assert len(reads) == 2 * len(unrelated)
+    assert proof.read_bytes() == original_proof
+    assert store.load().records[record.allocation_id] == record
+    assert (target / "unknown/result").read_bytes() == b"opaque synthetic state"
