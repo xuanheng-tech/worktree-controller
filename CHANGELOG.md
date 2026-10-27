@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.32.14
+
+- Refuse worktree acquisition without a governance policy before creating its
+  Controller lock, and recheck the policy under the lock as before. Existing
+  incomplete or corrupt metadata remains subject to fail-closed recovery.
+
 ## 1.32.13
 
 - Reuse the existing lock-scoped unrelated completion allocation filter in terminal

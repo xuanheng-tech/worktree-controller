@@ -1772,6 +1772,11 @@ def _acquire_once(
     target_path = (target or _default_target(repository_initial, task_key)).expanduser().absolute()
     if target_path.exists() or target_path.is_symlink():
         raise ControllerError("TARGET_EXISTS", f"target path already exists: {target_path}")
+    # Refusing an unconfigured repository must not create a governance marker.
+    # The authoritative check is repeated under the lock in
+    # _assert_allocation_allowed to catch policy changes during admission.
+    if not load_policy(repository_initial.canonical_path).present:
+        raise ControllerError("BLOCK_DRIFT", "repository policy is missing")
     store = MetadataStore(repository_initial.common_dir)
     transaction_id = str(uuid.uuid4())
     transaction_created = now_iso()

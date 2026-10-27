@@ -161,6 +161,28 @@ def test_real_nonrepo_and_malformed_ancestor_are_not_governance(tmp_path):
     }
 
 
+def test_failed_acquire_without_policy_does_not_mark_an_ordinary_repository():
+    with GitRepository(linked=0, policy=False) as repo:
+        with pytest.raises(ControllerError) as exc:
+            acquire_one(repo)
+        assert exc.value.code == "BLOCK_DRIFT"
+        assert not (repo.repo / ".git/worktree-controller").exists()
+        assert writer_session.admission(repo.repo, client_id="manual", selector=str(os.getpid())) == {
+            "admission": "NOT_APPLICABLE",
+            "code": "OUTSIDE_CONTROLLER_GOVERNANCE",
+        }
+
+
+def test_existing_lock_without_identity_remains_fail_closed():
+    with GitRepository(linked=0, policy=False) as repo:
+        lock = repo.repo / ".git/worktree-controller/v1/repo.lock"
+        lock.parent.mkdir(parents=True)
+        lock.touch()
+        decision = writer_session.admission(repo.repo, client_id="manual", selector=str(os.getpid()))
+        assert (decision["admission"], decision["code"]) == ("REFUSED", "INVALID_METADATA")
+        assert lock.exists()
+
+
 def test_real_valid_nested_repo_under_broken_ancestor(tmp_path):
     (tmp_path / ".git").write_text("gitdir: missing\n")
     path = tmp_path / "nested"
