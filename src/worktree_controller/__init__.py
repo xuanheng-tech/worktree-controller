@@ -1,3 +1,3 @@
 """Worktree lifecycle controller."""
 
-__version__ = "1.32.13"
+__version__ = "1.32.14"
