@@ -723,6 +723,17 @@ def _metadata_warnings(
 
 
 def status(repository_path: Path, *, namespace_pid: int | None = None) -> dict[str, Any]:
+    return status_observation(repository_path, namespace_pid=namespace_pid)[0]
+
+
+def status_observation(
+    repository_path: Path, *, namespace_pid: int | None = None
+) -> tuple[dict[str, Any], MetadataSnapshot]:
+    """Return status and its validated metadata for one query.
+
+    Callers must not retain this observation across requests or use it to
+    authorize a mutation, which must recheck under its own lock.
+    """
     result = envelope("status")
     repository = inventory(repository_path)
     diagnostics = diagnose_mounts(repository, namespace_pid=namespace_pid)
@@ -745,7 +756,7 @@ def status(repository_path: Path, *, namespace_pid: int | None = None) -> dict[s
         + _metadata_warnings(repository, policy, snapshot)
         + (_lock_warnings(store) if diagnosis["code"] == "HEALTHY" else [])
     )
-    return result
+    return result, snapshot
 
 
 def _resolve_target(

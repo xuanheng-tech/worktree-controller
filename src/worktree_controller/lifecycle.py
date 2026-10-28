@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .controller import _warning, envelope, plan, status
+from .controller import _warning, envelope, plan, status, status_observation
 from .disposable import CONTRACT as TYPED_RESOURCE_CONTRACT
 from .disposable import classify_resources, delete_typed_resource, resource_evidence
 from .environment import (
@@ -43,6 +43,7 @@ from .git_backend import (
     path_is_ignored,
     public_refs,
     resolve_commit,
+    resolve_repository,
     tracked_paths,
     update_branch_ref,
     validate_branch_name,
@@ -544,13 +545,11 @@ def _intent_payload(intent: IntegrationIntent) -> dict[str, Any]:
 
 
 def integration_queue(repository_path: Path) -> dict[str, Any]:
-    repository = inventory(repository_path)
-    snapshot = MetadataStore(repository.common_dir).load()
+    payload, snapshot = status_observation(repository_path)
     intents = sorted(
         snapshot.integration_intents.values(),
         key=_intent_order,
     )
-    payload = status(repository_path)
     payload["command"] = "integration-queue"
     payload["decision"] = {
         "code": "INTEGRATION_QUEUE_STATUS",
@@ -571,8 +570,8 @@ def integration_queue(repository_path: Path) -> dict[str, Any]:
 
 
 def lifecycle_events(repository_path: Path, *, consumer: str) -> dict[str, Any]:
-    repository = inventory(repository_path)
-    store = MetadataStore(repository.common_dir)
+    _requested, common_dir = resolve_repository(repository_path)
+    store = MetadataStore(common_dir)
     events = store.list_lifecycle_events(consumer)
     payload = status(repository_path)
     payload["command"] = "lifecycle-events"

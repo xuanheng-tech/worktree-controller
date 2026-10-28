@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.32.15
+
+- Observe Git worktrees once per integration-queue or lifecycle-events query. Reuse the
+  status observation and its metadata for queue decisions; keep the event outbox on its
+  separate guarded read. Preserve full untracked-file observation, diagnostics and
+  fail-closed metadata checks. Retain no observation between requests and keep CLI 61,
+  capability versions and storage layout 5 unchanged.
+
 ## 1.32.14
 
 - Refuse worktree acquisition without a governance policy before creating its
