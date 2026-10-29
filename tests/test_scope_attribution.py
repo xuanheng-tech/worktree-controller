@@ -198,7 +198,8 @@ def test_validation_runtime_contract_accepts_only_published_background_changes()
         "head_rewrite",
     ],
 )
-def test_untrusted_history_cannot_advance_attribution(corruption):
+@pytest.mark.parametrize("share_edges", [False, True])
+def test_untrusted_history_cannot_advance_attribution(corruption, share_edges):
     with GitRepository(linked=0, policy_text=POLICY_V6) as repository:
         adopt_canonical(repository)
         path, _, record = _task(repository)
@@ -208,7 +209,8 @@ def test_untrusted_history_cannot_advance_attribution(corruption):
         _commit(path, "mine.txt", "task")
         git(path, "merge", "--no-edit", publication)
         head = git(path, "rev-parse", "HEAD")
-        assert attribution_base(path, base, head, FORMAL_REF) == publication
+        edges = set() if share_edges else None
+        assert attribution_base(path, base, head, FORMAL_REF, verified_edges=edges) == publication
         common = inventory(path).common_dir
         if corruption == "rewrite":
             _publish(repository, base)
@@ -233,8 +235,39 @@ def test_untrusted_history_cannot_advance_attribution(corruption):
                 "-m",
                 "rewritten feature root",
             )
-        assert attribution_base(path, base, head, FORMAL_REF) == base
+        assert attribution_base(path, base, head, FORMAL_REF, verified_edges=edges) == base
         assert "outside.txt" in changed_paths(path, base, head)
+
+
+def test_doctor_reuses_publication_edges_only_within_one_observation(monkeypatch):
+    from worktree_controller import git_backend
+
+    with GitRepository(linked=0, policy_text=POLICY_V6) as repository:
+        adopt_canonical(repository)
+        tasks = [_task(repository, name=name) for name in ("first", "second")]
+        _publish(repository, tasks[0][2].base_commit)
+        first = _commit(repository.repo, "outside.txt", "first publication")
+        _publish(repository, first)
+        second = _commit(repository.repo, "outside.txt", "second publication")
+        _publish(repository, second)
+        for path, allocation, _ in tasks:
+            _commit(path, "mine.txt", "task")
+            git(path, "merge", "--no-edit", second)
+            _preserve(repository, path, allocation, git(path, "rev-parse", "HEAD"))
+
+        calls = []
+        original = git_backend._git
+
+        def observed(repo, *args, **kwargs):
+            if args == ("--no-replace-objects", "merge-base", "--is-ancestor", first, second):
+                calls.append(args)
+            return original(repo, *args, **kwargs)
+
+        monkeypatch.setattr(git_backend, "_git", observed)
+        for expected in (1, 2):
+            result = doctor(repository.repo)
+            assert not any(w["code"] == "PATH_SCOPE_VIOLATION" for w in result["warnings"])
+            assert len(calls) == expected
 
 
 def test_rewritten_base_and_undeclared_octopus_parent_are_not_forgiven():

@@ -1243,6 +1243,7 @@ def _semantic_warnings(
     repository: RepositoryInventory, snapshot: MetadataSnapshot, policy: WorktreePolicy
 ) -> list[dict[str, str]]:
     warnings: list[dict[str, str]] = []
+    verified_edges: set[tuple[Path, str, str]] = set()
     items_by_allocation: dict[str, tuple[WorktreeGitState, MetadataRecord]] = {}
     for item in repository.worktrees:
         record = _record_for(item, snapshot)
@@ -1260,6 +1261,7 @@ def _semantic_warnings(
                         record,
                         item.head,
                         publication_ref=publication_ref(item.path, policy),
+                        verified_edges=verified_edges,
                     )
                 )
         warnings.extend(issues)

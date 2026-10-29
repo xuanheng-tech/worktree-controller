@@ -372,7 +372,10 @@ def changed_paths(repo: Path, base: str, head: str) -> tuple[str, ...]:
     return tuple(sorted(os.fsdecode(item) for item in payload.split(b"\0") if item))
 
 
-def trusted_publication_base(repo: Path, base: str, head: str, ref: str) -> str:
+def trusted_publication_base(
+    repo: Path, base: str, head: str, ref: str, *,
+    verified_edges: set[tuple[Path, str, str]] | None = None,
+) -> str:
     """Advance only through one unmodified DAG and an observed forward-only formal ref.
 
     A retained history suffix must include the frozen task base. History that no
@@ -424,8 +427,15 @@ def trusted_publication_base(repo: Path, base: str, head: str, ref: str) -> str:
                 begins_at_creation = old == "0" * 40
             if previous is not None and old != previous:
                 return base
-            if old != "0" * 40 and not ancestor(old, new):
-                return base
+            if old != "0" * 40:
+                edge = (common, old, new)
+                # Only positive immutable commit edges are shared within one doctor
+                # observation. Ref/reflog and graph overrides are checked on every call.
+                if verified_edges is None or edge not in verified_edges:
+                    if not ancestor(old, new):
+                        return base
+                    if verified_edges is not None:
+                        verified_edges.add(edge)
             observed_base = observed_base or base in (old, new)
             previous = new
         # Git may expire entries from before this task. Retain a positive formal

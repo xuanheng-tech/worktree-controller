@@ -356,20 +356,26 @@ def publication_ref(repo: Path, policy: WorktreePolicy) -> str | None:
     return candidate
 
 
-def attribution_base(repo: Path, base_commit: str, head: str, formal_ref: str | None) -> str:
+def attribution_base(
+    repo: Path, base_commit: str, head: str, formal_ref: str | None, *,
+    verified_edges: set[tuple[Path, str, str]] | None = None,
+) -> str:
     policy = load_policy(inventory(repo).canonical_path)
     if formal_ref is None or formal_ref != publication_ref(repo, policy):
         return base_commit
-    return trusted_publication_base(repo, base_commit, head, formal_ref)
+    return trusted_publication_base(
+        repo, base_commit, head, formal_ref, verified_edges=verified_edges
+    )
 
 
 def path_scope_issues(
-    repo: Path, record: MetadataRecord, head: str, *, publication_ref: str | None = None
+    repo: Path, record: MetadataRecord, head: str, *, publication_ref: str | None = None,
+    verified_edges: set[tuple[Path, str, str]] | None = None,
 ) -> tuple[dict[str, str], ...]:
     if not record.base_commit or not record.scope_paths:
         return ()
     base = (
-        attribution_base(repo, record.base_commit, head, publication_ref)
+        attribution_base(repo, record.base_commit, head, publication_ref, verified_edges=verified_edges)
         if publication_ref
         else record.base_commit
     )

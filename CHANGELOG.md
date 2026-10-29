@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.32.17
+
+- Reuse positive immutable publication-history ancestry edges within one doctor
+  semantic observation. Re-read the formal ref, reflog and graph overrides for each
+  checkout; keep base/head checks fresh and retain no cache between requests.
+  Preserve CLI 61, capability versions and storage layout 5.
+
 ## 1.32.16
 
 - Carry relative paths while walking typed resource trees instead of rebuilding every
