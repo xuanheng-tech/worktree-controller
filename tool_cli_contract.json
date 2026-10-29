@@ -1078,7 +1078,7 @@
   "session_launcher_entrypoint": "worktree-session",
   "session_entrypoint": "worktree-session-end",
   "tool_name": "worktree-controller",
-  "tool_version": "1.33.0",
+  "tool_version": "1.33.1",
   "delivered_closeout_version": 1,
   "retained_archive_version": 1,
   "retention_convergence_version": 2,
