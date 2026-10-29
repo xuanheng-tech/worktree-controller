@@ -33,7 +33,7 @@ With the environment above active:
 ```bash
 git clone https://github.com/xuanheng-tech/worktree-controller.git wc
 cd wc
-git checkout v1.32.14
+git checkout v1.32.15
 python examples/quickstart.py --workspace "$HOME/wc-first-run"
 ```
 
