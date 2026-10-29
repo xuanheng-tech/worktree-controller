@@ -577,9 +577,9 @@ def _tree_identity(
 ) -> dict[str, Any]:
     digest = hashlib.sha256()
     count = size = 0
-    pending = [resource]
+    pending = [(resource, ".")]
     while pending:
-        path = pending.pop()
+        path, relative = pending.pop()
         metadata = path.lstat()
         count += 1
         if count > MAX_VENV_ENTRIES:
@@ -588,7 +588,6 @@ def _tree_identity(
             raise _blocked("resource ownership is not the current user", "RESOURCE_OWNER_MISMATCH")
         if path.name == ".git" or path.is_mount():
             raise _blocked("resource contains Git metadata or a mount")
-        relative = path.relative_to(resource).as_posix()
         digest.update(os.fsencode(relative) + b"\0")
         digest.update(":".join(map(str, _signature(metadata))).encode())
         size += metadata.st_size
@@ -602,7 +601,10 @@ def _tree_identity(
                 )
             digest.update(os.fsencode(os.readlink(path)))
         elif stat.S_ISDIR(metadata.st_mode):
-            pending.extend(sorted(path.iterdir(), reverse=True))
+            pending.extend(
+                (child, child.name if relative == "." else f"{relative}/{child.name}")
+                for child in sorted(path.iterdir(), key=lambda child: child.name, reverse=True)
+            )
         elif not stat.S_ISREG(metadata.st_mode):
             raise _blocked("resource contains a special filesystem object")
     return {"tree_sha256": digest.hexdigest(), "entries": count, "bytes": size}

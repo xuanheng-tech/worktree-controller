@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.32.16
+
+- Carry relative paths while walking typed resource trees instead of rebuilding every
+  ancestor chain per entry. Sort sibling names directly while retaining the existing
+  traversal order and exact metadata fingerprint. Keep both preservation authority
+  checks, all content reads, hardlink evidence, runtime guards and refusal conditions.
+  CLI 61, capability versions and storage layout 5 remain unchanged.
+- Tear down only test-owned FIFO and socket nodes after each test, without following
+  directory symlinks or crossing filesystems. Retain regular evidence and directory
+  modes; keep host-resource isolation independent of test-level monkeypatch undo.
+
 ## 1.32.15
 
 - Observe Git worktrees once per integration-queue or lifecycle-events query. Reuse the
