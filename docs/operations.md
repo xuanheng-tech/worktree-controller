@@ -441,3 +441,8 @@ For each external consumer, distinguish three outcomes:
 
 Record an unobserved client invocation as unobserved. A copied hook, passing doctor or successful
 direct probe does not establish that a running client has reloaded its discovery metadata.
+# Explicit build-output closeout
+
+See [build-resource registration and cleanup](build-resources.md) for the
+owner-attested frozen Node output contract, limits, single-checkout canary and
+retention preview semantics introduced in 1.33.0.

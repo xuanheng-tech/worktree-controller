@@ -157,6 +157,17 @@ responsibilities. Preserve the caller's commit, push, remote, and destructive-op
 
 ## Diagnostics and compatibility
 
+With `registered_build_resources_version` 1, an idle frozen/retained source owner
+may use `build-resource-register` for explicitly attested rebuildable Node outputs.
+Pin owner/HEAD/CAS, project, committed recipe/lock and exact output paths; review
+the dry-run and apply its unchanged plan ID. Use the returned CAS with normal
+`resource-clean --typed` dry-run/apply, then guarded release. No directory-name
+heuristic authorizes cleanup; unknown/research evidence and integration candidates
+retain exact preservation requirements. Registration is not cleanup or release.
+With `retention_release_preflight_version` 1, only a successful exact release
+preflight yields `WOULD_RELEASE`; `CLOSEOUT_REQUIRED` is a prerequisite, not release
+eligibility. Execute with fresh guards and read the real per-checkout receipt.
+
 With `terminal_preserved_cleanup_version` 1, published integrations and completed
 no-change feature/audit tasks may use the existing preservation and `resource-clean --typed`
 flow. Require one exact remote-verified, lease-cleared publication or one verified original

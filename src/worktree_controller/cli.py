@@ -612,6 +612,19 @@ def build_parser() -> argparse.ArgumentParser:
     externalize_parser.add_argument("--expected-recovery-record-version", type=int, required=True)
     externalize_parser.add_argument("--owner", required=True)
 
+    build_register = commands.add_parser("build-resource-register", parents=[common],
+                                        help="register exact owner-attested frozen Node build outputs")
+    build_register.add_argument("--path", type=Path, required=True)
+    build_register.add_argument("--owner", required=True)
+    build_register.add_argument("--expected-record-version", type=int, required=True)
+    build_register.add_argument("--expected-head", required=True)
+    build_register.add_argument("--project", required=True)
+    build_register.add_argument("--recipe", required=True)
+    build_register.add_argument("--resource-path", action="append", required=True)
+    build_register.add_argument("--attest-rebuildable", action="store_true", required=True)
+    build_register.add_argument("--dry-run", action="store_true")
+    build_register.add_argument("--expected-plan-id")
+
     resource_register_parser = commands.add_parser(
         "resource-register", parents=[common], help="register a rebuildable task-local resource"
     )
@@ -1043,6 +1056,8 @@ def _main(argv: list[str] | None) -> int:
                 "tracked_source_progress_recovery_version": 1,
                 "published_checkout_recovery_version": 1,
                 "published_handoff_resource_registration_version": 1,
+                "registered_build_resources_version": 1,
+                "retention_release_preflight_version": 1,
                 "multiple_preservation_cleanup_version": 1,
                 "multiple_preservation_recovery_version": 1,
                 "preservation_supersession_version": 1,
@@ -1525,6 +1540,15 @@ def _main(argv: list[str] | None) -> int:
                 recovery_owner=parsed.recovery_owner,
                 scope_paths=tuple(parsed.scope),
             )
+        elif parsed.command == "build-resource-register":
+            from .build_resources import register
+
+            payload = register(parsed.repo, target=parsed.path, owner=parsed.owner,
+                               expected_record_version=parsed.expected_record_version,
+                               expected_head=parsed.expected_head, project=parsed.project,
+                               recipe=parsed.recipe, paths=tuple(parsed.resource_path),
+                               attest_rebuildable=parsed.attest_rebuildable,
+                               dry_run=parsed.dry_run, expected_plan_id=parsed.expected_plan_id)
         elif parsed.command == "resource-register":
             payload = register_disposable(
                 parsed.repo,

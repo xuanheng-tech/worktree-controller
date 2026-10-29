@@ -351,6 +351,11 @@
       "result_contract": "re-preservation-recovery/v1"
     },
     {
+      "name": "build-resource-register",
+      "operation_class": "metadata_mutation",
+      "result_contract": "registered-build-resources/v1"
+    },
+    {
       "name": "resource-register",
       "operation_class": "metadata_mutation",
       "result_contract": "worktree-controller/v1"
@@ -410,6 +415,8 @@
   "branch_retirement_verify_version": 1,
   "cleanup_hardlink_topology_version": 2,
   "contract_version": 61,
+  "registered_build_resources_version": 1,
+  "retention_release_preflight_version": 1,
   "task_workflow_version": 1,
   "release_recovery_inspection_version": 1,
   "release_recovery_inspection_contract": {
@@ -1071,7 +1078,7 @@
   "session_launcher_entrypoint": "worktree-session",
   "session_entrypoint": "worktree-session-end",
   "tool_name": "worktree-controller",
-  "tool_version": "1.32.18",
+  "tool_version": "1.33.0",
   "delivered_closeout_version": 1,
   "retained_archive_version": 1,
   "retention_convergence_version": 2,
@@ -1399,6 +1406,7 @@
     "recovery": "namespace-migration-plan remains read-only and reports recovery_required plus the original plan id for an unsettled PREPARED receipt; namespace-migrate requires that exact id, checks source and immutable evidence, tolerates post-switch mutable Controller records, and completes relocation evidence and SETTLED receipt without a second transition"
   },
   "result_contracts": [
+    "registered-build-resources/v1",
     "branch-retirement/v1",
     "branch-retirement/v2",
     "branch-retirement/v5",

@@ -53,6 +53,11 @@ def _signature(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def path_identity(path: Path) -> dict[str, int]:
+    """Shared no-follow inode identity for a pinned resource or ancestor."""
+    return _inode(path.lstat())
+
+
 def _link_identity(metadata: os.stat_result) -> list[int]:
     return [
         metadata.st_dev,
@@ -274,8 +279,13 @@ def _delete_fd_tree(
 
 def delete_typed_resource(root: Path, relative: str, evidence: dict[str, Any]) -> dict[str, Any]:
     """Delete only through verified directory FDs; paths never authorize a destructive call."""
-    if relative not in RESOURCE_TYPES or not root.is_absolute():
+    declaration = evidence.get("build_declaration")
+    if (relative not in RESOURCE_TYPES and declaration is None) or not root.is_absolute():
         raise _race()
+    if declaration is not None:
+        from .build_resources import check_resource
+
+        check_resource(root, relative, declaration)
     try:
         with ExitStack() as stack:
             filesystem_fd = os.open("/", DIRECTORY_FLAGS)
@@ -338,7 +348,7 @@ def _regular(path: Path) -> bytes:
     return path.read_bytes()
 
 
-def _project_identity(root: Path, relative: str) -> bytes:
+def project_identity(root: Path, relative: str) -> bytes:
     path = root / relative
     if path.resolve(strict=True) != path:
         raise _blocked(f"project identity escapes its path: {relative}", "RESOURCE_PATH_ESCAPE")
@@ -347,7 +357,7 @@ def _project_identity(root: Path, relative: str) -> bytes:
     return _regular(path)
 
 
-def _json(payload: bytes) -> dict[str, Any]:
+def project_json(payload: bytes) -> dict[str, Any]:
     value = json.loads(payload)
     if not isinstance(value, dict):
         raise _blocked("project identity must be a JSON object")
@@ -357,8 +367,8 @@ def _json(payload: bytes) -> dict[str, Any]:
 def _venv_identity(root: Path, resource: Path) -> dict[str, Any]:
     rel_venv = resource.relative_to(root).as_posix()
     project_rel, lock_rel = discover_python_project(root, venv_relative_path=rel_venv)
-    project = _project_identity(root, project_rel)
-    lock = _project_identity(root, lock_rel)
+    project = project_identity(root, project_rel)
+    lock = project_identity(root, lock_rel)
     if not tomllib.loads(project.decode()).get("project", {}).get("name"):
         raise _blocked("Python project identity is incomplete")
     if not tomllib.loads(lock.decode()).get("version"):
@@ -440,9 +450,9 @@ def _venv_identity(root: Path, resource: Path) -> dict[str, Any]:
 
 
 def _frontend_identity(root: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
-    project = _project_identity(root, "frontend/package.json")
-    lock = _project_identity(root, "frontend/package-lock.json")
-    package, locked = _json(project), _json(lock)
+    project = project_identity(root, "frontend/package.json")
+    lock = project_identity(root, "frontend/package-lock.json")
+    package, locked = project_json(project), project_json(lock)
     packages = locked.get("packages")
     if (
         not package.get("name")
@@ -469,7 +479,7 @@ def _frontend_identity(root: Path) -> tuple[dict[str, Any], dict[str, Any], dict
 def _node_identity(root: Path, resource: Path) -> dict[str, str]:
     package, packages, evidence = _frontend_identity(root)
     installed_bytes = _regular(resource / ".package-lock.json")
-    installed = _json(installed_bytes)
+    installed = project_json(installed_bytes)
     entries = installed.get("packages")
     if installed.get("name") != package["name"] or not isinstance(entries, dict) or not entries:
         raise _blocked("node_modules lacks its npm installed-tree identity")
@@ -485,7 +495,7 @@ def _node_identity(root: Path, resource: Path) -> dict[str, str]:
             or entry != packages.get(relative)
         ):
             raise _blocked("installed dependency is not bound to the committed npm lock")
-        manifest = _json(_regular(root / "frontend" / relative / "package.json"))
+        manifest = project_json(_regular(root / "frontend" / relative / "package.json"))
         if not entry.get("version") or manifest.get("version") != entry["version"]:
             raise _blocked("installed package version differs from lock")
         allowed.add(parts[1])
@@ -542,7 +552,7 @@ def _dist_identity(root: Path, resource: Path) -> dict[str, str]:
     if len(configs) > 1:
         raise _blocked("ambiguous Vite configuration")
     if configs:
-        config = _project_identity(root, configs[0].relative_to(root).as_posix())
+        config = project_identity(root, configs[0].relative_to(root).as_posix())
         text = config.decode()
         # Only the default output with a local, statically recognizable config is supported.
         # Overrides, imports of custom config, spreads and computed properties need review.
@@ -554,7 +564,7 @@ def _dist_identity(root: Path, resource: Path) -> dict[str, str]:
         ):
             raise _blocked("Vite output cannot be established without executing config")
         evidence["build_config_sha256"] = hashlib.sha256(config).hexdigest()
-    _project_identity(root, "frontend/index.html")
+    project_identity(root, "frontend/index.html")
     _regular(resource / "index.html")
     if not (resource / "assets").is_dir():
         raise _blocked("frontend build output lacks assets")
@@ -610,8 +620,12 @@ def _tree_identity(
     return {"tree_sha256": digest.hexdigest(), "entries": count, "bytes": size}
 
 
-def resource_evidence(root: Path, relative: str) -> dict[str, Any]:
-    if relative not in RESOURCE_TYPES:
+def resource_evidence(root: Path, relative: str, *, build_declaration: dict[str, Any] | None = None) -> dict[str, Any]:
+    if build_declaration is not None:
+        from .build_resources import check_resource
+
+        check_resource(root, relative, build_declaration)
+    if relative not in RESOURCE_TYPES and build_declaration is None:
         raise _blocked("resource path is outside the typed contract", "UNKNOWN_IGNORED_RESOURCE")
     resource = root / relative
     if resource.is_symlink() or resource.resolve(strict=True) != resource or not resource.is_dir():
@@ -620,8 +634,8 @@ def resource_evidence(root: Path, relative: str) -> dict[str, Any]:
         raise _blocked("resource contains tracked or staged content", "TRACKED_RESOURCE")
     if not path_is_ignored(root, relative):
         raise _blocked("resource is not Git-ignored", "RESOURCE_NOT_IGNORED")
-    tree = _tree_identity(resource) if RESOURCE_TYPES[relative] != "python-venv" else None
-    identity = {
+    tree = _tree_identity(resource) if build_declaration or RESOURCE_TYPES[relative] != "python-venv" else None
+    identity = {"build_declaration": build_declaration} if build_declaration else {
         "python-venv": _venv_identity,
         "node-modules": _node_identity,
         "frontend-build-output": _dist_identity,
@@ -631,34 +645,37 @@ def resource_evidence(root: Path, relative: str) -> dict[str, Any]:
         interpreter_links=tuple(identity.get("external_interpreter_links", ())),
         interpreter_target=identity.get("python_target"),
     )
-    path_identities = {
-        path.relative_to(root).as_posix(): _inode(path.lstat())
-        for path in (root, resource.parent, resource)
-    }
+    path_identities = {".": _inode(root.lstat())}
+    for path in (resource, *resource.parents):
+        if path == root:
+            break
+        path_identities[path.relative_to(root).as_posix()] = _inode(path.lstat())
     if any(value["file_type"] != stat.S_IFDIR for value in path_identities.values()):
         raise _race()
     return {**tree, **identity, "path_identities": path_identities}
 
 
-def classify_resources(root: Path) -> tuple[dict[str, Any], ...]:
+def classify_resources(root: Path, *, build_resources: dict[str, dict[str, Any]] | None = None) -> tuple[dict[str, Any], ...]:
     """Read-only inventory; legacy release caches receive no typed cleanup action."""
     ignored = ignored_paths(root)
+    build_resources = build_resources or {}
+    known = RESOURCE_TYPES.keys() | build_resources.keys()
     paths = {path.rstrip("/") for path in ignored}
-    paths.update(relative for relative in RESOURCE_TYPES if os.path.lexists(root / relative))
+    paths.update(relative for relative in known if os.path.lexists(root / relative))
     rows = []
     for relative in sorted(paths):
-        if any(relative.startswith(candidate + "/") for candidate in RESOURCE_TYPES):
+        if any(relative.startswith(candidate + "/") for candidate in known):
             continue
         row: dict[str, Any] = {
-            "resource_type": RESOURCE_TYPES.get(relative, "unknown"),
+            "resource_type": "registered-build-output" if relative in build_resources else RESOURCE_TYPES.get(relative, "unknown"),
             "path": relative,
             "classification": "blocked",
             "cleanup_action": "none",
             "blocker": None,
         }
-        if relative in RESOURCE_TYPES:
+        if relative in known:
             try:
-                row["evidence"] = resource_evidence(root, relative)
+                row["evidence"] = resource_evidence(root, relative, build_declaration=build_resources.get(relative))
                 row.update(classification="disposable", cleanup_action="remove-tree")
             except ControllerError as exc:
                 row.update(blocker=exc.code, reason=str(exc))

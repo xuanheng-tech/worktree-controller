@@ -110,7 +110,7 @@ wheels = [
 
 [[package]]
 name = "worktree-controller"
-version = "1.32.18"
+version = "1.33.0"
 source = { editable = "." }
 dependencies = [
     { name = "websockets" },

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.33.0
+
+- Retention dry-run calls the real guarded release preflight before reporting
+  `WOULD_RELEASE`; routes needing lifecycle changes report `CLOSEOUT_REQUIRED`.
+- Add explicit owner-attested registration of frozen Node project outputs, bound
+  to owner, HEAD, record CAS, committed build script/lock and directory identities.
+  Registered outputs use the existing typed cleanup transaction, drift checks,
+  hardlink proofs and reader-friendly cleanup lock; unknown evidence stays blocked.
+- Keep CLI 61 / storage 5; advertise `registered_build_resources_version=1` and
+  `retention_release_preflight_version=1`. Existing aborted integration cleanup v2
+  remains unchanged.
+
 ## Unreleased
 
 ## 1.32.18

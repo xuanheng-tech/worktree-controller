@@ -550,9 +550,9 @@ def test_cleanup_never_follows_replaced_parent(target, monkeypatch, relative):
     original = lifecycle.resource_evidence
     raced = False
 
-    def swap_parent(root, resource):
+    def swap_parent(root, resource, *, build_declaration=None):
         nonlocal raced
-        evidence = original(root, resource)
+        evidence = original(root, resource, build_declaration=build_declaration)
         if resource == relative and not raced:
             raced = True
             (path / parent).rename(path / f"{parent}-before-race")
@@ -580,9 +580,9 @@ def test_cleanup_rejects_changed_path_identity(target, monkeypatch, relative, mu
     original = lifecycle.resource_evidence
     replacement = None
 
-    def replace_after_check(root, resource):
+    def replace_after_check(root, resource, *, build_declaration=None):
         nonlocal replacement
-        evidence = original(root, resource)
+        evidence = original(root, resource, build_declaration=build_declaration)
         if resource == relative:
             changed = path / relative
             if mutation == "parent-inode":

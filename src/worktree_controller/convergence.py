@@ -66,12 +66,14 @@ ATTENTION = "ATTENTION_REQUIRED"
 WAITING = "IDLE_BELOW_THRESHOLD"
 BLOCKED = "BLOCKED"
 PLANNED = "WOULD_RELEASE"
+PREREQUISITE = "CLOSEOUT_REQUIRED"
 RELEASED = "RELEASED"
 SKIPPED = "OUT_OF_SCOPE"
 
 # Summary order and wording; the reason names what actually kept checkouts on disk.
 OUTCOME_LABELS = (
     (PLANNED, "would be released"),
+    (PREREQUISITE, "require closeout before release can be checked"),
     (LIVE, "in use"),
     (ATTENTION, "need owner action"),
     (BLOCKED, "blocked"),
@@ -722,7 +724,22 @@ def _converge(
             row.update(outcome=WAITING, reason="idle time is below the current threshold")
             continue
         if dry_run:
-            row.update(outcome=PLANNED, reason=f"{route} then guarded release")
+            if dormant or route not in {"release", "release-published-handoff", "release-retained-handoff"}:
+                row.update(outcome=PREREQUISITE, reason=f"{route} must complete before exact release preflight")
+                continue
+            try:
+                checked = release(
+                    repository_path, target=Path(item.path),
+                    expected_record_version=record.record_version, owner_release=record.owner,
+                    teardown_reproducible_venv=any(
+                        resource["state"] == "registered" for resource in record.disposable_resources
+                    ), dry_run=True,
+                )
+            except ControllerError as exc:
+                row.update(outcome=BLOCKED, reason=str(exc), code=exc.code)
+                continue
+            row.update(outcome=PLANNED, reason="exact guarded release preflight passed",
+                       release_preflight=checked["decision"])
             continue
         try:
             current = record

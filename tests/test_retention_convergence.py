@@ -97,7 +97,7 @@ def test_published_checkout_with_venv_is_closed_and_released(repo):
     path, allocation_id = _retained(repo, "delivered", publish=True, venv=True)
     branch_head = git(path, "rev-parse", "HEAD")
     preview = converge_retention(repo.repo, actor=ACTOR, now_at=FUTURE)
-    assert _row(preview, path)["outcome"] == "WOULD_RELEASE"
+    assert _row(preview, path)["outcome"] == "CLOSEOUT_REQUIRED"
     assert path.exists()
     applied = converge_retention(repo.repo, actor=ACTOR, dry_run=False, now_at=FUTURE)
     row = _row(applied, path)
@@ -139,7 +139,7 @@ def test_formally_abandoned_source_converges_through_its_normal_closeout(repo, p
     head = git(path, "rev-parse", "HEAD")
     preview = converge_retention(repo.repo, actor=ACTOR, now_at=FUTURE)
     row = _row(preview, path)
-    assert row["outcome"] == "WOULD_RELEASE", row
+    assert row["outcome"] == "CLOSEOUT_REQUIRED", row
     assert row["route"] == ("close-delivered" if publish else "archive-retained")
     applied = converge_retention(repo.repo, actor=ACTOR, dry_run=False, now_at=FUTURE)
     assert _row(applied, path)["outcome"] == "RELEASED", _row(applied, path)
@@ -361,7 +361,7 @@ def test_pressure_never_shortens_the_dormant_active_threshold(repo):
     row = _row(result, active)
     assert row["outcome"] == "IDLE_BELOW_THRESHOLD", row
     assert row["required_idle_hours"] == 72
-    assert all(_row(result, path)["outcome"] == "WOULD_RELEASE" for path in retained)
+    assert all(_row(result, path)["outcome"] == "CLOSEOUT_REQUIRED" for path in retained)
 
 
 def _enable_unintegrated_release(repository):
@@ -391,6 +391,38 @@ def _frozen_handoff(repository, task, *, role="feature"):
         finalizer_record_id=f"finalizer:{task}",
     )
     return path, allocation["decision"]["allocation_id"], head
+
+
+def test_preview_uses_exact_release_guard_and_keeps_unknown_evidence(repo):
+    _enable_unintegrated_release(repo)
+    path, _, _ = _frozen_handoff(repo, "unknown-artifact")
+    git(path, "push", "origin", "feature/unknown-artifact")
+    git(repo.repo, "fetch", "origin")
+    exclude = repo.repo / ".git/info/exclude"
+    with exclude.open("a") as stream:
+        stream.write("\nevidence/\n")
+    (path / "evidence").mkdir()
+    (path / "evidence/result").write_bytes(b"research")
+    with pytest.raises(ControllerError) as blocked:
+        lifecycle.release(repo.repo, target=path, expected_record_version=2,
+                          owner_release="module-owner", dry_run=True)
+    preview = converge_retention(repo.repo, actor=ACTOR, now_at=FUTURE)
+    row = _row(preview, path)
+    assert row["outcome"] == "BLOCKED"
+    assert row["code"] == blocked.value.code == "IGNORED_CONTENT"
+    assert preview["decision"]["would_release"] == 0
+    assert (path / "evidence/result").read_bytes() == b"research"
+
+
+def test_preview_only_promises_release_after_real_preflight(repo):
+    _enable_unintegrated_release(repo)
+    path, _, _ = _frozen_handoff(repo, "exact-preview")
+    git(path, "push", "origin", "feature/exact-preview")
+    git(repo.repo, "fetch", "origin")
+    preview = converge_retention(repo.repo, actor=ACTOR, now_at=FUTURE)
+    assert _row(preview, path)["outcome"] == "WOULD_RELEASE"
+    assert _row(preview, path)["release_preflight"]
+    assert path.exists()
 
 
 def test_unintegrated_handoff_is_held_with_its_reason_unless_policy_opts_in(repo):

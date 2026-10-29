@@ -4689,7 +4689,9 @@ def _typed_cleanup_plan_locked(
             )
             if source_topology is None:
                 source_topology = original_topology
-    resources = classify_resources(item.path)
+    from .build_resources import declarations
+
+    resources = classify_resources(item.path, build_resources=declarations(item, record))
     blockers: list[dict[str, str]] = []
     aborted_integration = record.role == "integration" and record.lifecycle == "INTEGRATION_ABORTED"
     integration_abort_evidence = None
@@ -5146,7 +5148,8 @@ def cleanup_typed_disposable(
                             )
                         if (
                             row["cleanup_action"] == "remove-tree"
-                            and resource_evidence(item.path, row["path"]) != row["evidence"]
+                            and resource_evidence(item.path, row["path"],
+                                                  build_declaration=row["evidence"].get("build_declaration")) != row["evidence"]
                         ):
                             raise ControllerError(
                                 "RESOURCE_PLAN_MISMATCH",
