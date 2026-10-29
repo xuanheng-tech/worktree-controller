@@ -272,7 +272,9 @@ def test_installed_retention_backoff_keeps_unchanged_handoff(installed, fixture_
         while True:
             preview = reconcile_cli(case, "retention", "--actor", "lifecycle-reconciler")
             row, = preview["decision"]["findings"]
-            if row["outcome"] == "WOULD_RELEASE":
+            # The exact preview now exposes this deliberately unregistered environment.
+            if row["outcome"] == "BLOCKED":
+                assert row["code"] == "IGNORED_CONTENT", row
                 break
             assert row["outcome"] == "IDLE_BELOW_THRESHOLD", row
             assert time.monotonic() < deadline, "fixture did not reach retention grace"
