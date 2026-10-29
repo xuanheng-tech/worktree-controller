@@ -61,6 +61,13 @@ the separate guarded release. Release keeps the retained branch and is not an
 integration or publication receipt. The QP maintenance owner performs the live
 single-checkout canary and decides whether to proceed with its exact batch.
 
+From 1.33.1, registration uses the same `allocation-runtime-authority/v1` runtime
+classification as typed cleanup. Its response includes fresh `runtime_evidence`
+and `HOST_VISIBILITY_GAP` warnings for unassociated host permission gaps. This is
+not proof of host-wide absence of references. Managed or observed references and
+managed/scan uncertainties still block; apply reobserves runtime even after a
+successful plan. It does not run the additional legacy host-wide strict scan.
+
 ## Integrity and recovery
 
 Cleanup rechecks the registered input identities, all resource content and the

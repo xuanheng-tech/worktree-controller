@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.33.1
+
+- Align build-resource registration with the existing allocation runtime authority
+  used by typed cleanup. Unassociated host permission gaps remain visible evidence
+  and warnings; managed references, observed references and uncertain managed or
+  scan identity still block both planning and apply. Remove the redundant legacy
+  host-wide strict scan. CLI 61, storage 5 and capability versions are unchanged.
+
 ## 1.33.0
 
 - Retention dry-run calls the real guarded release preflight before reporting

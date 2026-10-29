@@ -10,6 +10,8 @@ from worktree_controller import lifecycle
 from worktree_controller.models import ControllerError
 from worktree_controller.store import MetadataStore
 
+TYPED_RUNTIME_EVIDENCE = lifecycle._typed_runtime_evidence
+
 
 @pytest.fixture
 def project(monkeypatch):
@@ -180,3 +182,68 @@ def test_registration_rejects_runtime_reference(project, monkeypatch):
     })
     with pytest.raises(ControllerError):
         build.register(repo.repo, **options)
+
+
+def host_gap_evidence():
+    return {
+        "contract": "allocation-runtime-authority/v1",
+        "managed_references": [], "observed_references": [],
+        "managed_visibility_uncertainties": [], "scan_uncertainties": [],
+        "host_visibility_gaps": [{"pid": 42, "classification": "HOST_VISIBILITY_GAP",
+                                  "issues": [{"surface": "cwd", "errno": 13}]}],
+    }
+
+
+def test_registration_uses_allocation_authority_and_reports_host_gap(project, monkeypatch):
+    repo, target, options = project
+    calls = []
+
+    def evidence(path, *, holders):
+        assert path == target and not holders
+        calls.append(path)
+        return host_gap_evidence()
+
+    def legacy_strict(*args, **kwargs):
+        raise ControllerError("RUNTIME_SCAN_UNCERTAIN", "cannot exclude checkout references")
+
+    monkeypatch.setattr(lifecycle, "_validate_runtime_clear", legacy_strict)
+    monkeypatch.setattr(lifecycle, "_typed_runtime_evidence", TYPED_RUNTIME_EVIDENCE)
+    monkeypatch.setattr(lifecycle, "runtime_authority_evidence", evidence)
+    preview = build.register(repo.repo, **options)
+    applied = build.register(repo.repo, **options, dry_run=False,
+                             expected_plan_id=preview["decision"]["plan_id"])
+    for result in (preview, applied):
+        observed = result["decision"]["runtime_evidence"]
+        assert observed["contract"] == "allocation-runtime-authority/v1"
+        assert observed["host_visibility_gaps"][0]["pid"] == 42
+        assert observed["allocation_id"] == result["decision"]["registration"]["allocation_id"]
+        assert result["warnings"][0]["code"] == "HOST_VISIBILITY_GAP"
+        assert result["warnings"][0]["pids"] == [42]
+    assert len(calls) == 2  # One authority scan per call, including fresh apply validation.
+    assert applied["decision"]["record_version"] == 3
+
+
+@pytest.mark.parametrize("phase", ["plan", "apply"])
+@pytest.mark.parametrize("field,row,code", [
+    ("managed_references", {"kind": "holder"}, "MANAGED_REFERENCE"),
+    ("observed_references", {"kind": "cwd", "pid": 43}, "RUNTIME_REFERENCE"),
+    ("managed_visibility_uncertainties", {"pid": 43}, "RUNTIME_SCAN_UNCERTAIN"),
+    ("scan_uncertainties", {"pid": 43}, "RUNTIME_SCAN_UNCERTAIN"),
+])
+def test_runtime_blockers_remain_fatal_even_with_host_gap(project, monkeypatch, phase, field, row, code):
+    repo, target, options = project
+    evidence = host_gap_evidence()
+    monkeypatch.setattr(lifecycle, "_typed_runtime_evidence", TYPED_RUNTIME_EVIDENCE)
+    monkeypatch.setattr(lifecycle, "runtime_authority_evidence", lambda *a, **k: evidence.copy())
+    extra = {}
+    if phase == "apply":
+        plan = build.register(repo.repo, **options)["decision"]
+        extra = {"dry_run": False, "expected_plan_id": plan["plan_id"]}
+    store = MetadataStore(repo.repo / ".git")
+    before = store.load().records
+    evidence[field] = [row]
+    with pytest.raises(ControllerError) as error:
+        build.register(repo.repo, **options, **extra)
+    assert error.value.code == code
+    assert store.load().records == before
+    assert all((target / p / "output").read_bytes() == b"generated" for p in options["paths"])

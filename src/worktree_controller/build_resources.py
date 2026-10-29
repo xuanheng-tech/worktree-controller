@@ -114,8 +114,8 @@ def register(
             raise ControllerError("MISSING_RETAINED_REF", "registration requires an exact retained branch")
         if life._release_transaction(store, target_path=str(item.path), allocation_id=record.allocation_id):
             raise ControllerError("TRANSACTION_PENDING", "finish existing cleanup before registration")
-        life._validate_runtime_clear(item, strict=True)
-        blockers = life._typed_runtime_blockers(life._typed_runtime_evidence(item, record, snapshot))
+        runtime_evidence = life._typed_runtime_evidence(item, record, snapshot)
+        blockers = life._typed_runtime_blockers(runtime_evidence)
         if blockers:
             raise ControllerError(blockers[0]["code"], blockers[0]["message"])
         inputs = project_inputs(item.path, project, recipe)
@@ -152,5 +152,12 @@ def register(
     result = envelope("build-resource-register")
     result["decision"] = {"code": "BUILD_RESOURCE_PLAN" if dry_run else EVENT,
                           "plan_id": plan_id, "registration": proof,
+                          "runtime_evidence": runtime_evidence,
                           "record_version": record.record_version if dry_run else updated.record_version}
+    if runtime_evidence.get("host_visibility_gaps"):
+        result["warnings"].append({
+            "code": "HOST_VISIBILITY_GAP",
+            "pids": [row["pid"] for row in runtime_evidence["host_visibility_gaps"]],
+            "message": "unassociated host procfs permission gaps are outside managed-runtime authority; no claim of host-wide absence of references",
+        })
     return result
