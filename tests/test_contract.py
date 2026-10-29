@@ -76,15 +76,24 @@ def test_public_contract_matches_package_and_commands(tmp_path: Path) -> None:
         project = tomllib.load(stream)["project"]
     assert contract["schema_version"] == SCHEMA_VERSION == 1
     assert contract["contract_version"] == 61
-    assert contract["aborted_integration_preserved_cleanup_version"] == 1
-    assert contract["aborted_integration_preserved_cleanup_contract"]["contract"] == "aborted-integration-preserved-cleanup/v1"
+    assert contract["aborted_integration_preserved_cleanup_version"] == 2
+    assert (
+        contract["aborted_integration_preserved_cleanup_contract"]["contract"]
+        == "aborted-integration-preserved-cleanup/v1"
+    )
     assert contract["canonical_transition_version"] == 1
     assert contract["canonical_transition_contract"]["contract"] == "canonical-transition/v1"
     assert contract["canonical_main_refresh_version"] == 1
     assert contract["integration_lineage_admission_version"] == 1
     assert contract["integration_keyed_document_scope_version"] == 1
-    assert contract["integration_keyed_document_scope_contract"]["contract"] == "integration-keyed-document-scope/v1"
-    assert contract["integration_lineage_admission_contract"]["contract"] == "integration-lineage-admission/v1"
+    assert (
+        contract["integration_keyed_document_scope_contract"]["contract"]
+        == "integration-keyed-document-scope/v1"
+    )
+    assert (
+        contract["integration_lineage_admission_contract"]["contract"]
+        == "integration-lineage-admission/v1"
+    )
     assert contract["canonical_main_refresh_contract"]["contract"] == "canonical-main-refresh/v1"
     assert contract["capabilities_version"] == 1
     assert contract["acquire_no_effect_recovery_version"] == 1
@@ -156,7 +165,7 @@ def test_public_contract_matches_package_and_commands(tmp_path: Path) -> None:
         "release",
     ]
     assert contract["metadata_schema_version"] == 4
-    assert contract["tool_version"] == project["version"] == __version__ == "1.32.17"
+    assert contract["tool_version"] == project["version"] == __version__ == "1.32.18"
     assert contract["cleanup_hardlink_topology_contract"]["supported_versions"] == [1, 2]
     assert contract["release_options"] == [
         "--intent-id",
@@ -299,53 +308,140 @@ def test_release_versions_are_independently_declared_and_advertised(capsys) -> N
     assert main(["capabilities", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     advertised = payload["decision"]
-    assert advertised["archived_codex_binding_recovery_version"] == contract[
-        "archived_codex_binding_recovery_version"] == 1
+    assert (
+        advertised["archived_codex_binding_recovery_version"]
+        == contract["archived_codex_binding_recovery_version"]
+        == 1
+    )
 
-    assert payload["tool_version"] == contract["tool_version"] == "1.32.17"
-    assert advertised["hosted_session_closeout_check_version"] == contract["hosted_session_closeout_check_version"] == 1
-    assert advertised["integration_keyed_document_scope_version"] == contract["integration_keyed_document_scope_version"] == 1
-    assert advertised["source_release_summary_version"] == contract["source_release_summary_version"] == 1
+    assert payload["tool_version"] == contract["tool_version"] == "1.32.18"
+    assert (
+        advertised["hosted_session_closeout_check_version"]
+        == contract["hosted_session_closeout_check_version"]
+        == 1
+    )
+    assert (
+        advertised["integration_keyed_document_scope_version"]
+        == contract["integration_keyed_document_scope_version"]
+        == 1
+    )
+    assert (
+        advertised["source_release_summary_version"]
+        == contract["source_release_summary_version"]
+        == 1
+    )
     assert contract["source_release_summary_contract"]["field"] == "source_release_trigger.outcomes"
     assert contract["source_release_summary_contract"]["preserved_fields"] == [
-        "created_intent_ids", "skipped", "reconciliation"]
+        "created_intent_ids",
+        "skipped",
+        "reconciliation",
+    ]
     assert advertised["contract_version"] == contract["contract_version"] == 61
-    assert advertised["aborted_integration_preserved_cleanup_version"] == contract["aborted_integration_preserved_cleanup_version"] == 1
-    assert advertised["typed_cleanup_verify_boundary_version"] == contract[
-        "typed_cleanup_verify_boundary_version"] == 1
-    assert advertised["binding_registration_backfill_version"] == contract[
-        "binding_registration_backfill_version"] == 1
-    assert contract["binding_registration_backfill_contract"]["entrypoint"] == "reconcile binding-registrations"
-    assert advertised["exited_holder_release_version"] == contract["exited_holder_release_version"] == 1
-    assert advertised["integration_conflict_resolution_version"] == contract["integration_conflict_resolution_version"] == 2
+    assert (
+        advertised["aborted_integration_preserved_cleanup_version"]
+        == contract["aborted_integration_preserved_cleanup_version"]
+        == 2
+    )
+    assert (
+        advertised["typed_cleanup_verify_boundary_version"]
+        == contract["typed_cleanup_verify_boundary_version"]
+        == 1
+    )
+    assert (
+        advertised["binding_registration_backfill_version"]
+        == contract["binding_registration_backfill_version"]
+        == 1
+    )
+    assert (
+        contract["binding_registration_backfill_contract"]["entrypoint"]
+        == "reconcile binding-registrations"
+    )
+    assert (
+        advertised["exited_holder_release_version"]
+        == contract["exited_holder_release_version"]
+        == 1
+    )
+    assert (
+        advertised["integration_conflict_resolution_version"]
+        == contract["integration_conflict_resolution_version"]
+        == 2
+    )
     assert advertised["canonical_refresh_version"] == contract["canonical_refresh_version"] == 1
     assert contract["canonical_refresh_contract"]["contract"] == "canonical-refresh/v1"
     diagnostic = contract["canonical_refresh_contract"]["process_diagnostics"]
     assert diagnostic["location"] == "decision.process_diagnostics on live-process CANONICAL_IN_USE"
-    assert diagnostic["limits"] == {"processes": 5, "paths_per_process": 3, "path_characters": 512,
-                                    "name_characters": 64, "stat_characters": 4096}
-    assert advertised["host_handoff_continuation_version"] == contract["host_handoff_continuation_version"] == 2
-    assert contract["host_handoff_continuation_contract"]["contract"] == "host-handoff-continuation/v2"
-    assert contract["host_handoff_continuation_contract"]["access_classes"] == ["read", "exec", "write"]
-    assert advertised["release_recovery_inspection_version"] == contract["release_recovery_inspection_version"] == 1
+    assert diagnostic["limits"] == {
+        "processes": 5,
+        "paths_per_process": 3,
+        "path_characters": 512,
+        "name_characters": 64,
+        "stat_characters": 4096,
+    }
+    assert (
+        advertised["host_handoff_continuation_version"]
+        == contract["host_handoff_continuation_version"]
+        == 2
+    )
+    assert (
+        contract["host_handoff_continuation_contract"]["contract"] == "host-handoff-continuation/v2"
+    )
+    assert contract["host_handoff_continuation_contract"]["access_classes"] == [
+        "read",
+        "exec",
+        "write",
+    ]
+    assert (
+        advertised["release_recovery_inspection_version"]
+        == contract["release_recovery_inspection_version"]
+        == 1
+    )
     inspection = contract["release_recovery_inspection_contract"]
     assert inspection["contract"] == "release-recovery-inspection/v1"
     assert inspection["request_fields"] == [
-        "target_path", "expected_record_version", "owner_release", "publication_receipt_id", "release_intent_id",
+        "target_path",
+        "expected_record_version",
+        "owner_release",
+        "publication_receipt_id",
+        "release_intent_id",
     ]
-    assert next(row for row in contract["commands"] if row["name"] == "release-recovery-inspect") == {
-        "name": "release-recovery-inspect", "operation_class": "read_only",
+    assert next(
+        row for row in contract["commands"] if row["name"] == "release-recovery-inspect"
+    ) == {
+        "name": "release-recovery-inspect",
+        "operation_class": "read_only",
         "result_contract": "release-recovery-inspection/v1",
     }
-    assert advertised["rollout_transaction_diagnostics_version"] == contract["rollout_transaction_diagnostics_version"] == 1
+    assert (
+        advertised["rollout_transaction_diagnostics_version"]
+        == contract["rollout_transaction_diagnostics_version"]
+        == 1
+    )
     diagnostics = contract["rollout_transaction_diagnostics_contract"]
     assert diagnostics["contract"] == "rollout-transaction-diagnostics/v1"
     assert diagnostics["field"] == "decision.transaction_diagnostics"
-    assert diagnostics["fields"] == ["transaction_id", "command", "phase", "error", "recovery_entry"]
+    assert diagnostics["fields"] == [
+        "transaction_id",
+        "command",
+        "phase",
+        "error",
+        "recovery_entry",
+    ]
     assert diagnostics["error_fields"] == ["code", "message"]
-    assert advertised["canonical_main_refresh_version"] == contract["canonical_main_refresh_version"] == 1
-    assert advertised["integration_lineage_admission_version"] == contract["integration_lineage_admission_version"] == 1
-    assert advertised["canonical_transition_retirement_version"] == contract["canonical_transition_retirement_version"] == 1
+    assert (
+        advertised["canonical_main_refresh_version"]
+        == contract["canonical_main_refresh_version"]
+        == 1
+    )
+    assert (
+        advertised["integration_lineage_admission_version"]
+        == contract["integration_lineage_admission_version"]
+        == 1
+    )
+    assert (
+        advertised["canonical_transition_retirement_version"]
+        == contract["canonical_transition_retirement_version"]
+        == 1
+    )
     assert (
         advertised["canonical_transition_version"] == contract["canonical_transition_version"] == 1
     )
@@ -380,14 +476,22 @@ def test_release_versions_are_independently_declared_and_advertised(capsys) -> N
         "--additional-preservation-receipt",
         "--additional-preservation-receipt-sha256",
     ]
-    for capability in ("multiple_preservation_recovery_version", "preservation_supersession_version"):
+    for capability in (
+        "multiple_preservation_recovery_version",
+        "preservation_supersession_version",
+    ):
         assert advertised[capability] == contract[capability] == 1
     assert contract["multiple_preservation_recovery_contract"]["contract"] == (
         "multiple-preservation-cleanup-recovery/v1"
     )
-    parsed = build_parser().parse_args([
-        "resource-recover", "--stage", "prepare-multiple", "--dry-run",
-    ])
+    parsed = build_parser().parse_args(
+        [
+            "resource-recover",
+            "--stage",
+            "prepare-multiple",
+            "--dry-run",
+        ]
+    )
     assert parsed.stage == "prepare-multiple"
     assert advertised["namespace_migration_version"] == contract["namespace_migration_version"] == 1
     assert (

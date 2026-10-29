@@ -10,6 +10,80 @@ from .models import ControllerError
 CONTRACT = "aborted-integration-preserved-cleanup/v1"
 
 
+def _resource_tail_valid(record, item, position: int) -> bool:
+    """Verify terminal resource-only transitions without reissuing an abort.
+
+    Legacy producers recorded no per-event resource payload. Their contract only
+    allowed one .venv registration for the lifetime of an allocation. Accept that
+    unambiguous history, never infer a resource from an arbitrary event name.
+    """
+    tail = record.history[position + 1 :]
+    resource_events = {"DISPOSABLE_REGISTERED", "DISPOSABLE_CLEANED"}
+    state = "INTEGRATION_ABORTED"
+    for row in tail:
+        if row.get("owner") != record.owner or row.get("from") != state:
+            return False
+        if row.get("event") == "RELEASED" and state == "INTEGRATION_ABORTED":
+            state = "RELEASED"
+        elif row.get("event") not in resource_events or state != "INTEGRATION_ABORTED":
+            return False
+        if row.get("to") != state:
+            return False
+    if state != record.lifecycle:
+        return False
+    if not any(row.get("event") in resource_events for row in tail):
+        return True
+    if len(record.disposable_resources) != 1:
+        return False
+    resource = record.disposable_resources[0]
+    try:
+        if str(uuid.UUID(resource["resource_id"])) != resource["resource_id"]:
+            return False
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return False
+    if (
+        resource.get("path") != ".venv"
+        or resource.get("kind") != "python-venv"
+        or not isinstance(resource.get("reproducible"), bool)
+        or not isinstance(resource.get("creator"), str)
+        or not resource["creator"].strip()
+        or resource.get("teardown_policy") not in {"manual", "on-release"}
+        or (resource["teardown_policy"] == "on-release" and not resource["reproducible"])
+    ):
+        return False
+    transitions = [row for row in record.history if row.get("event") in resource_events]
+    expected = ["DISPOSABLE_REGISTERED"]
+    if resource.get("state") == "cleaned":
+        expected.append("DISPOSABLE_CLEANED")
+    elif resource.get("state") != "registered":
+        return False
+    if [row["event"] for row in transitions] != expected:
+        return False
+    for row in transitions:
+        if row.get("owner") != record.owner or row.get("from") != row.get("to"):
+            return False
+        binding = row.get("disposable_resource")
+        if binding is not None:
+            expected_resource = dict(resource)
+            expected_resource["state"] = (
+                "registered" if row["event"] == "DISPOSABLE_REGISTERED" else "cleaned"
+            )
+            if binding != expected_resource:
+                return False
+    absolute = item.path / ".venv"
+    if resource["state"] == "cleaned":
+        return not absolute.exists() and not absolute.is_symlink()
+    marker = absolute / "pyvenv.cfg"
+    return (
+        absolute.is_dir()
+        and not absolute.is_symlink()
+        and not absolute.is_mount()
+        and marker.is_file()
+        and not marker.is_symlink()
+        and not (absolute / ".git").exists()
+    )
+
+
 def abort_evidence(store, snapshot, item, record) -> dict[str, str]:
     """Bind cleanup to the producer's abort, never cleanliness or a stale source head.
 
@@ -36,7 +110,7 @@ def abort_evidence(store, snapshot, item, record) -> dict[str, str]:
     if (
         event.get("owner") != record.owner
         or event.get("to") != "INTEGRATION_ABORTED"
-        or any(row.get("event") != "RELEASED" for row in record.history[position + 1 :])
+        or not _resource_tail_valid(record, item, position)
     ):
         raise invalid()
     if record.quarantine_observed_commit and record.quarantine_observed_commit != item.head:

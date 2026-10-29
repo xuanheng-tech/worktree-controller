@@ -1047,7 +1047,7 @@ def _main(argv: list[str] | None) -> int:
                 "multiple_preservation_recovery_version": 1,
                 "preservation_supersession_version": 1,
                 "retained_typed_cleanup_version": 1,
-                "aborted_integration_preserved_cleanup_version": 1,
+                "aborted_integration_preserved_cleanup_version": 2,
                 "terminal_preserved_cleanup_version": 1,
                 "preservation_leaf_version": 1,
                 "integration_publication_execution_version": 1,

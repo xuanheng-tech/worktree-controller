@@ -31,6 +31,16 @@ def updated_record(record: MetadataRecord, event: str, **changes: Any) -> Metada
             "owner": payload.get("owner", record.owner),
         }
     )
+    if event in {"DISPOSABLE_REGISTERED", "DISPOSABLE_CLEANED"}:
+        before_resources = {row["resource_id"]: row for row in record.disposable_resources}
+        changed = [
+            row
+            for row in payload["disposable_resources"]
+            if before_resources.get(row["resource_id"]) != row
+        ]
+        if len(changed) != 1:
+            raise ValueError("a disposable resource event must identify exactly one transition")
+        history[-1]["disposable_resource"] = dict(changed[0])
     payload["history"] = history
     return record_from_dict(payload)
 

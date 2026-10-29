@@ -4485,7 +4485,9 @@ def cleanup_disposable(
             raise ControllerError("RESOURCE_NOT_REGISTERED", "resource is not registered")
         resource = matches[0]
         relative = _resource_relative_path(resource["path"], resource["kind"])
-        if tracked_paths(item.path, relative) or not path_is_ignored(item.path, relative):
+        # The registered resource is a directory. Preserve directory-only ignore
+        # semantics when retrying after removal but before the metadata commit.
+        if tracked_paths(item.path, relative) or not path_is_ignored(item.path, relative + "/"):
             raise ControllerError("RESOURCE_DRIFT", "resource tracking or ignore state changed")
         absolute = item.path / relative
         if absolute.is_symlink() or absolute.is_mount():

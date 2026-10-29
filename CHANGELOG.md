@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.32.18
+
+- Preserve an aborted integration's original proof across verified task-local Python
+  environment registration and cleanup. Validate terminal owner/state continuity,
+  the unique resource identity, registration/cleanup order and actual resource state.
+  Bind new resource events to their exact resource; accept legacy events only under
+  the existing single `.venv` contract. Recreated resources and ambiguous histories
+  fail closed. Never rewrite the abort receipt or grant release from cleanup alone.
+- Advertise aborted-integration preserved cleanup capability 2. Keep CLI 61 and
+  storage layout 5; normal preservation, release, admission and publication gates apply.
+- Keep directory-only Git ignore semantics when registered environment removal
+  completed before its metadata update. A normal same-CAS retry records cleanup
+  once; tracking drift, symlinks and foreign resources remain refused.
+
 ## 1.32.17
 
 - Reuse positive immutable publication-history ancestry edges within one doctor

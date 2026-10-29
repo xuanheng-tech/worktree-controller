@@ -177,6 +177,10 @@ set is empty; existing pre-completion proofs retain their original CAS.
   admission cancellation. Normal guarded release settles the old request before a changed-source
   intent can claim; unchanged-source retries retain their existing intent and queue rules.
   Never replace a frozen request, compute private digests, widen policy or force-remove files.
+  Capability 2 accepts verified post-abort registered environment transitions under
+  the unique `.venv` contract. Use the current record CAS and original abort; do not
+  reissue or rewrite proof. Ambiguous history, reconstructed resources and other
+  terminal mutations remain blocked. Cleanup still grants no release or admission.
 
 - With `archived_codex_binding_recovery_version` 1, a released writer lease whose
   exact Codex thread was formally archived may use `binding-remove

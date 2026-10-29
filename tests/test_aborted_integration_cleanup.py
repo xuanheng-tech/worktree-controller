@@ -55,7 +55,7 @@ def failed_candidate(tmp_path, monkeypatch):
     monkeypatch.setattr(lifecycle, "editable_references", lambda *a, **k: ())
     monkeypatch.setattr(preservation, "evidence_root", lambda: tmp_path / "preservations")
     with GitRepository(linked=0, policy_text=POLICY) as repo:
-        (repo.repo / ".gitignore").write_text("\n".join(p + "/" for p in PATHS) + "\n")
+        (repo.repo / ".gitignore").write_text("\n".join(p + "/" for p in PATHS) + "\n.venv/\n")
         git(repo.repo, "add", ".gitignore")
         git(repo.repo, "commit", "-m", "fixture generated paths")
         adopt_canonical(repo)
@@ -136,6 +136,169 @@ def preserve(fixture, paths=PATHS):
     )
 
 
+def register_environment(f):
+    path = f[1] / ".venv"
+    path.mkdir()
+    (path / "pyvenv.cfg").write_text("home = /example/python\n")
+    lifecycle.register_disposable(
+        f[0].repo,
+        target=f[1],
+        expected_record_version=record(f).record_version,
+        owner=OWNER,
+        resource_path=".venv",
+        kind="python-venv",
+        reproducible=True,
+        creator=OWNER,
+        teardown_policy="on-release",
+    )
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("register_after_abort", [False, True])
+def test_registered_cleanup_preserves_abort_authority(
+    failed_candidate, register_after_abort, legacy
+):
+    f = failed_candidate
+    if not register_after_abort:
+        register_environment(f)
+    abort(f)
+    receipt = record(f).history[-1]["abort_receipt"]
+    receipt_path = f[4].completion_receipts_dir / f"{receipt['receipt_id']}.json"
+    original = receipt_path.read_bytes()
+    if register_after_abort:
+        register_environment(f)
+    lifecycle.cleanup_disposable(
+        f[0].repo,
+        target=f[1],
+        expected_record_version=record(f).record_version,
+        owner=OWNER,
+        resource_path=".venv",
+    )
+    if legacy:
+        old = record(f)
+        f[4].replace_record(
+            replace(
+                old,
+                history=tuple(
+                    {key: value for key, value in row.items() if key != "disposable_resource"}
+                    for row in old.history
+                ),
+            )
+        )
+    proofs = preserve(f)
+    assert proofs
+    assert receipt_path.read_bytes() == original
+    assert cleanup(f, proofs)["code"] != "INTEGRATION_ABORT_EVIDENCE_INVALID"
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "owner",
+        "lifecycle",
+        "event",
+        "missing_registration",
+        "duplicate_cleanup",
+        "resource_path",
+        "resource_id",
+        "binding",
+        "recreated",
+        "symlink",
+    ],
+)
+def test_resource_event_name_alone_does_not_authorize_cleanup(failed_candidate, corruption):
+    f = failed_candidate
+    register_environment(f)
+    abort(f)
+    lifecycle.cleanup_disposable(
+        f[0].repo,
+        target=f[1],
+        expected_record_version=record(f).record_version,
+        owner=OWNER,
+        resource_path=".venv",
+    )
+    original = record(f)
+    history = [dict(row) for row in original.history]
+    resources = [dict(row) for row in original.disposable_resources]
+    if corruption == "owner":
+        history[-1]["owner"] = "another-owner"
+    elif corruption == "lifecycle":
+        history[-1]["from"] = "ACTIVE"
+    elif corruption == "event":
+        history[-1]["event"] = "RESUMED"
+    elif corruption == "missing_registration":
+        history = [row for row in history if row["event"] != "DISPOSABLE_REGISTERED"]
+    elif corruption == "duplicate_cleanup":
+        history.append(dict(history[-1]))
+    elif corruption == "resource_path":
+        resources[0]["path"] = "../foreign/.venv"
+    elif corruption == "resource_id":
+        resources[0]["resource_id"] = "invalid"
+    elif corruption == "binding":
+        history[-1]["disposable_resource"] = {**resources[0], "creator": "foreign"}
+    elif corruption == "recreated":
+        (f[1] / ".venv").mkdir()
+    else:
+        (f[1] / ".venv").symlink_to(f[1] / "absent-foreign")
+    f[4].replace_record(
+        replace(original, history=tuple(history), disposable_resources=tuple(resources))
+    )
+    if corruption in {"resource_path", "resource_id"}:
+        with pytest.raises(ControllerError) as error:
+            cleanup(f)
+        assert error.value.code == "INVALID_METADATA"
+        return
+    assert "INTEGRATION_ABORT_EVIDENCE_INVALID" in {
+        row["code"] for row in cleanup(f)["plan"]["blockers"]
+    }
+
+
+def test_interrupted_environment_cleanup_retries_without_second_transition(
+    failed_candidate, monkeypatch
+):
+    f = failed_candidate
+    register_environment(f)
+    abort(f)
+    before = record(f)
+    original = lifecycle.shutil.rmtree
+
+    def interrupted(path):
+        original(path)
+        raise OSError("fixture interruption after removal, before metadata update")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lifecycle.shutil, "rmtree", interrupted)
+        with pytest.raises(OSError, match="fixture interruption"):
+            lifecycle.cleanup_disposable(
+                f[0].repo,
+                target=f[1],
+                expected_record_version=before.record_version,
+                owner=OWNER,
+                resource_path=".venv",
+            )
+    assert record(f) == before
+    assert not (f[1] / ".venv").exists()
+    lifecycle.cleanup_disposable(
+        f[0].repo,
+        target=f[1],
+        expected_record_version=before.record_version,
+        owner=OWNER,
+        resource_path=".venv",
+    )
+    after = record(f)
+    with pytest.raises(ControllerError) as error:
+        lifecycle.cleanup_disposable(
+            f[0].repo,
+            target=f[1],
+            expected_record_version=after.record_version,
+            owner=OWNER,
+            resource_path=".venv",
+        )
+    assert error.value.code == "RESOURCE_NOT_REGISTERED"
+    assert record(f) == after
+    assert cleanup(f, preserve(f))["plan"]["blockers"] == []
+
+
 def test_exact_preserved_aborted_candidate_can_release_and_reapply(failed_candidate):
     f = failed_candidate
     repo, candidate, claim, sources, store = f
@@ -167,6 +330,14 @@ def test_exact_preserved_aborted_candidate_can_release_and_reapply(failed_candid
     assert "INVALID_LIFECYCLE" in {b["code"] for b in blocked["plan"]["blockers"]}
     # Only the existing, explicit owner/CAS abort transition can end quarantine.
     abort(f)
+    register_environment(f)
+    lifecycle.cleanup_disposable(
+        repo.repo,
+        target=candidate,
+        expected_record_version=record(f).record_version,
+        owner=OWNER,
+        resource_path=".venv",
+    )
     pending = lifecycle.enqueue_integration(
         repo.repo,
         task_key="joint-corrected",

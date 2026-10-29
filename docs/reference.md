@@ -118,6 +118,11 @@ Every removed tree needs immutable preservation coverage; quarantine, request id
 leases, runtime, ownership and release guards remain mandatory. Only formal checkout release
 settles its admission reservation. See the [operational flow](operations.md#aborted-integration-with-preserved-build-output).
 
+Capability 2 additionally validates post-abort registered `.venv` resource lineage,
+including the unambiguous legacy single-resource history. New resource events bind
+the exact resource payload. No other post-abort lifecycle transition is accepted,
+and no historical abort receipt or failure event is rewritten.
+
 The supported runtime is Python 3.12 on Linux with Git and readable procfs. Writer identity,
 runtime evidence and repository locking depend on Linux process interfaces and POSIX flock;
 other operating systems are not supported by this release.

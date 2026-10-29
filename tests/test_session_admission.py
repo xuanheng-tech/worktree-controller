@@ -923,7 +923,7 @@ def test_lost_bind_response_preserves_identity_and_recovers_only_after_exit(
         try:
             if child_stat.read_text().rsplit(")", 1)[1].split()[0] in {"Z", "X"}:
                 break
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             break
         assert time.monotonic() < deadline, "holder child did not exit"
         time.sleep(0.01)

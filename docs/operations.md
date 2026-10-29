@@ -224,6 +224,17 @@ Require `aborted_integration_preserved_cleanup_version` 1 from `capabilities --j
 Use the same version's Python for the public `worktree_controller.preservation` module.
 No consumer computes Controller digests or opens its private ledger.
 
+Capability 2 also verifies registered environment transitions after the abort. The
+original abort receipt remains immutable. New resource events identify their exact
+resource; historical events are accepted only when the allocation's unique `.venv`
+registration and optional cleanup form an unambiguous ordered chain with unchanged
+owner and lifecycle. A cleaned environment must still be absent (including dangling
+symlinks); a registered environment must retain its Python marker and local identity.
+Other events, ambiguous resources, changed proofs or reconstructed environments block.
+This verifies the current producer history; it does not invent a historical resource
+receipt or attest unrecorded bytes. Re-run preservation at the current record CAS;
+normal guarded release, not environment cleanup, settles the admission reservation.
+
 1. Read `status`, `integration-queue`, `admission-queue` and `doctor`. Identify the exact owner,
    allocation, branch, HEAD, record version and failed intent. Retain the candidate's branch and
    original source/failure evidence. A clean checkout or expired lease grants no removal authority.
