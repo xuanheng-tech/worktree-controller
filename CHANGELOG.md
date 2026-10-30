@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.33.2
+## 1.34.1
 
 - Verify old preservation generations before registered build cleanup crosses its
   exact registration CAS transition; retain original hashes and bind completed
@@ -10,6 +10,16 @@
   Freeze a new verified baseline without modifying original failed receipts or
   journals; execute only untouched pending actions. Drift, started/unknown effects,
   runtime references and unknown evidence remain blocked. CLI 61/storage 5 unchanged.
+
+## 1.34.0
+
+- Let a released integration branch use the existing plan and CAS retirement flow
+  when its preparation was formally aborted and then abandoned, it has no
+  publication receipt, and the released commit is a direct ancestor of the
+  publication branch. Retryable, drifted, or non-ancestor evidence stays
+  blocked by `INTEGRATION_PUBLICATION_NOT_VERIFIED`. Cherry-equivalence is not
+  accepted. Advertise `aborted_integration_branch_retirement_version=1`.
+  CLI 61 and storage layout 5 stay unchanged.
 
 ## 1.33.1
 

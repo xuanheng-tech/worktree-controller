@@ -119,6 +119,8 @@ def _plan_identity(plan: Mapping[str, Any]) -> dict[str, Any]:
     identity = {field: plan.get(field) for field in fields}
     if "canonical_transition_evidence" in plan:
         identity["canonical_transition_evidence"] = plan["canonical_transition_evidence"]
+    if "aborted_ancestor_evidence" in plan:
+        identity["aborted_ancestor_evidence"] = plan["aborted_ancestor_evidence"]
     return identity
 
 
@@ -392,6 +394,122 @@ def _integration_publication_verified(
     )
 
 
+def _aborted_ancestor_evidence(
+    store: MetadataStore,
+    snapshot: MetadataSnapshot,
+    record: MetadataRecord,
+    release_receipt: ReleaseReceipt,
+    *,
+    expected_oid: str,
+) -> dict[str, str] | None:
+    """Return pinned abort proof for an abandoned ancestor, or None.
+
+    None keeps the publication blocker. This does not accept cherry-equivalence,
+    a retryable abort, or a branch whose commits are not already in the
+    publication ref.
+    """
+
+    if (
+        record.role != "integration"
+        or record.lifecycle != "RELEASED"
+        or record.task_commit != expected_oid
+        or release_receipt.allocation_id != record.allocation_id
+        or release_receipt.released_head != expected_oid
+    ):
+        return None
+    releases = [
+        item for item in snapshot.release_receipts.values()
+        if item.allocation_id == record.allocation_id
+    ]
+    if len(releases) != 1 or releases[0].receipt_id != release_receipt.receipt_id:
+        return None
+    if any(
+        item.allocation_id == record.allocation_id
+        for item in snapshot.publication_receipts.values()
+    ):
+        return None
+    positions = [
+        index for index, event in enumerate(record.history)
+        if event.get("event") == "INTEGRATION_ABORTED"
+    ]
+    if len(positions) != 1:
+        return None
+    position = positions[0]
+    event = record.history[position]
+    owner = event.get("owner")
+    bound = event.get("abort_receipt")
+    if (
+        not isinstance(owner, str)
+        or not owner.strip()
+        or event.get("from") not in {"ACTIVE", "QUARANTINED"}
+        or event.get("to") != "INTEGRATION_ABORTED"
+        or not isinstance(bound, dict)
+    ):
+        return None
+    receipt_id = bound.get("receipt_id")
+    digest = bound.get("sha256")
+    if not isinstance(receipt_id, str) or not isinstance(digest, str):
+        return None
+    try:
+        if str(UUID(receipt_id)) != receipt_id:
+            return None
+    except ValueError:
+        return None
+    from .integration_cleanup import resource_tail_valid
+
+    try:
+        if not resource_tail_valid(
+            record, type("Item", (), {"path": Path(release_receipt.target_path)})(), position
+        ):
+            return None
+        value, actual = e.read(store.completion_receipts_dir / f"{receipt_id}.json", digest)
+    except (ControllerError, OSError, ValueError, KeyError, TypeError):
+        return None
+    if actual != digest:
+        return None
+    intent_id = value.get("intent_id")
+    if (
+        value.get("kind") != "integration_abort"
+        or value.get("schema_version") != 1
+        or value.get("receipt_id") != receipt_id
+        or value.get("repository_id") != snapshot.repository_id
+        or value.get("allocation_id") != record.allocation_id
+        or value.get("task_key") != record.task_key
+        or value.get("authority_key") != record.authority_key
+        or value.get("owner") != owner
+        or value.get("branch") != release_receipt.branch
+        or value.get("candidate_oid") != expected_oid
+        or not isinstance(value.get("failure_reason"), str)
+        or not str(value.get("failure_reason")).strip()
+        or not isinstance(intent_id, str)
+    ):
+        return None
+    try:
+        if str(UUID(intent_id)) != intent_id:
+            return None
+    except ValueError:
+        return None
+    intent = snapshot.integration_intents.get(intent_id)
+    if (
+        intent is None
+        or not integration_intent_abandoned(intent)
+        or intent.owner != owner
+        or intent.task_key != record.task_key
+        or intent.candidate_oid != expected_oid
+        or intent.published_at is not None
+        or any(item.intent_id == intent_id for item in snapshot.publication_receipts.values())
+        or not any(row.get("event") == "PREPARATION_ABORTED" for row in intent.history)
+    ):
+        return None
+    return {
+        "contract": "aborted-ancestor-branch-retirement/v1",
+        "abort_receipt_id": receipt_id,
+        "abort_receipt_sha256": digest,
+        "intent_id": intent_id,
+        "candidate_oid": expected_oid,
+    }
+
+
 def _release_intent_resolved(
     snapshot: MetadataSnapshot,
     record: MetadataRecord | None,
@@ -562,6 +680,7 @@ def _evaluate(
         blockers.append("BRANCH_CHECKED_OUT")
 
     record = snapshot.records.get(resolved_allocation or "")
+    aborted_ancestor_evidence = None
     if release_receipt is not None or transition_evidence is not None:
         if record is None:
             blockers.append("ALLOCATION_RECORD_MISSING")
@@ -576,12 +695,29 @@ def _evaluate(
                 if record.lifecycle != "RELEASED":
                     blockers.append("ALLOCATION_NOT_RELEASED")
                 if record.role == "integration":
-                    if remote != policy.publication_remote or not _integration_publication_verified(
-                        snapshot,
-                        record,
-                        release_receipt,
-                        target_ref=f"refs/heads/{policy.publication_branch}",
+                    published = (
+                        remote == policy.publication_remote
+                        and _integration_publication_verified(
+                            snapshot,
+                            record,
+                            release_receipt,
+                            target_ref=f"refs/heads/{policy.publication_branch}",
+                        )
+                    )
+                    if (
+                        not published
+                        and remote == policy.publication_remote
+                        and classification == "ANCESTRY"
+                        and record.lifecycle == "RELEASED"
                     ):
+                        aborted_ancestor_evidence = _aborted_ancestor_evidence(
+                            store,
+                            snapshot,
+                            record,
+                            release_receipt,
+                            expected_oid=expected_oid,
+                        )
+                    if not published and aborted_ancestor_evidence is None:
                         blockers.append("INTEGRATION_PUBLICATION_NOT_VERIFIED")
                 elif record.role not in {"feature", "audit"}:
                     blockers.append("UNSUPPORTED_ALLOCATION_ROLE")
@@ -651,6 +787,8 @@ def _evaluate(
     }
     if transition_evidence is not None:
         core["canonical_transition_evidence"] = transition_evidence
+    if aborted_ancestor_evidence is not None:
+        core["aborted_ancestor_evidence"] = aborted_ancestor_evidence
     observed_plan_id = _sha256_json(_plan_identity(core))
     if plan_id is not None and observed_plan_id != plan_id:
         core["eligible"] = False

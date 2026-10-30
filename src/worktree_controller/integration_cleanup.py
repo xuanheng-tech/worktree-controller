@@ -10,7 +10,7 @@ from .models import ControllerError
 CONTRACT = "aborted-integration-preserved-cleanup/v1"
 
 
-def _resource_tail_valid(record, item, position: int) -> bool:
+def resource_tail_valid(record, item, position: int) -> bool:
     """Verify terminal resource-only transitions without reissuing an abort.
 
     Legacy producers recorded no per-event resource payload. Their contract only
@@ -110,7 +110,7 @@ def abort_evidence(store, snapshot, item, record) -> dict[str, str]:
     if (
         event.get("owner") != record.owner
         or event.get("to") != "INTEGRATION_ABORTED"
-        or not _resource_tail_valid(record, item, position)
+        or not resource_tail_valid(record, item, position)
     ):
         raise invalid()
     if record.quarantine_observed_commit and record.quarantine_observed_commit != item.head:
