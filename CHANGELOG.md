@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.34.0
+
+- Let a released integration branch use the existing plan and CAS retirement flow
+  when its preparation was formally aborted and then abandoned, it has no
+  publication receipt, and the released commit is a direct ancestor of the
+  publication branch. Retryable, drifted, or non-ancestor evidence stays
+  blocked by `INTEGRATION_PUBLICATION_NOT_VERIFIED`. Cherry-equivalence is not
+  accepted. Advertise `aborted_integration_branch_retirement_version=1`.
+  CLI 61 and storage layout 5 stay unchanged.
+
 ## 1.33.1
 
 - Align build-resource registration with the existing allocation runtime authority

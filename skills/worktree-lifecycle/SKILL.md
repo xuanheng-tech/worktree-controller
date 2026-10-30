@@ -419,6 +419,13 @@ allocation; hosted session-ending calls remain refused.
   plan-bound retirement flow. Canonical remains registered; never fabricate a release receipt or
   release canonical. Ordinary unregistered refs remain report-only, and missing, ambiguous or
   drifted history, occupancy, leases, runtime bindings and unresolved obligations still fail closed.
+- Capability `aborted_integration_branch_retirement_version` 1 lets the same plan and CAS flow
+  retire a released integration ref that was formally aborted and then abandoned, has no
+  publication receipt, and whose released commit is a direct ancestor of the publication branch.
+  The plan pins the abort receipt id, raw SHA-256 and intent id. Retryable aborts, drifted
+  receipts, missing release evidence and any non-ancestor commit stay
+  `INTEGRATION_PUBLICATION_NOT_VERIFIED`. Cherry-equivalence is not retirement authority. The
+  plan does not delete the ref; execution remains the existing expected-OID CAS.
 
 ## Invariants
 

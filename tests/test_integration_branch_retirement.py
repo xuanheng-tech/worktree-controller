@@ -12,6 +12,7 @@ from tests.test_auto_release import POLICY_MANUAL, _publish_source
 from tests.test_branch_retirement import _released_source
 from tests.test_branch_retirement_execution import _authorize, _cas, _result
 from tests.test_controlled import _configure_remote, adopt_canonical
+from tests.test_integration_abort import POLICY_THREE_CANDIDATES_V5
 from tests.test_integration_pipeline import _claim, _enqueue, _publish, _source, _validate
 from tests.test_shadow import GitRepository, git
 from worktree_controller import branch_retirement
@@ -27,6 +28,7 @@ from worktree_controller.git_backend import inventory
 from worktree_controller.lifecycle import (
     _release_plan_id,
     abandon_integration_intent,
+    abort_integration,
     enqueue_integration,
     reconcile_publication_receipts,
     release,
@@ -558,3 +560,99 @@ def test_integration_retirement_preserves_existing_safety_guards(fault: str, blo
         )["decision"]
         assert decision["code"] == "BRANCH_RETIREMENT_BLOCKED"
         assert blocker in decision["plan"]["blockers"]
+
+
+def _record_version(repository: GitRepository, allocation_id: str) -> int:
+    return MetadataStore(inventory(repository.repo).common_dir).load().records[allocation_id].record_version
+
+
+def test_abandoned_aborted_ancestor_reuses_plan_cas_retirement(tmp_path: Path) -> None:
+    with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES_V5) as repository:
+        adopt_canonical(repository)
+        _configure_remote(repository)
+        _target, source_allocation, _source_head = _source(
+            repository, task="ancestor-source", relative_path="ancestor.txt", content="ancestor\n"
+        )
+        queued = _enqueue(
+            repository, task="ancestor-integration", source_allocation=source_allocation
+        )
+        candidate, claimed = _claim(
+            repository, task="ancestor-integration", intent_id=queued["decision"]["intent_id"]
+        )
+        allocation = str(claimed["decision"]["allocation_id"])
+        intent_id = str(claimed["decision"]["intent_id"])
+        head = git(candidate, "rev-parse", "HEAD")
+        aborted = abort_integration(
+            repository.repo,
+            target=candidate,
+            expected_record_version=_record_version(repository, allocation),
+            owner="integration-owner",
+            reason="candidate preparation stopped before publication",
+        )["decision"]
+        assert aborted["code"] == "INTEGRATION_ABORTED"
+        released = release(
+            repository.repo,
+            target=candidate,
+            expected_record_version=_record_version(repository, allocation),
+            owner_release="integration-owner",
+        )["decision"]
+        assert released["code"] == "RELEASED"
+        assert not candidate.exists()
+        blocked = plan_branch_retirement(
+            repository.repo, allocation_id=allocation, remote="origin", integrated_into="main",
+            dry_run=True,
+        )["decision"]
+        assert blocked["code"] != "BRANCH_RETIREMENT_READY"
+        assert "INTEGRATION_PUBLICATION_NOT_VERIFIED" in blocked["plan"]["blockers"]
+        git(repository.repo, "push", "origin", f"{head}:refs/heads/main")
+        retryable = plan_branch_retirement(
+            repository.repo, allocation_id=allocation, remote="origin", integrated_into="main",
+            dry_run=True,
+        )["decision"]
+        assert "INTEGRATION_PUBLICATION_NOT_VERIFIED" in retryable["plan"]["blockers"]
+        abandoned = abandon_integration_intent(
+            repository.repo,
+            intent_id=intent_id,
+            owner="integration-owner",
+            reason="superseded: the same commit is already on main",
+        )["decision"]
+        assert abandoned["code"] == "INTEGRATION_ABANDONED"
+        decision = plan_branch_retirement(
+            repository.repo, allocation_id=allocation, remote="origin", integrated_into="main"
+        )["decision"]
+        assert decision["code"] == "BRANCH_RETIREMENT_READY"
+        plan = decision["plan"]
+        assert plan["classification"] == "ANCESTRY"
+        assert plan["expected_oid"] == head
+        assert plan["aborted_ancestor_evidence"]["contract"] == (
+            "aborted-ancestor-branch-retirement/v1"
+        )
+        assert plan["aborted_ancestor_evidence"]["intent_id"] == intent_id
+        assert "INTEGRATION_PUBLICATION_NOT_VERIFIED" not in plan["blockers"]
+        store = MetadataStore(inventory(repository.repo).common_dir)
+        receipt_path = store.completion_receipts_dir / (
+            f"{plan['aborted_ancestor_evidence']['abort_receipt_id']}.json"
+        )
+        original = receipt_path.read_bytes()
+        receipt_path.write_bytes(original.replace(b"candidate preparation", b"candidate tampered!!"))
+        tampered = verify_branch_retirement(
+            repository.repo, plan_id=plan["plan_id"], operation="local"
+        )["decision"]
+        assert tampered["code"] != "RETIREMENT_EXECUTABLE"
+        assert git(repository.repo, "rev-parse", f"refs/heads/{plan['branch']}") == head
+        receipt_path.write_bytes(original)
+        verified = verify_branch_retirement(
+            repository.repo, plan_id=plan["plan_id"], operation="local"
+        )["decision"]
+        assert verified["code"] == "RETIREMENT_EXECUTABLE"
+        grant = _authorize(repository, plan)["authorization"]
+        assert _cas(repository, grant["ref"], grant["expected_oid"]) == 0
+        completed = complete_branch_retirement(
+            repository.repo,
+            authorization_id=grant["authorization_id"],
+            token=grant["token"],
+            result_path=_result(repository, grant, execution.REF_REMOVED_AT_EXPECTED_OID, tmp_path),
+        )["decision"]
+        assert completed["code"] == "RETIREMENT_EXECUTION_COMPLETE"
+        with pytest.raises(AssertionError):
+            git(repository.repo, "rev-parse", "--verify", f"refs/heads/{plan['branch']}")

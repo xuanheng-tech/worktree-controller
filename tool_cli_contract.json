@@ -1078,7 +1078,7 @@
   "session_launcher_entrypoint": "worktree-session",
   "session_entrypoint": "worktree-session-end",
   "tool_name": "worktree-controller",
-  "tool_version": "1.33.1",
+  "tool_version": "1.34.0",
   "delivered_closeout_version": 1,
   "retained_archive_version": 1,
   "retention_convergence_version": 2,
@@ -1531,6 +1531,7 @@
   },
   "retained_typed_cleanup_version": 1,
   "aborted_integration_preserved_cleanup_version": 2,
+  "aborted_integration_branch_retirement_version": 1,
   "aborted_integration_preserved_cleanup_contract": {
     "contract": "aborted-integration-preserved-cleanup/v1",
     "entrypoints": ["integration-abort", "python -m worktree_controller.preservation", "resource-clean --typed", "release", "integration-claim"],
@@ -1545,6 +1546,13 @@
     "repeat": "consumed live-source preservation inputs remain refused; a fresh empty cleanup plan verifies completed receipts without deletion; guarded release has its existing exact-request replay",
     "result": "cleanup only; never publication, source adoption, branch retirement or task completion",
     "storage_layout_version": 5
+  },
+  "aborted_integration_branch_retirement_contract": {
+    "contract": "aborted-ancestor-branch-retirement/v1",
+    "entrypoint": "branch-retirement-plan",
+    "eligible": "released integration allocation with one exact abort receipt, an abandoned detached intent, no publication receipt, and direct ancestry of the publication branch",
+    "execution": "existing plan-id expected-OID CAS; the plan pins abort receipt id, raw SHA-256 and intent id",
+    "refusal": "retryable, drifted, missing or non-ancestor evidence keeps INTEGRATION_PUBLICATION_NOT_VERIFIED; cherry-equivalence is not authority"
   },
   "multiple_preservation_recovery_version": 1,
   "multiple_preservation_recovery_contract": {
