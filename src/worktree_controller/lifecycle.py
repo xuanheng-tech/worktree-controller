@@ -4676,7 +4676,7 @@ def _typed_cleanup_plan_locked(
         from .cleanup_recovery import original
 
         old, _ = original(store, recovery, target=item.path, allocation_id=record.allocation_id)
-        if "preservation_evidences" in old["plan"]:
+        if "preservation_evidences" in old["plan"] or old["plan"]["contract"] == TYPED_RESOURCE_CONTRACT:
             from . import multiple_cleanup_recovery as multi_recovery
 
             if recovery.get("contract") != multi_recovery.CONTRACT:
@@ -4698,6 +4698,7 @@ def _typed_cleanup_plan_locked(
     terminal_evidence = None
     preserved_evidence = None
     preserved_evidences: list[dict[str, Any]] = []
+    build_preservations: list[dict[str, Any]] = []
     multiple = bool(additional_preservation_receipts or additional_preservation_receipt_sha256)
     try:
         completed_sources: set[str] = set()
@@ -4752,7 +4753,7 @@ def _typed_cleanup_plan_locked(
             additional_preservation_receipts,
             additional_preservation_receipt_sha256,
         )
-        if original_completed_sources:
+        if original_completed_sources and "preservation_evidences" in old["plan"]:
             expected_inputs = {
                 (entry["evidence"]["receipt_path"], entry["evidence"]["receipt_sha256"])
                 for entry in old["plan"]["preservation_evidences"]
@@ -4822,6 +4823,15 @@ def _typed_cleanup_plan_locked(
         preserved_evidences.sort(key=lambda row: row["source_relative"])
         if preserved_evidences:
             preserved_evidence = preserved_evidences[0]["evidence"]
+        from .build_preservation import generations
+
+        build_preservations, _ = generations(
+            bound, record, topology=source_topology, completed=completed_sources,
+            completed_topology=(old["plan"]["hardlink_topology"] if original_completed_sources
+                                else cleanup_plan["hardlink_topology"] if cleanup_transaction_id else None),
+        )
+        if cleanup_transaction_id and build_preservations != cleanup_plan.get("build_preservation_evidences", []):
+            raise ControllerError("PRESERVATION_COVERAGE_INVALID", "build preservation baseline changed during cleanup")
     except (ControllerError, OSError, ValueError, TypeError, KeyError) as exc:
         blockers.append(
             {
@@ -4987,6 +4997,8 @@ def _typed_cleanup_plan_locked(
         identity["integration_abort_evidence"] = integration_abort_evidence
     if recovery is not None:
         identity["recovery"] = recovery
+    if build_preservations:
+        identity["build_preservation_evidences"] = build_preservations
     return {**identity, "plan_id": _release_plan_id(identity)}
 
 

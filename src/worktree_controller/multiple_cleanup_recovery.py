@@ -23,6 +23,7 @@ from .store import MetadataStore, now_iso, record_from_dict, record_to_dict
 
 CONTRACT = "multiple-preservation-cleanup-recovery/v1"
 CLEANUP_CONTRACT = "legacy-preserved-state-multiple-cleanup/v1"
+TYPED_CONTRACT = "typed-disposable-resource/v1"
 IDENTITY_KEYS = (
     "repository_id", "allocation_id", "target_path", "expected_head",
     "expected_record_version", "owner", "authority_key",
@@ -283,6 +284,35 @@ def _proofset(plan: dict[str, Any], target: Path) -> list[dict[str, Any]]:
     return preserved
 
 
+def _typed_preservations(store, plan, recovery):
+    from .build_preservation import generations
+
+    record = record_from_dict(store._read_json(store.records_dir / f"{plan['allocation_id']}.json"))
+    if recovery.get("recovery_id"):
+        directory = _directory(store, recovery["original_transaction_id"], recovery["recovery_id"])
+        frozen, _ = e.read(directory / "record.json", recovery["recovery_record_sha256"])
+        record = _frozen_authority(frozen)
+    rows = [row for row in plan["resources"] if row["path"] in plan["cleanup_paths"]]
+    registration = record.history[-1].get("build_resources")
+    if (not registration or plan.get("preservation_evidence") is not None
+            or "preservation_evidences" in plan
+            or any(row.get("cleanup_action") != "none" or row.get("blocker") is not None
+                   or row.get("classification") != "existing-release-policy"
+                   for row in plan["resources"] if row["path"] not in plan["cleanup_paths"])
+            or any(row.get("resource_type") != "registered-build-output"
+                   or row.get("classification") != "disposable"
+                   or row.get("cleanup_action") != "remove-tree"
+                   or row.get("evidence", {}).get("build_declaration") != {
+                       "registration": registration, "path": row["path"]} for row in rows)):
+        raise _blocked("typed prefix recovery requires exact registered build outputs")
+    entries, preserved = generations(_identity(plan), record, topology=plan["hardlink_topology"],
+                                    verify_live=False)
+    if not preserved or ("build_preservation_evidences" in plan
+                         and entries != plan["build_preservation_evidences"]):
+        raise _blocked("typed recovery requires verified original build preservation lineage")
+    return preserved
+
+
 def details(
     store: MetadataStore, recovery: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], set[str], dict[str, Any]]:
@@ -320,7 +350,8 @@ def details(
             row["path"] for row in rows if row["cleanup_action"] == "remove-preserved-tree"
         ]
         if (receipt.get("receipt_id") != transaction or receipt.get("result") != "FAILED_OR_PARTIAL"
-                or receipt.get("contract") != CLEANUP_CONTRACT or plan.get("contract") != CLEANUP_CONTRACT
+                or plan.get("contract") not in {CLEANUP_CONTRACT, TYPED_CONTRACT}
+                or receipt.get("contract") != plan.get("contract")
                 or not _plan_hash(plan) or plan.get("blockers") != [] or not target.is_absolute()
                 or not paths or paths != planned_paths or len(set(paths)) != len(paths)
                 or not prefix or len(prefix) >= len(paths) or prefix != paths[:len(prefix)]
@@ -343,6 +374,14 @@ def details(
         _action_files(store, transaction, len(prefix))
         if done != set(prefix):
             raise _blocked("pending actions have evidence or original action files are incomplete")
+        if plan["contract"] == TYPED_CONTRACT:
+            preserved = _typed_preservations(store, plan, recovery)
+            root = _common_root(store, preserved, target, transaction)
+            if any(anchor["worktree"] != root for anchor in plan["hardlink_topology"]["anchors"].values()):
+                raise _blocked("original typed graph belongs to another checkout root")
+            if any(os.path.lexists(target / name) for name in done):
+                raise _blocked("completed typed output reappeared")
+            return receipt, preserved, done, topology
         preserved = _proofset(plan, target)
         preserved_rows = {row["path"]: row for row in rows if row["cleanup_action"] == "remove-preserved-tree"}
         if set(preserved_rows) != {row["source_relative"] for row in plan["preservation_evidences"]}:
@@ -401,6 +440,8 @@ def _guard(store: MetadataStore, recovery: dict[str, Any], *, allow_successor: b
 
 
 def _inputs(plan: dict[str, Any]) -> dict[str, Any]:
+    if plan["contract"] == TYPED_CONTRACT:
+        return {}
     proofs = plan["preservation_evidences"]
     return {
         "preservation_receipt": Path(proofs[0]["evidence"]["receipt_path"]),
@@ -427,8 +468,8 @@ def _plan_locked(repo: Path, store: MetadataStore, target: Path, owner: str, ver
     old_rows = {row["path"]: row for row in expected["resources"]}
     if (current["blockers"] or _identity(current) != _identity(expected)
             or item.branch != store._read_json(store.transactions_dir / f"{recovery['original_transaction_id']}.json")["branch"]
-            or current.get("contract") != CLEANUP_CONTRACT or current["cleanup_paths"] != suffix
-            or current.get("preservation_evidences") != expected["preservation_evidences"]
+            or current.get("contract") != expected["contract"] or current["cleanup_paths"] != suffix
+            or current.get("preservation_evidences") != expected.get("preservation_evidences")
             or current["hardlink_topology"] != topology
             or any(row != old_rows.get(row["path"]) for row in current["resources"] if row["path"] in suffix)):
         raise _blocked("current resource, topology, identity or runtime guards differ from the proven suffix")
@@ -470,7 +511,7 @@ def prepare(repo: Path, *, target: Path, owner: str, version: int, recovery: dic
                 "contract": CONTRACT, "result": "MULTIPLE_CLEANUP_RECOVERABLE",
                 "recovery_id": recovery_id, "plan": current,
                 "original_plan_id": old["plan"]["plan_id"],
-                "original_preservation_evidences": old["plan"]["preservation_evidences"],
+                "original_preservation_evidences": old["plan"].get("preservation_evidences"),
                 "completed_resources": old["plan"]["cleanup_paths"][:len(done)],
                 "remaining_resources": current["cleanup_paths"],
                 "prefix_topology_sha256": topology["sha256"],
@@ -501,7 +542,9 @@ def _load_record(store: MetadataStore, recovery_path: Path,
     _frozen_authority(record)
     recovery = record["plan"]["recovery"]
     directory = _directory(store, recovery["original_transaction_id"], record["recovery_id"])
-    old, _, done, topology = details(store, recovery)
+    old, _, done, topology = details(store, {
+        **recovery, "recovery_id": record["recovery_id"], "recovery_record_sha256": recovery_sha,
+    })
     baseline = record["plan"]
     suffix = old["plan"]["cleanup_paths"][len(done):]
     old_rows = {row["path"]: row for row in old["plan"]["resources"]}
@@ -510,15 +553,15 @@ def _load_record(store: MetadataStore, recovery_path: Path,
             or record.get("old_transaction_remains_immutable") is not True
             or record.get("completed_action_will_replay") is not False
             or record.get("original_plan_id") != old["plan"]["plan_id"]
-            or record.get("original_preservation_evidences") != old["plan"]["preservation_evidences"]
+            or record.get("original_preservation_evidences") != old["plan"].get("preservation_evidences")
             or record.get("completed_resources") != old["plan"]["cleanup_paths"][:len(done)]
             or record.get("remaining_resources") != old["plan"]["cleanup_paths"][len(done):]
             or record.get("prefix_topology_sha256") != topology["sha256"]
-            or not _plan_hash(baseline) or baseline.get("contract") != CLEANUP_CONTRACT
+            or not _plan_hash(baseline) or baseline.get("contract") != old["plan"]["contract"]
             or _identity(baseline) != _identity(old["plan"])
             or baseline.get("cleanup_paths") != suffix or baseline.get("hardlink_topology") != topology
-            or baseline.get("preservation_evidences") != old["plan"]["preservation_evidences"]
-            or baseline.get("preservation_evidence") != old["plan"]["preservation_evidence"]
+            or baseline.get("preservation_evidences") != old["plan"].get("preservation_evidences")
+            or baseline.get("preservation_evidence") != old["plan"].get("preservation_evidence")
             or baseline.get("blockers") != []
             or any(row != old_rows.get(row["path"]) for row in baseline["resources"] if row["path"] in suffix)):
         raise _blocked("invalid immutable multiple recovery record")
@@ -549,21 +592,22 @@ def _recovered_receipt(store: MetadataStore, receipt: dict[str, Any],
     old, preserved, done, topology = details(store, expected_recovery)
     suffix = old["plan"]["cleanup_paths"][len(done):]
     post = receipt["post_scan"]
-    if (receipt.get("contract") != CLEANUP_CONTRACT or receipt.get("result") != "CLEANED"
-            or successor.get("contract") != CLEANUP_CONTRACT or executing != expected_recovery
+    if (receipt.get("contract") != old["plan"]["contract"] or receipt.get("result") != "CLEANED"
+            or successor.get("contract") != old["plan"]["contract"] or executing != expected_recovery
             or _identity(successor) != _identity(old["plan"])
             or (bound is not None and _identity(successor) != bound)
             or successor.get("blockers") != [] or not _plan_hash(successor)
-            or successor.get("preservation_evidences") != old["plan"]["preservation_evidences"]
-            or successor.get("preservation_evidence") != old["plan"]["preservation_evidence"]
+            or successor.get("preservation_evidences") != old["plan"].get("preservation_evidences")
+            or successor.get("preservation_evidence") != old["plan"].get("preservation_evidence")
             or successor.get("hardlink_topology") != topology or successor.get("cleanup_paths") != suffix
             or receipt.get("actions") != [{"path": name, "status": "COMPLETED"} for name in suffix]
             or len(receipt.get("action_evidence", [])) != len(suffix)
             or any(successor.get(key) != value for key, value in baseline.items() if key not in {"plan_id", "recovery", "runtime_evidence", "warnings"})
-            or post.get("contract") != CLEANUP_CONTRACT or post.get("recovery") != expected_recovery
+            or post.get("contract") != old["plan"]["contract"] or post.get("recovery") != expected_recovery
             or _identity(post) != _identity(successor) or not _plan_hash(post)
-            or post.get("preservation_evidences") != old["plan"]["preservation_evidences"]
-            or post.get("preservation_evidence") != old["plan"]["preservation_evidence"]
+            or post.get("preservation_evidences") != old["plan"].get("preservation_evidences")
+            or post.get("preservation_evidence") != old["plan"].get("preservation_evidence")
+            or post.get("build_preservation_evidences") != baseline.get("build_preservation_evidences")
             or post.get("blockers") != [] or post.get("cleanup_paths") != []):
         raise _blocked("successful suffix completion differs from its immutable recovery baseline")
     completed, final = completed_actions(store, receipt["receipt_id"], tuple(receipt["action_evidence"]),

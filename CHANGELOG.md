@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.33.2
+
+- Verify old preservation generations before registered build cleanup crosses its
+  exact registration CAS transition; retain original hashes and bind completed
+  actions to their verified source/root identities and topology.
+- Add `build_preservation_recovery_version=1`: the existing `prepare-multiple`
+  and `resume` flow accepts proved typed build prefixes, including 1.33.1 plans.
+  Freeze a new verified baseline without modifying original failed receipts or
+  journals; execute only untouched pending actions. Drift, started/unknown effects,
+  runtime references and unknown evidence remain blocked. CLI 61/storage 5 unchanged.
+
 ## 1.33.1
 
 - Align build-resource registration with the existing allocation runtime authority

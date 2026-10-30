@@ -159,6 +159,10 @@ class RolloutTransactionError(ControllerError):
         elif command == "resource-clean" and isinstance(plan, dict):
             contract = plan.get("contract")
             entry = entries.get(contract) if isinstance(contract, str) else None
+            if contract == "typed-disposable-resource/v1" and any(
+                row.get("status") == "COMPLETED" for row in journal.get("actions", [])
+            ):
+                entry = "resource-recover --stage prepare-multiple --dry-run"
         code = cause.code if isinstance(cause, ControllerError) else "FILESYSTEM_ERROR"
         self.transaction_diagnostic = {
             "transaction_id": transaction,
@@ -400,7 +404,10 @@ def _rollout_transaction(
             "ROLLOUT_TRANSACTION_UNSUPPORTED", "unfinished transaction has no supported cleanup recovery"
         )
     contract = cleanup_plan.get("contract")
-    if contract == "typed-disposable-resource/v1":
+    typed_prefix = contract == "typed-disposable-resource/v1" and any(
+        row.get("status") == "COMPLETED" for row in journal.get("actions", [])
+    )
+    if contract == "typed-disposable-resource/v1" and not typed_prefix:
         _, digest = e.read(path)
         current = attempts.typed_plan(repo, store, path.stem, digest)
         return {"transaction_id": path.stem, "state": "TYPED_NO_ACTION_RECOVERABLE",
@@ -417,7 +424,7 @@ def _rollout_transaction(
             "plan_id": current["plan_id"],
             "completion_receipt_sha256": completion_sha,
         }
-    if contract == "legacy-preserved-state-multiple-cleanup/v1":
+    if contract == "legacy-preserved-state-multiple-cleanup/v1" or typed_prefix:
         from . import multiple_cleanup_recovery as multi_recovery
 
         _, journal_sha = e.read(path)

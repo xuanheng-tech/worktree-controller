@@ -168,6 +168,16 @@ With `retention_release_preflight_version` 1, only a successful exact release
 preflight yields `WOULD_RELEASE`; `CLOSEOUT_REQUIRED` is a prerequisite, not release
 eligibility. Execute with fresh guards and read the real per-checkout receipt.
 
+With `build_preservation_recovery_version` 1, typed cleanup binds existing
+preservation to the exact unchanged predecessor of one build registration.
+For a failed registered-build transaction with a proved COMPLETED prefix and
+untouched PENDING suffix, use `resource-recover --stage prepare-multiple` with
+current owner/CAS, exact transaction ID and original journal/failed-receipt hashes;
+review the dry-run and apply its plan ID. Resume only through the returned
+immutable recovery receipt/hash. Old records remain unchanged and completed
+actions never replay. Unknown/started effects or identity drift remain blocked;
+recovery grants no release or business completion authority.
+
 With `terminal_preserved_cleanup_version` 1, published integrations and completed
 no-change feature/audit tasks may use the existing preservation and `resource-clean --typed`
 flow. Require one exact remote-verified, lease-cleared publication or one verified original

@@ -81,6 +81,41 @@ record changes invalidate it; do not append another registration to refresh stal
 authority. Preserve failed transaction evidence and use the existing advertised
 recovery flow; unsupported partial states remain blocked.
 
+With `build_preservation_recovery_version=1`, typed cleanup verifies existing
+preservation generations before deleting any registered output. The only accepted
+CAS bridge is the unchanged allocation/owner/HEAD immediately before its one
+`BUILD_RESOURCES_REGISTERED` event. Original source/root anchors and preserved
+bytes must match. The plan freezes the verified generation hashes; each completed
+action supplies its original before/after topology proof. Old receipts are never
+rewritten or promoted to the new CAS.
+
+An interrupted typed transaction with an exact completed prefix and an untouched
+pending suffix uses the existing prefix recovery engine:
+
+```sh
+worktree-controller resource-recover --repo "$repo" --stage prepare-multiple \
+  --path "$checkout" --owner "$owner" --expected-record-version "$new_cas" \
+  --transaction-id "$transaction_id" --transaction-sha256 "$journal_sha256" \
+  --cleanup-receipt-sha256 "$failed_receipt_sha256" --dry-run --json
+```
+
+Review the remaining paths, then repeat with `--expected-plan-id` instead of
+`--dry-run`. Use the returned `recovery_receipt.path` and `.sha256` with
+`resource-recover --stage resume --recovery-receipt PATH
+--recovery-receipt-sha256 SHA --dry-run --json`, then the same request without
+`--dry-run`. Require `MULTIPLE_RECOVERY_CLEANED` and its completion receipt.
+Recovery preserves the old journal, failed receipt and completed action proofs,
+adds a verified baseline, and executes only the pending suffix. An old 1.33.1 plan
+without generation bindings is accepted only after full verification against its
+original registration and action topology; the new baseline is explicitly a new
+observation. Started/uncertain actions, changed bytes, recreated completed paths,
+unknown outputs or identity drift remain refused. A started recovery never
+blindly replays; a completed one may only reconcile its exact terminal receipt.
+This grants no release or batch authority. CLI 61 and storage 5 remain unchanged.
+Version 1.33.1 cannot verify this combined generation/action lineage and continues
+to refuse it. Recovery and subsequent release require the advertised capability;
+any runtime rollback must still pass the normal transaction compatibility gate.
+
 The performance benefit is eliminating separate preservation plan/copy/verify
 cycles for every explicitly rebuildable output. The shared-lock typed cleanup
 still scans and hashes resources and can remain expensive for large trees. No

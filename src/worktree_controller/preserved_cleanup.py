@@ -408,6 +408,7 @@ def _require_completion_coverage(
     Inspect only this allocation's official generation metadata. Unreferenced
     generation payloads are not opened, and source absence grants no authority.
     """
+    from .build_preservation import identity_matches
     from .source_preservation import CONTRACT as SOURCE_CONTRACT
 
     allocation = p.evidence_root() / bound["repository_id"] / bound["allocation_id"]
@@ -416,6 +417,7 @@ def _require_completion_coverage(
     if any(
         plan["authority"]["identity"] != bound
         and not _resumed_cleanup_identity(plan["authority"]["identity"], bound, record)
+        and not identity_matches(plan["authority"]["identity"], bound, record)
         for plan in plans
     ):
         raise _blocked("completed preservation belongs to another exact allocation identity")
@@ -505,6 +507,7 @@ def _require_completion_coverage(
 
 def _pending_preservation_plans(
     store, item, bound: dict[str, Any], transaction: str, cleanup_recovery: dict[str, Any] | None,
+    record: MetadataRecord,
 ) -> list[dict[str, Any]]:
     from . import cleanup_evidence as e
     from .lifecycle import _release_plan_id
@@ -535,7 +538,7 @@ def _pending_preservation_plans(
             "resource": relative, "before": after["before"],
             "after": {"path": str(path), "sha256": digest},
         })
-    done, _ = completed_actions(
+    done, preceding = completed_actions(
         store, transaction, tuple(proofs), initial_topology=plan["hardlink_topology"], cleanup_paths=plan["cleanup_paths"],
     )
     evidence_set = plan.get("preservation_evidences")
@@ -558,6 +561,22 @@ def _pending_preservation_plans(
             completed_plans.append(preserved)
     if preserved_plans:
         common_source_root(preserved_plans, item.path)
+    if plan.get("build_preservation_evidences"):
+        from .build_preservation import generations
+
+        original_topology = plan["hardlink_topology"]
+        if cleanup_recovery is not None:
+            from .multiple_cleanup_recovery import details
+
+            old, _, prefix, _ = details(store, cleanup_recovery)
+            done.update(prefix)
+            original_topology = old["plan"]["hardlink_topology"]
+        entries, plans = generations(bound, record, topology=preceding, completed=done,
+                                    completed_topology=original_topology)
+        if entries != plan["build_preservation_evidences"]:
+            raise _blocked("in-progress build preservation baseline changed")
+        completed_plans.extend(preserved for preserved in plans
+                               if Path(preserved["source"]).relative_to(item.path).as_posix() in done)
     return completed_plans
 
 
@@ -576,6 +595,7 @@ def cleanup_receipts(
     """
     from . import cleanup_evidence as e
     from . import hardlinks
+    from .build_preservation import identity_matches
     from .lifecycle import (
         MULTIPLE_PRESERVED_CLEANUP_CONTRACT,
         TYPED_RESOURCE_CONTRACT,
@@ -601,7 +621,9 @@ def cleanup_receipts(
             )
             if (
                 any(recovered_receipt["plan"].get(key) != value for key, value in bound.items())
-                or recovered_plan["authority"]["identity"] != bound
+                or (recovered_plan["authority"]["identity"] != bound
+                    and not identity_matches(
+                        recovered_plan["authority"]["identity"], bound, record))
             ):
                 raise _blocked("original recovery identity or exact CAS changed")
             from . import multiple_cleanup_recovery as multi_recovery
@@ -662,6 +684,9 @@ def cleanup_receipts(
                 from .cleanup_recovery import completed
 
                 if receipt.get("contract") == TYPED_RESOURCE_CONTRACT:
+                    if multi_recovery.completed(store, path.stem, verify_generations=True):
+                        completed_preservation_plans.extend(multi_recovery.verified_completion(store, path.stem, bound=bound))
+                        continue
                     from .cleanup_attempts import _typed_journal, typed_terminal
 
                     if typed_terminal(store, path.stem) or allow_pending_typed_no_action:
@@ -762,6 +787,14 @@ def cleanup_receipts(
             for preserved in preservation_plans:
                 if not source_absent(preserved, item.path):
                     raise _blocked("completed preserved source reappeared")
+            if plan.get("build_preservation_evidences"):
+                from .build_preservation import generations
+
+                entries, build_plans = generations(receipt_bound, record,
+                    topology=plan["hardlink_topology"], completed=done)
+                if entries != plan["build_preservation_evidences"]:
+                    raise _blocked("completed build preservation baseline changed")
+                preservation_plans.extend(build_plans)
             completed_preservation_plans.extend(preservation_plans)
             if preservation_plans:
                 original_root = common_source_root(preservation_plans, item.path)
@@ -774,6 +807,7 @@ def cleanup_receipts(
         if cleanup_transaction_id is not None:
             completed_preservation_plans.extend(_pending_preservation_plans(
                 store, item, bound, cleanup_transaction_id, cleanup_recovery,
+                record,
             ))
         _require_completion_coverage(bound, completed_preservation_plans, record=record)
         if expected_refs is not None:

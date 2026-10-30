@@ -1057,6 +1057,7 @@ def _main(argv: list[str] | None) -> int:
                 "published_checkout_recovery_version": 1,
                 "published_handoff_resource_registration_version": 1,
                 "registered_build_resources_version": 1,
+                "build_preservation_recovery_version": 1,
                 "retention_release_preflight_version": 1,
                 "multiple_preservation_cleanup_version": 1,
                 "multiple_preservation_recovery_version": 1,
