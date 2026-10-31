@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.34.2
+
+- Add `drifted_handoff_reopen_version=1`: `reopen --drifted-head <oid>` reopens a
+  `HANDOFF_READY` feature/audit/hotfix checkout that gained commits after its frozen
+  handoff. The named HEAD must equal the clean observed HEAD and strictly descend from
+  the complete frozen handoff identity; rewritten or unchanged history stays refused.
+  The `REOPENED_AFTER_DRIFT` event records both commits. Plain `reopen` is unchanged.
+  CLI 61/storage 5 unchanged.
+
 ## 1.34.1
 
 - Verify old preservation generations before registered build cleanup crosses its

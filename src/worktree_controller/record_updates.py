@@ -14,7 +14,13 @@ from .models import IntegrationIntent, MetadataRecord
 from .store import now_iso
 
 
-def updated_record(record: MetadataRecord, event: str, **changes: Any) -> MetadataRecord:
+def updated_record(
+    record: MetadataRecord,
+    event: str,
+    *,
+    event_detail: dict[str, Any] | None = None,
+    **changes: Any,
+) -> MetadataRecord:
     payload = record_to_dict(record)
     before = record.lifecycle
     timestamp = now_iso()
@@ -41,6 +47,8 @@ def updated_record(record: MetadataRecord, event: str, **changes: Any) -> Metada
         if len(changed) != 1:
             raise ValueError("a disposable resource event must identify exactly one transition")
         history[-1]["disposable_resource"] = dict(changed[0])
+    if event_detail:
+        history[-1].update(event_detail)
     payload["history"] = history
     return record_from_dict(payload)
 

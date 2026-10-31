@@ -1087,7 +1087,7 @@
   "session_launcher_entrypoint": "worktree-session",
   "session_entrypoint": "worktree-session-end",
   "tool_name": "worktree-controller",
-  "tool_version": "1.34.1",
+  "tool_version": "1.34.2",
   "delivered_closeout_version": 1,
   "retained_archive_version": 1,
   "retention_convergence_version": 2,
@@ -1541,6 +1541,7 @@
   "retained_typed_cleanup_version": 1,
   "aborted_integration_preserved_cleanup_version": 2,
   "aborted_integration_branch_retirement_version": 1,
+  "drifted_handoff_reopen_version": 1,
   "aborted_integration_preserved_cleanup_contract": {
     "contract": "aborted-integration-preserved-cleanup/v1",
     "entrypoints": ["integration-abort", "python -m worktree_controller.preservation", "resource-clean --typed", "release", "integration-claim"],

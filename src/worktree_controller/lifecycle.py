@@ -3107,6 +3107,7 @@ def reopen(
     target: Path,
     expected_record_version: int,
     owner: str,
+    drifted_head: str | None = None,
 ) -> dict[str, Any]:
     repository_initial = inventory(repository_path)
     store = MetadataStore(repository_initial.common_dir)
@@ -3139,19 +3140,33 @@ def reopen(
                 raise ControllerError(
                     "INTERRUPTED_TRANSACTION", "archive release transaction needs recovery"
                 )
-        if not archived and (
-            record.handoff_commit is None
-            or record.task_commit is None
-            or record.finalizer_commit is None
-            or record.finalizer_record_id is None
-            or any(
-                identity != item.head
-                for identity in (
-                    record.handoff_commit,
-                    record.task_commit,
-                    record.finalizer_commit,
+        frozen_complete = (
+            record.handoff_commit is not None
+            and record.finalizer_record_id is not None
+            and record.task_commit == record.handoff_commit
+            and record.finalizer_commit == record.handoff_commit
+        )
+        drift_detail: dict[str, Any] | None = None
+        if drifted_head is not None:
+            # Commits made in a frozen checkout after its handoff: the owner names the
+            # exact observed HEAD, which must strictly descend from the frozen identity.
+            if archived or record.lifecycle != "HANDOFF_READY":
+                raise ControllerError(
+                    "INVALID_LIFECYCLE", "drifted reopen requires a HANDOFF_READY allocation"
                 )
-            )
+            if (
+                not frozen_complete
+                or drifted_head != item.head
+                or item.head == record.handoff_commit
+                or not is_ancestor(repository.canonical_path, str(record.handoff_commit), item.head)
+            ):
+                raise ControllerError(
+                    "IDENTITY_MISMATCH",
+                    "drifted reopen requires the exact observed HEAD descending from the frozen handoff",
+                )
+            drift_detail = {"frozen_handoff_commit": record.handoff_commit, "observed_head": item.head}
+        elif not archived and (
+            not frozen_complete or record.handoff_commit != item.head
         ):
             raise ControllerError(
                 "IDENTITY_MISMATCH", "reopen requires the exact frozen handoff identity"
@@ -3181,7 +3196,8 @@ def reopen(
             if archived
             else _updated_record(
                 record,
-                "REOPENED",
+                "REOPENED_AFTER_DRIFT" if drift_detail else "REOPENED",
+                event_detail=drift_detail,
                 lifecycle="ACTIVE",
                 handoff_commit=None,
                 finalizer_record_id=None,

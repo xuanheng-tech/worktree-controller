@@ -896,6 +896,10 @@ def build_parser() -> argparse.ArgumentParser:
     reopen_parser.add_argument("--path", type=Path, required=True)
     reopen_parser.add_argument("--expected-record-version", type=int, required=True)
     reopen_parser.add_argument("--owner", required=True)
+    reopen_parser.add_argument(
+        "--drifted-head",
+        help="exact observed HEAD of a frozen checkout that gained commits after its handoff",
+    )
 
     for recovery_command in ("recover-handoff", "recover-published"):
         recovery_parser = commands.add_parser(
@@ -1065,6 +1069,7 @@ def _main(argv: list[str] | None) -> int:
                 "retained_typed_cleanup_version": 1,
                 "aborted_integration_preserved_cleanup_version": 2,
                 "aborted_integration_branch_retirement_version": 1,
+                "drifted_handoff_reopen_version": 1,
                 "terminal_preserved_cleanup_version": 1,
                 "preservation_leaf_version": 1,
                 "integration_publication_execution_version": 1,
@@ -1831,6 +1836,7 @@ def _main(argv: list[str] | None) -> int:
                 target=parsed.path,
                 expected_record_version=parsed.expected_record_version,
                 owner=parsed.owner,
+                drifted_head=parsed.drifted_head,
             )
         elif parsed.command in {"binding-add", "binding-remove", "binding-transfer"}:
             payload = update_external_binding(

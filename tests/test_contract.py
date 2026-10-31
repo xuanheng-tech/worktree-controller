@@ -165,8 +165,9 @@ def test_public_contract_matches_package_and_commands(tmp_path: Path) -> None:
         "release",
     ]
     assert contract["metadata_schema_version"] == 4
-    assert contract["tool_version"] == project["version"] == __version__ == "1.34.1"
+    assert contract["tool_version"] == project["version"] == __version__ == "1.34.2"
     assert contract["aborted_integration_branch_retirement_version"] == 1
+    assert contract["drifted_handoff_reopen_version"] == 1
     assert (
         contract["aborted_integration_branch_retirement_contract"]["contract"]
         == "aborted-ancestor-branch-retirement/v1"
@@ -320,12 +321,13 @@ def test_release_versions_are_independently_declared_and_advertised(capsys) -> N
         == 1
     )
 
-    assert payload["tool_version"] == contract["tool_version"] == "1.34.1"
+    assert payload["tool_version"] == contract["tool_version"] == "1.34.2"
     assert (
         advertised["aborted_integration_branch_retirement_version"]
         == contract["aborted_integration_branch_retirement_version"]
         == 1
     )
+    assert advertised["drifted_handoff_reopen_version"] == contract["drifted_handoff_reopen_version"] == 1
     assert (
         advertised["hosted_session_closeout_check_version"]
         == contract["hosted_session_closeout_check_version"]

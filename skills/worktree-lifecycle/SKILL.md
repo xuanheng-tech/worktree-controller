@@ -436,6 +436,11 @@ allocation; hosted session-ending calls remain refused.
   receipts, missing release evidence and any non-ancestor commit stay
   `INTEGRATION_PUBLICATION_NOT_VERIFIED`. Cherry-equivalence is not retirement authority. The
   plan does not delete the ref; execution remains the existing expected-OID CAS.
+- Capability `drifted_handoff_reopen_version` 1 lets the owner reopen a clean `HANDOFF_READY`
+  feature/audit/hotfix checkout that gained commits after its handoff with
+  `reopen --drifted-head <observed-HEAD>`. The HEAD must strictly descend from the complete
+  frozen handoff identity; rewritten history stays refused. Hand off or preserve the reopened
+  work normally afterwards; never reset the checkout to match frozen evidence.
 
 ## Invariants
 
