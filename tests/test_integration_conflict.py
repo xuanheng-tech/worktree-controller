@@ -90,6 +90,58 @@ def resolve(repository, target, head, **kwargs):
     )
 
 
+@pytest.mark.parametrize("crash_after_intent", [False, True])
+def test_conflict_claim_recovers_across_intent_metadata_boundary(
+    monkeypatch, crash_after_intent
+):
+    with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES_V5) as repository:
+        intent_id, source = failed(repository)
+        plan = retry(repository, intent_id, dry_run=True)
+        retry(repository, intent_id, expected_plan_id=plan["plan_id"])
+        store = MetadataStore(inventory(repository.repo).common_dir)
+        original = MetadataStore.replace_integration_intent
+
+        def crash_around_intent(self, intent):
+            if intent.intent_id == intent_id and intent.state == "PREPARING_INTEGRATION":
+                if crash_after_intent:
+                    original(self, intent)
+                raise ControllerError("INJECTED_CLAIM_CRASH", "crash around conflict claim")
+            return original(self, intent)
+
+        arguments = {
+            "owner": OWNER,
+            "intent_id": intent_id,
+            "target": repository.root / "resolution-recovery",
+            "resolve_conflicts": True,
+        }
+        with monkeypatch.context() as patch:
+            patch.setattr(MetadataStore, "replace_integration_intent", crash_around_intent)
+            with pytest.raises(ControllerError, match="crash around conflict claim"):
+                claim_integration(repository.repo, **arguments)
+
+        interrupted = store.load()
+        allocation = next(
+            record.allocation_id
+            for record in interrupted.records.values()
+            if record.task_key == "conflict" and record.role == "integration"
+        )
+        transaction, = store.transactions_dir.glob("*.json")
+        journal = store._read_json(transaction)
+        assert journal["phase"] == "WORKTREE_ADDED"
+        assert journal["integration_pending_merge"] is True
+
+        recovered = claim_integration(repository.repo, **arguments)["decision"]
+        assert recovered["code"] == "INTEGRATION_CONFLICT_CLAIMED"
+        assert recovered["pending_merge_source"] == source
+        assert recovered["allocation_id"] == allocation
+        claimed = store.load().integration_intents[intent_id]
+        assert claimed.state == "PREPARING_INTEGRATION"
+        assert claimed.history[-1]["event"] == "CANDIDATE_CLAIMED"
+        assert claimed.history[-1]["pending_merge_source"] == source
+        assert claimed.history[-1]["pending_merge_base"] == claimed.candidate_oid
+        assert store._read_json(transaction)["phase"] == "METADATA_WRITTEN"
+
+
 def test_unallocated_retry_and_resolved_merge_complete_normal_publication():
     with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES_V5) as repository:
         intent_id, source = failed(repository)

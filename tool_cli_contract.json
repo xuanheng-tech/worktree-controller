@@ -875,7 +875,7 @@
     "retirement": "explicit finish-layout after real client acceptance"
   },
   "entrypoint": "worktree-controller",
-  "holder_resolver_version": 1,
+  "holder_resolver_version": 2,
   "host_managed_writer_session": {
     "command": "writer-session host-check <actual-caller-path>",
     "access_option": "--access read|exec|write; write requires --target <absolute-path>; writer-session check accepts the same options",
@@ -1087,7 +1087,7 @@
   "session_launcher_entrypoint": "worktree-session",
   "session_entrypoint": "worktree-session-end",
   "tool_name": "worktree-controller",
-  "tool_version": "1.34.3",
+  "tool_version": "1.34.4",
   "delivered_closeout_version": 1,
   "retained_archive_version": 1,
   "retention_convergence_version": 2,
@@ -1157,7 +1157,7 @@
     "physical_removal": "separate existing release/gc-apply, with receipt, runtime and publication revalidation",
     "compatibility": "RELEASE_READY requires delivered_closeout_version 1; older runtimes fail closed on this lifecycle"
   },
-  "writer_lease_schema_version": 2,
+  "writer_lease_schema_version": 3,
   "writer_admission_states": [
     "GRANTED",
     "NOT_APPLICABLE",

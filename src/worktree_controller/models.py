@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -381,6 +381,7 @@ class WriterHolder:
     start_ticks: int
     session_id: str | None
     run_id: str | None
+    process_group_id: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

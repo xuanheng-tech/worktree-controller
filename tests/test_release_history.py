@@ -226,6 +226,34 @@ def test_storage_migration_cannot_be_combined_with_history_handover(handover):
     assert item.module.active_version() == item.previous
 
 
+def test_history_handover_accepts_the_backward_readable_lease_upgrade(handover, monkeypatch):
+    item = handover
+    real_release_contract = item.module.release_contract
+
+    def lease_contract(oid):
+        document = real_release_contract(oid)
+        document["writer_lease_schema_version"] = 2 if oid == item.baseline else 3
+        return document
+
+    monkeypatch.setattr(item.module, "release_contract", lease_contract)
+    proof = item.module.history_proof(item.previous, item.baseline, item.target, item.private)
+    assert proof["target"] == item.target
+
+
+def test_history_handover_refuses_any_other_lease_migration(handover, monkeypatch):
+    item = handover
+    real_release_contract = item.module.release_contract
+
+    def lease_contract(oid):
+        document = real_release_contract(oid)
+        document["writer_lease_schema_version"] = 2 if oid == item.baseline else 4
+        return document
+
+    monkeypatch.setattr(item.module, "release_contract", lease_contract)
+    with pytest.raises(item.module.Abort, match="storage, metadata or lease-format"):
+        item.module.history_proof(item.previous, item.baseline, item.target, item.private)
+
+
 def test_concurrent_activation_lock_and_pending_unknown_are_preserved(handover):
     item = handover
     with item.module.ACTIVATION_LOCK.open("wb") as lock:

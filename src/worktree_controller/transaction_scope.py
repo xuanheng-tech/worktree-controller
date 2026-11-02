@@ -511,6 +511,29 @@ def acquire_precedes_removed_release(store: MetadataStore, transaction: str, rel
     return is_ancestor(store.root.parents[1], acquire["expected_head"], plan.expected_head)
 
 
+def _acquire_integration_complete(store: MetadataStore, journal: dict, head: str) -> bool:
+    intent_id = journal.get("integration_intent_id")
+    if intent_id is None:
+        return True
+    snapshot = store._load_unlocked()
+    intent = snapshot.integration_intents.get(intent_id)
+    record = snapshot.records.get(journal["allocation_id"])
+    return bool(
+        intent is not None
+        and record is not None
+        and intent.allocation_id == record.allocation_id
+        and intent.state not in {"QUEUED", "WAITING_SCOPE"}
+        and intent.base_main_oid == record.base_commit
+        and intent.candidate_oid == head
+        and intent.revision >= 1
+        and (intent.task_key, intent.authority_key, intent.module, intent.owner)
+        == (record.task_key, record.authority_key, record.module, record.owner)
+        and intent.source_allocations == record.source_allocations
+        and intent.scope_paths == record.scope_paths
+        and any(event.get("event") == "CANDIDATE_CLAIMED" for event in intent.history)
+    )
+
+
 def acquire_evidence_terminal(store: MetadataStore, transaction: str) -> str | None:
     """Close an interrupted acquire only on positive current-state proof.
 
@@ -566,11 +589,13 @@ def acquire_evidence_terminal(store: MetadataStore, transaction: str) -> str | N
             and record_state == "match"
         ):
             attached = admin_head == f"ref: refs/heads/{journal['branch']}"
-            if branch_oid == expected_head and (handoff_head is None or attached):
+            if (branch_oid == expected_head and (handoff_head is None or attached)
+                    and _acquire_integration_complete(store, journal, expected_head)):
                 return "ACQUIRE_HANDOFF_SUPERSEDED" if handoff_head else "ACQUIRE_EVIDENCE_SUPERSEDED"
             if (handoff_head is None and attached
                     and _acquire_task_progress(store, journal, branch_oid)
-                    in {"ACTIVE", "RETAINED", "ARCHIVED"}):
+                    in {"ACTIVE", "RETAINED", "ARCHIVED"}
+                    and _acquire_integration_complete(store, journal, expected_head)):
                 return "ACQUIRE_EVIDENCE_SUPERSEDED"
     if (
         journal["phase"] == "METADATA_WRITTEN"
@@ -611,9 +636,9 @@ def acquire_evidence_terminal(store: MetadataStore, transaction: str) -> str | N
                     matches.append(receipt)
                 else:
                     return None
-            if len(matches) == 1 and (
-                branch_state == "resolved" or _acquire_retirement_evidence(store, journal, matches[0])
-            ):
+            if (len(matches) == 1 and _acquire_integration_complete(store, journal, expected_head)
+                    and (branch_state == "resolved"
+                         or _acquire_retirement_evidence(store, journal, matches[0]))):
                 return "ACQUIRE_RELEASE_SUPERSEDED"
     if (
         journal["phase"] in {"PREPARED", "WORKTREE_ADDED"}

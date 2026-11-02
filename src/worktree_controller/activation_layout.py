@@ -85,6 +85,7 @@ def _lease_bytes(raw: bytes, *, reverse: bool = False) -> bytes:
         writer_lease_from_dict(value)
         value["schema_version"] = 1
         value["holder"]["provider"] = value["holder"].pop("client_id")
+        value["holder"].pop("process_group_id", None)
     else:
         if (
             type(value.get("schema_version")) is not int
@@ -94,6 +95,7 @@ def _lease_bytes(raw: bytes, *, reverse: bool = False) -> bytes:
             raise LayoutError("previous writer lease does not match schema 1")
         value["schema_version"] = 2
         value["holder"]["client_id"] = value["holder"].pop("provider")
+        value["holder"].pop("process_group_id", None)
         writer_lease_from_dict(value)
     return (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
 

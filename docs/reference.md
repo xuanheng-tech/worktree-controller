@@ -1707,6 +1707,14 @@ replace the former executable contracts; branch retirement publishes contract
 `branch-retirement/v5` with execution authorization `branch-retirement-execution/v1` on plan schema 1. The package exposes `worktree-controller`,
 `worktree-session`, and `worktree-session-end` only. Historical releases remain unchanged.
 
+From 1.34.4, writer lease schema 3 records the holder's original process group ID.
+This preserves liveness evidence when a non-leader holder exits and is reaped while
+another group member survives. Schema 2 leases remain readable and upgrade through
+same-holder renewal; if such a holder has exited, its unknown original group fails
+closed with `HOLDER_PROCESS_GROUP_UNKNOWN` rather than assuming PGID equals PID.
+The process group is occupancy evidence, not part of holder equality or the
+session-closeout identity digest. CLI 61 and storage layout 5 remain unchanged.
+
 ### Governed deployment and rollback
 
 An archived Codex thread can leave a stale agent binding on a shared, still-live

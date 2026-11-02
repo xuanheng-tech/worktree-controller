@@ -27,7 +27,6 @@ import json
 import os
 import sys
 import uuid
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +38,13 @@ from .models import ControllerError, WriterHolder, WriterLease
 from .owner_actions import owner_action
 from .recovery_guidance import guide_argv
 from .store import MetadataStore
-from .writer_lease import holder_is_live, release_writer_lease, resolve_holder, same_holder
+from .writer_lease import (
+    holder_identity,
+    holder_is_live,
+    release_writer_lease,
+    resolve_holder,
+    same_holder,
+)
 
 TRIGGERS = ("task-terminal", "session-archive", "manual")
 COMPLETE_CODES = frozenset({"RETAINED", "RELEASE_INTENT_CREATED", "RELEASE_INTENT_EXISTS",
@@ -53,7 +58,7 @@ def _observed_allocations(store: MetadataStore, holder: WriterHolder, leases: li
     This is an observation of the original selector, never authority to mutate a
     checkout without its lease. Only an existing Task may resolve the owner work.
     """
-    identity = asdict(holder)
+    identity = holder_identity(holder)
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     path = store.session_closeouts_dir / f"{key}.json"
     with store.lock(exclusive=not checking):
@@ -106,7 +111,7 @@ def _prune_unreachable_closeouts(store: MetadataStore, *, keep: Path) -> None:
             value = store._read_json(candidate)
             holder = WriterHolder(**value["holder"])
             expected = hashlib.sha256(
-                json.dumps(asdict(holder), sort_keys=True).encode()
+                json.dumps(holder_identity(holder), sort_keys=True).encode()
             ).hexdigest()
             if (
                 value.get("contract") != "session-closeout/v1"

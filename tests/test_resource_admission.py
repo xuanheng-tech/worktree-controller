@@ -22,7 +22,7 @@ from worktree_controller import resource_admission as resources
 from worktree_controller.controller import plan
 from worktree_controller.git_backend import inventory
 from worktree_controller.lifecycle import acquire_across
-from worktree_controller.models import ControllerError
+from worktree_controller.models import ControllerError, WriterHolder
 from worktree_controller.store import MetadataStore
 from worktree_controller.writer_lease import RUNTIME_BINDING_PREFIX
 
@@ -564,6 +564,81 @@ def execution(tmp_path, task, device):
             "client_id": "agent-workspace", "session_id": task, "run_id": task}
 
 
+def test_allocation_rebind_accepts_legacy_holder_without_rewriting_history(host, tmp_path):
+    _, ledger, _ = host
+    holder = writer_lease.describe_holder(
+        os.getpid(), client_id="agent-workspace", session_id="legacy-bind", run_id="run"
+    )
+    request = resources.execution_request(
+        None,
+        "repository",
+        "allocation",
+        tmp_path,
+        client_id=holder.client_id,
+        session_id=holder.session_id,
+        run_id=holder.run_id,
+    )
+    lease_id = str(uuid.uuid4())
+    now = 1
+    key = resources.fingerprint(request)
+    row = {
+        "request": request,
+        "state": "ALLOCATED",
+        "holder": writer_lease.holder_identity(holder),
+        "lease_id": lease_id,
+        "created_at_ns": now,
+        "updated_at_ns": now,
+        "history": [{"state": "ALLOCATED", "at_ns": now}],
+    }
+    with ledger.locked():
+        state = ledger.read()
+        state["requests"][key] = row
+        ledger._save(state)
+
+    resources.bind_execution("repository", "allocation", holder, lease_id, required=True)
+
+    assert ledger.read()["requests"][key] == row
+
+
+def test_host_rebind_reuses_legacy_runtime_binding(host, tmp_path):
+    _, ledger, _ = host
+    target = tmp_path / "legacy-host-bind"
+    target.mkdir()
+    key = resources.host_execution(
+        "admit", target=target, session_id="legacy-host-bind", run_id="run"
+    )["decision"]["request_ids"][0]
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time;time.sleep(30)"],
+        cwd=target,
+        start_new_session=True,
+    )
+    try:
+        resources.host_execution("bind", request_id=key, holder_pid=child.pid)
+        with ledger.locked():
+            state = ledger.read()
+            row = state["requests"][key]
+            row["holder"].pop("process_group_id")
+            binding = json.loads(row["runtime_bindings"][0][len(RUNTIME_BINDING_PREFIX):])
+            binding["holder"].pop("process_group_id")
+            legacy_binding = RUNTIME_BINDING_PREFIX + json.dumps(
+                binding, sort_keys=True, separators=(",", ":")
+            )
+            row["runtime_bindings"] = [legacy_binding]
+            ledger._save(state)
+        before = ledger.read()["requests"][key]
+
+        rebound = resources.host_execution("bind", request_id=key, holder_pid=child.pid)
+
+        assert rebound["decision"]["binding"] == legacy_binding
+        after = ledger.read()["requests"][key]
+        assert {field: after[field] for field in ("state", "holder", "lease_id", "runtime_bindings", "history")} == {
+            field: before[field] for field in ("state", "holder", "lease_id", "runtime_bindings", "history")
+        }
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+
+
 def test_unmanaged_process_uses_the_same_budget_without_a_writer_lease(host, tmp_path):
     counters, ledger, _ = host
     target = tmp_path / "documents"
@@ -1030,6 +1105,11 @@ def test_cross_repository_queue_reserves_and_resumes_together(host):
         assert len(inventory(left.repo).worktrees) == len(inventory(right.repo).worktrees) == 2
 
 
+def _holder_digest(holder):
+    identity = writer_lease.holder_identity(WriterHolder(**holder))
+    return resources.canonical_holder_digest(identity)
+
+
 def _typed(host, key, *, digest=True, terminal=True, mutate=None, evidence=None):
     """Drive `clear --recover-dead-holder` with caller-supplied authority."""
     _, ledger, _ = host
@@ -1049,7 +1129,7 @@ def _typed(host, key, *, digest=True, terminal=True, mutate=None, evidence=None)
                     "run_id": row["request"]["run_id"], "end_reason": "shell_exit"}
     return resources.host_execution(
         "clear", request_id=key, recover_dead_holder=True,
-        expected_holder_sha256=resources.canonical_holder_digest(holder) if digest else "0" * 64,
+        expected_holder_sha256=_holder_digest(holder) if digest else "0" * 64,
         terminal_evidence=evidence)
 
 
@@ -1117,7 +1197,7 @@ def test_typed_recovery_releases_provably_dead_home_holder(host, tmp_path):
     row = ledger.read()["requests"][key]
     assert saved["request_id"] == key
     assert saved["contract"] == "host-execution-recovery/v1"
-    assert saved["original_holder_digest"] == resources.canonical_holder_digest(row["holder"])
+    assert saved["original_holder_digest"] == _holder_digest(row["holder"])
     assert saved["dead_holder_proof"]["recorded_pid"] == row["holder"]["pid"]
     assert saved["dead_holder_proof"]["pid_present"] is False
     assert saved["terminal_evidence"]["session_id"] == row["request"]["session_id"]

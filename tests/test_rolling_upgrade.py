@@ -532,6 +532,7 @@ def test_projection_reports_the_complete_recorded_identity(task):
         "pid": os.getpid(),
         "boot_id": writer_lease.boot_id(),
         "start_ticks": writer_lease.start_ticks(os.getpid()),
+        "process_group_id": os.getpgid(os.getpid()),
         "session_id": "s-1",
         "run_id": "r-1",
     }

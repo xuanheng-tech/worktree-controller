@@ -340,7 +340,7 @@ def test_cli_full_holder_roundtrip_rejects_pid_only_release(task, capsys):
     )
     decision = json.loads(capsys.readouterr().out)["decision"]
     assert decision["admission"] == "GRANTED"
-    assert decision["holder_resolver_version"] == 1
+    assert decision["holder_resolver_version"] == 2
     holder = decision["holder"]
     assert holder["boot_id"] == writer_lease.boot_id()
     assert holder["start_ticks"] == writer_lease.start_ticks(os.getpid())

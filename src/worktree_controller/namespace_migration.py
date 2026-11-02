@@ -1121,15 +1121,6 @@ def migrate_namespace(
             "namespace-migrate",
             _settled_decision(found["settled"], expected_plan_id, legacy_root, current_root),
         )
-    if found["prepared"] is None:
-        plan = _plan(repository_path, legacy_namespace, policy_from)
-        if expected_plan_id != plan["plan_id"]:
-            raise _blocked("NAMESPACE_PLAN_DRIFT", "namespace state changed after the plan")
-        if plan["scenario"] == CURRENT:
-            return _payload(
-                "namespace-migrate",
-                {**_scenario_report(plan), "dry_run": False, "idempotent": True, "changed": False},
-            )
     if not actor:
         raise _blocked("INVALID_REQUEST", "an actor is required to migrate a namespace")
 
@@ -1142,6 +1133,15 @@ def migrate_namespace(
                 _settled_decision(settled, expected_plan_id, legacy_root, current_root),
             )
         witness = found["prepared"]
+        if witness is None:
+            plan = _plan(repository_path, legacy_namespace, policy_from)
+            if expected_plan_id != plan["plan_id"]:
+                raise _blocked("NAMESPACE_PLAN_DRIFT", "namespace state changed after the plan")
+            if plan["scenario"] == CURRENT:
+                return _payload(
+                    "namespace-migrate",
+                    {**_scenario_report(plan), "dry_run": False, "idempotent": True, "changed": False},
+                )
         planned = (
             _resume_plan(repository_path, legacy_namespace, witness, expected_plan_id, policy_from)
             if witness is not None

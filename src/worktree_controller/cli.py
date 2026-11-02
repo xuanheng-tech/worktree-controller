@@ -83,7 +83,12 @@ from .namespace_migration import (
 from .reconciler import reconcile_writers
 from .rendering import render
 from .retirement_execution import KIND_CAS_DELETE
-from .writer_lease import acquire_writer_lease, release_writer_lease, resolve_holder
+from .writer_lease import (
+    HOLDER_RESOLVER_VERSION,
+    acquire_writer_lease,
+    release_writer_lease,
+    resolve_holder,
+)
 
 
 def _common_parser() -> argparse.ArgumentParser:
@@ -1079,7 +1084,7 @@ def _main(argv: list[str] | None) -> int:
                 "capabilities_version": 1,
                 "storage_layout_version": 5,
                 "writer_session_version": 2,
-                "holder_resolver_version": 1,
+                "holder_resolver_version": HOLDER_RESOLVER_VERSION,
                 "host_managed_writer_session_version": HOST_MANAGED_WRITER_SESSION_VERSION,
                 "resource_admission_version": 1,
                 "acquire_no_effect_recovery_version": 1,
@@ -1110,7 +1115,7 @@ def _main(argv: list[str] | None) -> int:
                 "typed_cleanup_no_action_receipt_version": 1,
                 "typed_cleanup_verify_boundary_version": 1,
                 "supported_writer_session_versions": [1, 2],
-                "writer_lease_schema_version": 2,
+                "writer_lease_schema_version": 3,
             }
         elif parsed.command == "publication-execution-session":
             from .publication_execution import run_session

@@ -339,6 +339,8 @@ def bind_execution(repository_id: str, allocation_id: str, holder: WriterHolder,
     """The repository mutation lock and exact writer check precede this call."""
     from dataclasses import asdict
 
+    from .writer_lease import same_holder
+
     ledger = AdmissionLedger()
     if not ledger.path.exists():
         if required:
@@ -359,8 +361,14 @@ def bind_execution(repository_id: str, allocation_id: str, holder: WriterHolder,
             matched = True
             if row["state"] not in {"RESERVED", "ALLOCATED"} or row.get("lease_id") not in {None, lease_id}:
                 raise ControllerError("ADMISSION_RECOVERY_REQUIRED", "execution reservation cannot bind another attempt")
-            if row["state"] == "ALLOCATED" and row.get("holder") == asdict(holder):
-                continue
+            recorded = row.get("holder")
+            if row["state"] == "ALLOCATED" and isinstance(recorded, dict):
+                try:
+                    unchanged = same_holder(WriterHolder(**recorded), holder)
+                except (TypeError, ValueError):
+                    unchanged = False
+                if unchanged:
+                    continue
             row.update(state="ALLOCATED", holder=asdict(holder), lease_id=lease_id,
                        allocation_id=allocation_id, updated_at_ns=time.time_ns())
             row["history"].append({"state": "ALLOCATED", "at_ns": row["updated_at_ns"]})
@@ -1342,6 +1350,8 @@ def _typed_host_recovery(ledger: AdmissionLedger, request_id: str, row: dict[str
     a live holder can never be released through this path.
     """
 
+    from .writer_lease import holder_identity
+
     request = row["request"]
     if request.get("kind") != "execution" or request.get("allocation_id") is not None:
         raise ControllerError("ADMISSION_RECOVERY_REQUIRED",
@@ -1351,7 +1361,12 @@ def _typed_host_recovery(ledger: AdmissionLedger, request_id: str, row: dict[str
             ("pid", "boot_id", "start_ticks", "client_id", "session_id", "run_id")):
         raise ControllerError("ADMISSION_RECOVERY_REQUIRED",
                               "host execution recorded identity is incomplete")
-    if not expected_holder_sha256 or expected_holder_sha256 != canonical_holder_digest(recorded):
+    try:
+        recorded_digest = canonical_holder_digest(holder_identity(WriterHolder(**recorded)))
+    except (TypeError, ValueError) as exc:
+        raise ControllerError("ADMISSION_RECOVERY_REQUIRED",
+                              "host execution recorded identity is invalid") from exc
+    if not expected_holder_sha256 or expected_holder_sha256 != recorded_digest:
         raise ControllerError("ADMISSION_RECOVERY_REQUIRED",
                               "typed recovery must present the reservation's own holder digest")
     evidence = _terminal_evidence(terminal_evidence, request)
@@ -1377,7 +1392,7 @@ def _typed_host_recovery(ledger: AdmissionLedger, request_id: str, row: dict[str
             "target_path": request.get("target_path"),
             "memory_bytes": request.get("memory_bytes"),
         },
-        "original_holder_digest": canonical_holder_digest(recorded),
+        "original_holder_digest": recorded_digest,
         "target_observation": target_observation,
         "dead_holder_proof": proof,
         "terminal_evidence": evidence,
@@ -1550,6 +1565,7 @@ def _inspect_host_executions(ledger: AdmissionLedger, *, request_id: str | None 
     verb, which re-verifies every fact at settle time.
     """
     from .controller import envelope
+    from .writer_lease import holder_identity
 
     with ledger.locked():
         state = ledger.read()
@@ -1587,14 +1603,18 @@ def _inspect_host_executions(ledger: AdmissionLedger, *, request_id: str | None 
         holder = row.get("holder")
         dead, note = False, None
         if isinstance(holder, dict):
-            canonical = json.dumps(holder, sort_keys=True, separators=(",", ":"))
-            entry["holder_canonical_json"] = canonical
-            entry["holder_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
             try:
+                canonical = json.dumps(
+                    holder_identity(WriterHolder(**holder)), sort_keys=True, separators=(",", ":")
+                )
+                entry["holder_canonical_json"] = canonical
+                entry["holder_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
                 entry["dead_holder_proof"] = _dead_holder_proof(WriterHolder(**holder))
                 dead = True
             except ControllerError as exc:
                 note = exc.code
+            except (TypeError, ValueError):
+                note = "INVALID_HOLDER"
         else:
             note = "NO_RECORDED_HOLDER"
         entry["recovery"] = _recovery_guidance(row, entry, dead=dead, note=note)
@@ -1621,7 +1641,7 @@ def host_execution(action: str, *, target: Path | None = None, request_id: str |
 
     from .controller import envelope
     from .environment import verify_runtime_transfer
-    from .writer_lease import RUNTIME_BINDING_PREFIX, describe_holder
+    from .writer_lease import RUNTIME_BINDING_PREFIX, describe_holder, holder_identity, same_holder
 
     ledger = AdmissionLedger()
     if action == "inspect":
@@ -1684,7 +1704,14 @@ def host_execution(action: str, *, target: Path | None = None, request_id: str |
                                          session_id=request["session_id"], run_id=request["run_id"])
                 if action == "bind":
                     if row["state"] != "RESERVED":
-                        if row["state"] != "ALLOCATED" or row.get("holder") != asdict(holder):
+                        recorded = row.get("holder")
+                        try:
+                            unchanged = isinstance(recorded, dict) and same_holder(
+                                WriterHolder(**recorded), holder
+                            )
+                        except (TypeError, ValueError):
+                            unchanged = False
+                        if row["state"] != "ALLOCATED" or not unchanged:
                             raise ControllerError("ADMISSION_RECOVERY_REQUIRED", "host execution was already attempted")
                     else:
                         row.update(state="ALLOCATED", holder=asdict(holder), lease_id=None)
@@ -1697,6 +1724,13 @@ def host_execution(action: str, *, target: Path | None = None, request_id: str |
                     "lease_id": None, "kind": "background" if action == "transfer" else "command"},
                     sort_keys=True, separators=(",", ":"))
                 bindings = row.setdefault("runtime_bindings", [])
+                if action == "bind" and binding not in bindings:
+                    legacy_binding = RUNTIME_BINDING_PREFIX + json.dumps(
+                        {"holder": holder_identity(holder), "lease_id": None, "kind": "command"},
+                        sort_keys=True, separators=(",", ":"),
+                    )
+                    if legacy_binding in bindings:
+                        binding = legacy_binding
                 if binding not in bindings:
                     bindings.append(binding)
                 decision = {"code": "HOST_EXECUTION_BOUND", "binding": binding}

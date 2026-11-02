@@ -19,12 +19,14 @@ import pytest
 
 from tests.test_resource_admission import (
     RUNTIME_BINDING_PREFIX,
+    _holder_digest,
     _host_reservation,
     _typed,
 )
 from tests.test_resource_admission import host as _shared_host
 from worktree_controller import resource_admission as resources
-from worktree_controller.models import ControllerError
+from worktree_controller.models import ControllerError, WriterHolder
+from worktree_controller.writer_lease import holder_identity
 
 # Re-export the shared host fixture; tests receive it as their `host` argument.
 host = _shared_host
@@ -95,7 +97,8 @@ def test_inspect_publishes_digest_proof_and_guidance_without_mutating(host):
     assert row["state"] == "ALLOCATED" and row["target_observation"] == "PRESENT"
     assert row["holder_sha256"] == resources.canonical_holder_digest(
         json.loads(row["holder_canonical_json"]))
-    assert json.loads(row["holder_canonical_json"]) == ledger.read()["requests"][key]["holder"]
+    recorded = ledger.read()["requests"][key]["holder"]
+    assert json.loads(row["holder_canonical_json"]) == holder_identity(WriterHolder(**recorded))
     assert row["dead_holder_proof"]["pid_present"] is False
     assert row["recovery"]["supported_action"] == "clear --recover-dead-holder"
     assert row["recovery"]["expected_holder_sha256"] == row["holder_sha256"]
@@ -142,7 +145,10 @@ def test_inspect_filters_by_identity_and_hides_other_uid_rows(host):
 def test_canonical_holder_digest_is_the_documented_representation(host):
     _, ledger, _ = host
     key = _dead_row(host, "digest-shape")
-    holder = ledger.read()["requests"][key]["holder"]
+    recorded = ledger.read()["requests"][key]["holder"]
+    assert recorded["process_group_id"] > 0
+    holder = holder_identity(WriterHolder(**recorded))
+    assert set(holder) == {"client_id", "pid", "boot_id", "start_ticks", "session_id", "run_id"}
     canonical = json.dumps(holder, sort_keys=True, separators=(",", ":"))
     assert resources.canonical_holder_digest(holder) == resources.canonical_holder_digest(
         json.loads(json.dumps(dict(reversed(list(holder.items()))))))
@@ -204,7 +210,7 @@ def test_typed_recovery_replays_after_crash_between_evidence_and_settle(host):
             "run_id": row["request"]["run_id"],
             "target_path": row["request"]["target_path"],
             "memory_bytes": row["request"]["memory_bytes"]},
-        "original_holder_digest": resources.canonical_holder_digest(holder),
+        "original_holder_digest": _holder_digest(holder),
         "target_observation": "PRESENT",
         "dead_holder_proof": {
             "recorded_pid": holder["pid"], "recorded_boot_id": holder["boot_id"],
@@ -267,7 +273,7 @@ def test_concurrent_typed_clears_converge_with_one_recovery(host):
     _, ledger, _ = host
     key = _dead_row(host, "race")
     row = ledger.read()["requests"][key]
-    digest = resources.canonical_holder_digest(row["holder"])
+    digest = _holder_digest(row["holder"])
     evidence = {"kind": "aw-terminal-record", "status": "EXITED",
                 "ended_at": "2026-09-24T00:00:00+08:00",
                 "session_id": row["request"]["session_id"],

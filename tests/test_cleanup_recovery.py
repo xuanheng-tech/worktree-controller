@@ -29,6 +29,7 @@ from worktree_controller.controller import doctor
 from worktree_controller.git_backend import inventory
 from worktree_controller.models import ControllerError
 from worktree_controller.store import MetadataStore, now_iso
+from worktree_controller.writer_lease import acquire_writer_lease
 
 
 def metadata_bytes(store):
@@ -167,6 +168,68 @@ def test_cli_recovers_recorded_release_and_replays_without_mutation():
         assert metadata_bytes(store) == completed
         assert git(repository.repo, "rev-parse", branch) == head
         assert not worktree.exists()
+
+
+@pytest.mark.parametrize("boundary", ["record", "binding"])
+def test_release_recovers_every_metadata_commit_boundary(boundary, monkeypatch):
+    with GitRepository(linked=0) as repository:
+        adopt_canonical(repository)
+        worktree, acquired = acquire_one(repository)
+        acquire_writer_lease(
+            repository.repo,
+            target=worktree,
+            owner="module-owner",
+            client_id="release-crash-test",
+            holder_pid=os.getpid(),
+        )
+        handoff_one(repository, worktree)
+        allocation = acquired["decision"]["allocation_id"]
+        method = "replace_record" if boundary == "record" else "remove_binding"
+        original = getattr(MetadataStore, method)
+
+        def crash_after_write(self, *args, **kwargs):
+            original(self, *args, **kwargs)
+            raise ControllerError("INJECTED_RELEASE_CRASH", f"crash after {method}")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(MetadataStore, method, crash_after_write)
+            with pytest.raises(ControllerError, match="crash after"):
+                lifecycle.release(
+                    repository.repo,
+                    target=worktree,
+                    expected_record_version=2,
+                    owner_release="module-owner",
+                )
+
+        store = MetadataStore(inventory(repository.repo).common_dir)
+        interrupted = store.load()
+        assert interrupted.records[allocation].lifecycle == "RELEASED"
+        assert (allocation in interrupted.bindings.values()) == (boundary == "record")
+        assert allocation in interrupted.writer_leases
+        transaction, = store.transactions_dir.glob("*.json")
+
+        recovered = lifecycle.release(
+            repository.repo,
+            target=worktree,
+            expected_record_version=2,
+            owner_release="module-owner",
+        )["decision"]
+        assert recovered["code"] == "RELEASE_RECOVERED"
+        settled = store.load()
+        assert allocation not in settled.bindings.values()
+        assert allocation not in settled.writer_leases
+        assert recovered["release_receipt_id"] in settled.release_receipts
+        assert not transaction.exists()
+
+        completed = metadata_bytes(store)
+        replayed = lifecycle.release(
+            repository.repo,
+            target=worktree,
+            expected_record_version=2,
+            owner_release="module-owner",
+        )["decision"]
+        assert replayed["code"] == "ALREADY_RELEASED"
+        assert metadata_bytes(store) == completed
 
 
 @pytest.mark.parametrize(("drift", "error_code"), [

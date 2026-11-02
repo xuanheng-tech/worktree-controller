@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -55,7 +56,7 @@ def _dead_pid() -> int:
 
 
 def _live_child() -> subprocess.Popen[bytes]:
-    return subprocess.Popen(["sleep", "60"])
+    return subprocess.Popen(["sleep", "60"], start_new_session=True)
 
 
 def _writer(repository, task: str, owner: str = "owner-b"):
@@ -149,6 +150,33 @@ def test_lease_acquire_renew_and_release_leave_the_allocation_alone() -> None:
             before.owner,
             before.record_version,
         )
+
+
+def test_same_holder_renews_a_legacy_lease_with_its_process_group() -> None:
+    with GitRepository(linked=0, policy_text=POLICY_V6) as repository:
+        adopt_canonical(repository)
+        target, allocation = _writer(repository, "w1")
+        acquire_writer_lease(
+            repository.repo, target=target, owner="owner-b", client_id="executor-a",
+            holder_pid=os.getpid(),
+        )
+        store = _store(repository)
+        path = store.writer_leases_dir / f"{allocation}.json"
+        legacy = dict(store._read_json(path))
+        legacy["schema_version"] = 2
+        legacy["holder"] = dict(legacy["holder"])
+        legacy["holder"].pop("process_group_id")
+        store._atomic_json(path, legacy)
+        assert store.load().writer_leases[allocation].holder.process_group_id is None
+
+        renewed = acquire_writer_lease(
+            repository.repo, target=target, owner="owner-b", client_id="executor-a",
+            holder_pid=os.getpid(),
+        )["decision"]
+        assert renewed["code"] == "WRITER_LEASE_RENEWED"
+        lease = store.load().writer_leases[allocation]
+        assert lease.schema_version == 3
+        assert lease.holder.process_group_id == os.getpgid(os.getpid())
 
 
 def test_lease_refuses_a_foreign_owner() -> None:
@@ -336,6 +364,55 @@ def test_a_surviving_child_keeps_the_slot_after_the_wrapper_dies() -> None:
             assert refused.value.code == "WRITER_LEASE_HELD"
         finally:
             subprocess.run(["pkill", "-g", str(group)], check=False)
+
+
+def test_a_non_leader_holder_keeps_its_recorded_process_group() -> None:
+    with GitRepository(linked=0, policy_text=POLICY_V6) as repository:
+        adopt_canonical(repository)
+        target, allocation = _writer(repository, "w1")
+        leader = subprocess.Popen(
+            [
+                "bash",
+                "-c",
+                "sleep 60 & sibling=$!; sleep 60 & holder=$!; "
+                "echo $holder; wait $holder; echo reaped; wait $sibling",
+            ],
+            stdout=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            assert leader.stdout is not None
+            holder_pid = int(leader.stdout.readline())
+            assert os.getpgid(holder_pid) == leader.pid != holder_pid
+            acquire_writer_lease(
+                repository.repo,
+                target=target,
+                owner="owner-b",
+                client_id="executor-a",
+                holder_pid=holder_pid,
+            )
+            os.kill(holder_pid, 9)
+            assert leader.stdout.readline().strip() == b"reaped"
+            holder = _store(repository).load().writer_leases[allocation].holder
+            assert writer_lease.process_group_is_live(holder)
+            with pytest.raises(ControllerError) as legacy:
+                writer_lease.process_group_is_live(replace(holder, process_group_id=None))
+            assert legacy.value.code == "HOLDER_PROCESS_GROUP_UNKNOWN"
+            payload = reconcile_writers(
+                repository.repo, actor="lifecycle-reconciler", dry_run=False
+            )
+            finding = _outcome(payload, "w1")
+            assert finding["outcome"] == "LIVE_WRITER"
+            assert "holder_process_group=alive" in finding["evidence"]
+            assert _record(repository, allocation).lifecycle == "ACTIVE"
+            with pytest.raises(ControllerError) as refused:
+                acquire_writer_lease(
+                    repository.repo, target=target, client_id="manual", holder_pid=os.getpid()
+                )
+            assert refused.value.code == "WRITER_LEASE_HELD"
+        finally:
+            subprocess.run(["pkill", "-g", str(leader.pid)], check=False)
+            leader.wait(timeout=10)
 
 
 def test_an_unleased_checkout_in_use_is_never_reclaimed() -> None:

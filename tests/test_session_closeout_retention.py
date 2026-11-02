@@ -5,18 +5,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import asdict, replace
+from dataclasses import replace
 
 from tests.test_controlled import adopt_canonical
 from tests.test_shadow import GitRepository
 from worktree_controller.git_backend import inventory
 from worktree_controller.session import _prune_unreachable_closeouts
 from worktree_controller.store import MetadataStore
-from worktree_controller.writer_lease import describe_holder
+from worktree_controller.writer_lease import describe_holder, holder_identity
 
 
 def _write(store: MetadataStore, holder) -> object:
-    identity = asdict(holder)
+    identity = holder_identity(holder)
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     path = store.session_closeouts_dir / f"{key}.json"
     store._atomic_json(

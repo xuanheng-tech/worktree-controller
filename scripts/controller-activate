@@ -454,9 +454,12 @@ def history_proof(previous: str, baseline: str, target: str, previous_repo: Path
         raise Abort("previous runtime, packaging, maintenance or Skill source differs from the public baseline")
     verify_release_progression(baseline, target)
     old_contract, new_contract = release_contract(baseline), release_contract(target)
+    old_lease_schema = old_contract.get("writer_lease_schema_version")
+    new_lease_schema = new_contract.get("writer_lease_schema_version")
     if (old_contract.get("storage_layout") != new_contract.get("storage_layout")
             or any(old_contract.get(key) != new_contract.get(key) for key in
-                   ("storage_layout_version", "metadata_schema_version", "writer_lease_schema_version"))):
+                   ("storage_layout_version", "metadata_schema_version"))
+            or (old_lease_schema != new_lease_schema and (old_lease_schema, new_lease_schema) != (2, 3))):
         raise Abort("history handover cannot combine a storage, metadata or lease-format migration")
     old_runtime, new_runtime = runtime_path(previous), runtime_path(target)
     _, old_receipt_sha = verify_exported_runtime(old_runtime, previous, baseline)
@@ -1288,8 +1291,9 @@ def post_activation_check(runtime: Path, oid: str) -> None:
     expected = {
         "code": "CAPABILITIES",
         "writer_session_version": 2,
-        "holder_resolver_version": 1,
+        "holder_resolver_version": 2,
         "host_managed_writer_session_version": 2,
+        "writer_lease_schema_version": 3,
     }
     decision = payload.get("decision")
     if (payload.get("errors") != [] or not isinstance(decision, dict)

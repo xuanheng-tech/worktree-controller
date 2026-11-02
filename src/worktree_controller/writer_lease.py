@@ -36,7 +36,7 @@ from .models import (
 from .store import WRITER_LEASE_SCHEMA_VERSION
 
 CLIENT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
-HOLDER_RESOLVER_VERSION = 1
+HOLDER_RESOLVER_VERSION = 2
 _BOOT_ID_FILE = Path("/proc/sys/kernel/random/boot_id")
 RUNTIME_BINDING_PREFIX = "runtime:process-v1:"
 
@@ -58,9 +58,13 @@ def runtime_binding(value: str) -> tuple[WriterHolder, str | None] | None:
         if set(data) != {"holder", "lease_id", "kind"} or data["kind"] not in {"agent", "test", "preview", "background", "command"}:
             raise ValueError("invalid runtime binding")
         identity = data["holder"]
-        if set(identity) != {"pid", "boot_id", "start_ticks", "client_id", "session_id", "run_id"}:
+        required = {"pid", "boot_id", "start_ticks", "client_id", "session_id", "run_id"}
+        if not required <= set(identity) or set(identity) - required - {"process_group_id"}:
             raise ValueError("incomplete runtime holder")
-        if any(type(identity[key]) is not int or identity[key] < 1 for key in ("pid", "start_ticks")):
+        positive = ["pid", "start_ticks"]
+        if identity.get("process_group_id") is not None:
+            positive.append("process_group_id")
+        if any(type(identity[key]) is not int or identity[key] < 1 for key in positive):
             raise ValueError("invalid runtime holder")
         if not isinstance(identity["client_id"], str) or not CLIENT_ID_PATTERN.fullmatch(identity["client_id"]):
             raise ValueError("invalid runtime client")
@@ -167,7 +171,7 @@ def start_ticks(pid: int) -> int | None:
 def resolve_holder(
     selector: str, *, client_id: str, session_id: str | None = None, run_id: str | None = None
 ) -> WriterHolder:
-    """Version 1 resolver shared by CLI, hooks and wrappers; never match shell arguments."""
+    """Version 2 resolver shared by CLI, hooks and wrappers; never match shell arguments."""
     if selector.startswith("ancestor:"):
         name = selector.removeprefix("ancestor:")
         if not name or Path(name).name != name:
@@ -205,6 +209,17 @@ def same_holder(left: WriterHolder, right: WriterHolder) -> bool:
     return left == right
 
 
+def holder_identity(holder: WriterHolder) -> dict[str, Any]:
+    return {
+        "client_id": holder.client_id,
+        "pid": holder.pid,
+        "boot_id": holder.boot_id,
+        "start_ticks": holder.start_ticks,
+        "session_id": holder.session_id,
+        "run_id": holder.run_id,
+    }
+
+
 def describe_holder(
     pid: int,
     *,
@@ -219,6 +234,12 @@ def describe_holder(
     ticks = start_ticks(pid)
     if ticks is None:
         raise ControllerError("INVALID_HOLDER", f"process {pid} is not running")
+    try:
+        process_group_id = os.getpgid(pid)
+    except (ProcessLookupError, PermissionError, OSError) as exc:
+        raise ControllerError("INVALID_HOLDER", f"process group {pid} cannot be inspected") from exc
+    if start_ticks(pid) != ticks:
+        raise ControllerError("INVALID_HOLDER", f"process {pid} changed during inspection")
     return WriterHolder(
         client_id=client_id,
         pid=pid,
@@ -226,6 +247,7 @@ def describe_holder(
         start_ticks=ticks,
         session_id=session_id,
         run_id=run_id,
+        process_group_id=process_group_id,
     )
 
 
@@ -239,7 +261,17 @@ def holder_is_live(holder: WriterHolder) -> bool:
         raise ControllerError("INVALID_HOLDER", "recorded boot identity is unknown")
     if holder.boot_id != boot_id():
         return False
-    return start_ticks(holder.pid) == holder.start_ticks
+    ticks = start_ticks(holder.pid)
+    if ticks is None or ticks != holder.start_ticks:
+        return False
+    try:
+        raw = Path(f"/proc/{holder.pid}/stat").read_text(encoding="utf-8")
+        cut = raw.rfind(")")
+        if cut != -1 and raw[cut + 2 : cut + 3] in {"Z", "X"}:
+            return False
+    except (FileNotFoundError, ProcessLookupError, OSError):
+        return False
+    return True
 
 
 def process_group_is_live(holder: WriterHolder) -> bool:
@@ -254,16 +286,26 @@ def process_group_is_live(holder: WriterHolder) -> bool:
     if ticks is not None and ticks != holder.start_ticks:
         # A reused pid's new group is not evidence about the original holder.
         return False
-    try:
-        pgid = os.getpgid(holder.pid)
-    except (ProcessLookupError, PermissionError, OSError):
-        pgid = holder.pid
+    if holder.process_group_id is not None:
+        pgid = holder.process_group_id
+    else:
+        try:
+            pgid = os.getpgid(holder.pid)
+        except (ProcessLookupError, PermissionError, OSError) as exc:
+            raise ControllerError(
+                "HOLDER_PROCESS_GROUP_UNKNOWN",
+                "legacy holder does not record its original process group",
+            ) from exc
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
         candidate = int(entry)
         try:
             if os.getpgid(candidate) == pgid:
+                raw = Path(f"/proc/{candidate}/stat").read_text(encoding="utf-8")
+                cut = raw.rfind(")")
+                if cut != -1 and raw[cut + 2 : cut + 3] in {"Z", "X"}:
+                    continue
                 return True
         except (ProcessLookupError, PermissionError, OSError):
             continue
@@ -506,7 +548,11 @@ def acquire_writer_lease(
                         "WRITER_LEASE_EXPIRED", "expired lease requires explicit renewal ttl"
                     )
                 renewed = replace(
-                    existing, renewed_at=now(), record_version=existing.record_version + 1
+                    existing,
+                    schema_version=WRITER_LEASE_SCHEMA_VERSION,
+                    holder=holder,
+                    renewed_at=now(),
+                    record_version=existing.record_version + 1,
                 )
                 if ttl_seconds is not None:
                     renewed = replace(
@@ -610,7 +656,7 @@ def release_writer_lease(
             exited = not holder_is_live(holder)
             if exited and (
                 lease_id is None
-                or process_group_is_live(holder)
+                or process_group_is_live(lease.holder)
                 or any(pid not in own_ancestry() for pid, _ in paths_in_use(item.path))
             ):
                 # A host releases after its runtime reaped the session; the exact recorded

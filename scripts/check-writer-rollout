@@ -373,7 +373,7 @@ def surviving_writers(repository, blockers, surviving, stranded):
                 "pid": holder["pid"],
             }
         )
-        if lease.get("schema_version") != 2:
+        if lease.get("schema_version") not in {2, 3}:
             blockers.append(f"SURVIVING_WRITER_UNVERIFIABLE:{repository.name}:{entry.stem}")
 
 

@@ -399,8 +399,10 @@ installed runtimes available for verification and rollback.
 The gate requires a root release whose runtime, packaging, maintenance scripts and complete Skill
 payload exactly equal the original frozen predecessor. Both public baseline and target must have
 live matching stable release tags. The target must descend from that baseline and preserve storage,
-metadata and writer-lease formats and installed Skill bytes. This entry cannot combine namespace,
-policy, Skill or cleanup migrations. Existing resource, metadata and consumer gates still run.
+metadata and installed Skill bytes. Writer-lease format must also remain unchanged, except for the
+backward-readable schema 2 to 3 upgrade; every other lease-format migration remains refused. This
+entry cannot combine namespace, policy, Skill or cleanup migrations. Existing resource, metadata and
+consumer gates still run.
 Live compatible writer sessions may continue; incompatible, stale or incomplete evidence is not
 made eligible by this procedure.
 

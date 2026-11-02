@@ -1011,7 +1011,7 @@ def integration_reconciliation_receipt_to_dict(
     return asdict(receipt)
 
 
-WRITER_LEASE_SCHEMA_VERSION = 2
+WRITER_LEASE_SCHEMA_VERSION = 3
 WRITER_RECEIPT_SCHEMA_VERSION = 1
 
 
@@ -1029,21 +1029,18 @@ def writer_lease_from_dict(data: Mapping[str, Any]) -> WriterLease:
         "expires_at",
         "record_version",
     }
-    if data.get("schema_version") != WRITER_LEASE_SCHEMA_VERSION or set(data) != expected:
+    schema_version = data.get("schema_version")
+    if schema_version not in {2, WRITER_LEASE_SCHEMA_VERSION} or set(data) != expected:
         raise ControllerError("INVALID_METADATA", "writer lease schema is invalid")
     lease_id = _optional_uuid(data.get("lease_id"), "lease_id")
     allocation_id = _optional_uuid(data.get("allocation_id"), "allocation_id")
     if lease_id is None or allocation_id is None:
         raise ControllerError("INVALID_METADATA", "writer lease identifiers are required")
     holder = data.get("holder")
-    if not isinstance(holder, Mapping) or set(holder) != {
-        "client_id",
-        "pid",
-        "boot_id",
-        "start_ticks",
-        "session_id",
-        "run_id",
-    }:
+    holder_fields = {"client_id", "pid", "boot_id", "start_ticks", "session_id", "run_id"}
+    if schema_version == WRITER_LEASE_SCHEMA_VERSION:
+        holder_fields.add("process_group_id")
+    if not isinstance(holder, Mapping) or set(holder) != holder_fields:
         raise ControllerError("INVALID_METADATA", "writer lease holder is invalid")
     session_id = holder.get("session_id")
     run_id = holder.get("run_id")
@@ -1053,7 +1050,7 @@ def writer_lease_from_dict(data: Mapping[str, Any]) -> WriterLease:
         raise ControllerError("INVALID_METADATA", "writer lease run is invalid")
     raw_expiry = data.get("expires_at")
     return WriterLease(
-        schema_version=WRITER_LEASE_SCHEMA_VERSION,
+        schema_version=schema_version,
         lease_id=lease_id,
         repository_id=_nonempty_string(data.get("repository_id"), "repository_id"),
         allocation_id=allocation_id,
@@ -1066,6 +1063,11 @@ def writer_lease_from_dict(data: Mapping[str, Any]) -> WriterLease:
             start_ticks=_positive_int(holder.get("start_ticks"), "start_ticks"),
             session_id=session_id,
             run_id=run_id,
+            process_group_id=(
+                _positive_int(holder.get("process_group_id"), "process_group_id")
+                if schema_version == WRITER_LEASE_SCHEMA_VERSION
+                else None
+            ),
         ),
         acquired_at=_validate_timestamp(data.get("acquired_at"), "acquired_at"),
         renewed_at=_validate_timestamp(data.get("renewed_at"), "renewed_at"),
@@ -1075,6 +1077,16 @@ def writer_lease_from_dict(data: Mapping[str, Any]) -> WriterLease:
 
 
 def writer_lease_to_dict(lease: WriterLease) -> dict[str, Any]:
+    holder = {
+        "client_id": lease.holder.client_id,
+        "pid": lease.holder.pid,
+        "boot_id": lease.holder.boot_id,
+        "start_ticks": lease.holder.start_ticks,
+        "session_id": lease.holder.session_id,
+        "run_id": lease.holder.run_id,
+    }
+    if lease.schema_version == WRITER_LEASE_SCHEMA_VERSION:
+        holder["process_group_id"] = lease.holder.process_group_id
     return {
         "schema_version": lease.schema_version,
         "lease_id": lease.lease_id,
@@ -1082,14 +1094,7 @@ def writer_lease_to_dict(lease: WriterLease) -> dict[str, Any]:
         "allocation_id": lease.allocation_id,
         "worktree_path": lease.worktree_path,
         "owner": lease.owner,
-        "holder": {
-            "client_id": lease.holder.client_id,
-            "pid": lease.holder.pid,
-            "boot_id": lease.holder.boot_id,
-            "start_ticks": lease.holder.start_ticks,
-            "session_id": lease.holder.session_id,
-            "run_id": lease.holder.run_id,
-        },
+        "holder": holder,
         "acquired_at": lease.acquired_at,
         "renewed_at": lease.renewed_at,
         "expires_at": lease.expires_at,

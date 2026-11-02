@@ -161,6 +161,8 @@ def runtime_binding_value(holder: dict[str, Any], lease_id: str, kind: str) -> s
         "lease_id": lease_id,
         "kind": kind,
     }
+    if holder.get("process_group_id") is not None:
+        identity["holder"]["process_group_id"] = holder["process_group_id"]
     return RUNTIME_BINDING_PREFIX + json.dumps(identity, sort_keys=True, separators=(",", ":"))
 
 

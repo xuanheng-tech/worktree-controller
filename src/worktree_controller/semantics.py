@@ -458,6 +458,7 @@ def integration_candidate_issues(
     *,
     require_task_match: bool = True,
     base_commit: str | None = None,
+    pending_merge_source: str | None = None,
 ) -> tuple[dict[str, str], ...]:
     issues: list[dict[str, str]] = []
     if require_task_match:
@@ -506,7 +507,7 @@ def integration_candidate_issues(
     replay_by_source = {replay["source_allocation_id"]: replay for replay in replay_evidence}
     lineage_heads = list(source_heads)
     for source_allocation, source_head in zip(source_allocations, source_heads, strict=True):
-        if is_ancestor(item.path, source_head, item.head):
+        if source_head == pending_merge_source or is_ancestor(item.path, source_head, item.head):
             continue
         replay = replay_by_source.get(source_allocation)
         if replay is None:

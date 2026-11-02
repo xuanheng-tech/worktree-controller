@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.34.4
+
+- Recover interrupted releases across record, binding and writer-lease metadata
+  commit boundaries without leaving residual writer authority; repeated recovery
+  remains idempotent and preserves the original release evidence.
+- Bind integration acquire journals to their exact queued intent and resume both
+  sides of the intent-claim boundary before classifying the acquisition complete.
+  Reuse the original candidate and emit its claim event exactly once.
+- Record the holder's original process group in writer lease schema 3 so a reaped
+  non-leader cannot make surviving group members appear dead. Schema 2 remains
+  readable and upgrades on same-holder renewal; unknown legacy groups fail closed.
+  Advertise `holder_resolver_version=2`; CLI 61/storage 5 unchanged.
+
 ## 1.34.3
 
 - Optimize `/proc` process reference scanning in `busy_paths`: apply early common

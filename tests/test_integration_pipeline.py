@@ -33,6 +33,7 @@ from worktree_controller.lifecycle import (
 )
 from worktree_controller.models import ControllerError
 from worktree_controller.store import MetadataStore
+from worktree_controller.transaction_scope import terminal_state
 
 POLICY_THREE_CANDIDATES = """\
 schema_version = 4
@@ -194,6 +195,78 @@ def _publish(
         run_id=str(leased["decision"]["run_id"]),
         auto_release=auto_release,
     )
+
+
+@pytest.mark.parametrize("crash_after_intent", [False, True])
+def test_claim_recovers_after_candidate_record_precedes_intent(
+    monkeypatch, crash_after_intent
+) -> None:
+    with GitRepository(linked=0) as repository:
+        adopt_canonical(repository)
+        _configure_remote(repository)
+        _source_path, source_allocation, _head = _source(
+            repository,
+            task="recover-claim-source",
+            relative_path="source.txt",
+            content="source\n",
+        )
+        queued = _enqueue(
+            repository, task="recover-claim", source_allocation=source_allocation
+        )["decision"]
+        original = MetadataStore.replace_integration_intent
+
+        def crash_around_intent(self, intent):
+            if intent.intent_id == queued["intent_id"]:
+                if crash_after_intent:
+                    original(self, intent)
+                raise ControllerError("INJECTED_CLAIM_CRASH", "crash around intent claim")
+            return original(self, intent)
+
+        arguments = {
+            "owner": "integration-owner",
+            "intent_id": queued["intent_id"],
+            "target": repository.root / "recover-claim",
+            "branch": "integration/recover-claim",
+        }
+        with monkeypatch.context() as patch:
+            patch.setattr(MetadataStore, "replace_integration_intent", crash_around_intent)
+            with pytest.raises(ControllerError, match="crash around intent claim"):
+                claim_integration(repository.repo, **arguments)
+
+        store = MetadataStore(inventory(repository.repo).common_dir)
+        interrupted = store.load()
+        intent = interrupted.integration_intents[queued["intent_id"]]
+        if crash_after_intent:
+            assert intent.state == "PREPARING_INTEGRATION"
+            assert intent.allocation_id is not None
+        else:
+            assert intent.state == "QUEUED" and intent.allocation_id is None
+        allocation = next(
+            record.allocation_id
+            for record in interrupted.records.values()
+            if record.task_key == "recover-claim"
+        )
+        transaction, = store.transactions_dir.glob("*.json")
+        with store.lock(exclusive=False):
+            assert terminal_state(store, transaction.stem) == (
+                "ACQUIRE_EVIDENCE_SUPERSEDED" if crash_after_intent else None
+            )
+
+        recovered = claim_integration(repository.repo, **arguments)["decision"]
+        assert recovered["code"] == "INTEGRATION_CANDIDATE_CLAIMED"
+        assert recovered["allocation_id"] == allocation
+        claimed = store.load().integration_intents[queued["intent_id"]]
+        assert claimed.state == "PREPARING_INTEGRATION"
+        assert claimed.allocation_id == allocation
+        with store.lock(exclusive=False):
+            assert terminal_state(store, transaction.stem) == "ACQUIRE_EVIDENCE_SUPERSEDED"
+
+        before = store.load()
+        events = store.list_lifecycle_events("recover-claim")
+        repeated = claim_integration(repository.repo, **arguments)["decision"]
+        assert repeated["allocation_id"] == allocation
+        assert store.load() == before
+        assert store.list_lifecycle_events("recover-claim") == events
 
 
 def test_policy_v1_queues_and_publishes_frozen_source() -> None:

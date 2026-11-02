@@ -421,8 +421,10 @@ def _transaction(
     expected_head: str | None,
     expected_record_version: int | None,
     created_at: str,
+    integration_intent_id: str | None = None,
+    integration_pending_merge: bool = False,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "schema_version": METADATA_SCHEMA_VERSION,
         "transaction_id": transaction_id,
         "repository_id": repository_id,
@@ -436,6 +438,11 @@ def _transaction(
         "created_at": created_at,
         "updated_at": now_iso(),
     }
+    if integration_intent_id is not None:
+        payload["integration_intent_id"] = integration_intent_id
+    if integration_pending_merge:
+        payload["integration_pending_merge"] = integration_pending_merge
+    return payload
 
 
 def _assert_all_adopted(repository: RepositoryInventory, snapshot: MetadataSnapshot) -> None:
@@ -1003,7 +1010,20 @@ def _reuse_integration_claim(
             raise ControllerError("INTEGRATION_INTENT_MISMATCH", "claim differs from its bound candidate")
         if item.detached or not item.clean or item.head != intent.candidate_oid:
             raise ControllerError("CANDIDATE_IDENTITY_MISMATCH", "claimed candidate changed")
-        issues = integration_candidate_issues(item, record, snapshot)
+        event = intent.history[-1] if intent.history else {}
+        pending_merge = (
+            event.get("event") == "CANDIDATE_CLAIMED"
+            and len(intent.source_handoffs) == 1
+            and event.get("pending_merge_source") == intent.source_handoffs[0]
+            and event.get("pending_merge_base") == intent.base_main_oid
+            and intent.candidate_oid == intent.base_main_oid
+        )
+        issues = integration_candidate_issues(
+            item,
+            record,
+            snapshot,
+            pending_merge_source=intent.source_handoffs[0] if pending_merge else None,
+        )
         if issues:
             raise ControllerError(issues[0]["code"], issues[0]["message"])
         if conflicts(store, allocation=record.allocation_id, target=item.path):
@@ -1011,9 +1031,122 @@ def _reuse_integration_claim(
         _sources(repository, snapshot, store, intent, require_idle=False)
     payload = status(repository_path)
     payload["command"] = "integration-claim"
-    payload["decision"] = {"code": "INTEGRATION_CANDIDATE_CLAIMED",
-                           "reason": "existing unchanged preparing candidate retained", **_intent_payload(intent)}
+    payload["decision"] = {
+        "code": "INTEGRATION_CONFLICT_CLAIMED" if pending_merge else "INTEGRATION_CANDIDATE_CLAIMED",
+        "reason": "existing unchanged preparing candidate retained",
+        "pending_merge_source": intent.source_handoffs[0] if pending_merge else None,
+        **_intent_payload(intent),
+    }
     return payload
+
+
+def _resume_integration_acquire(
+    repository_path: Path, *, intent_id: str, target: Path | None, branch: str | None
+) -> None:
+    repository = inventory(repository_path)
+    store = MetadataStore(repository.common_dir)
+    with store.lock(exclusive=True):
+        repository = inventory(repository_path)
+        snapshot = store._load_unlocked()
+        intent = snapshot.integration_intents.get(intent_id)
+        if intent is None or intent.state not in {"QUEUED", "PREPARING_INTEGRATION"}:
+            return
+        journals = []
+        for path in sorted(store.transactions_dir.glob("*.json")):
+            journal = dict(store._read_json(path))
+            if (
+                journal.get("command") == "acquire"
+                and journal.get("integration_intent_id") == intent_id
+                and journal.get("phase") in {"WORKTREE_ADDED", "METADATA_WRITTEN"}
+            ):
+                journals.append((path, journal))
+        if not journals:
+            return
+        if len(journals) != 1:
+            raise ControllerError(
+                "INTEGRATION_INTENT_MISMATCH", "integration claim has ambiguous acquire journals"
+            )
+        path, journal = journals[0]
+        expected_branch = branch or (
+            f"integration/{intent.task_key}"
+            + (f"-retry-{intent.attempt}" if intent.attempt > 1 else "")
+        )
+        allocation = journal.get("allocation_id")
+        record = snapshot.records.get(allocation)
+        items = [
+            item for item in repository.worktrees
+            if snapshot.bindings.get(item.key) == allocation
+        ]
+        if (
+            journal.get("transaction_id") != path.stem
+            or journal.get("repository_id") != snapshot.repository_id
+            or not isinstance(allocation, str)
+            or record is None
+            or len(items) != 1
+            or (target is not None and target.expanduser().absolute() != items[0].path)
+            or journal.get("target_path") != str(items[0].path)
+            or journal.get("branch") != expected_branch
+            or items[0].branch != expected_branch
+            or items[0].detached
+            or not items[0].clean
+            or items[0].head != journal.get("expected_head")
+            or record.task_commit != journal.get("expected_head")
+            or record.record_version != 1
+            or (record.task_key, record.authority_key, record.module, record.owner)
+            != (intent.task_key, intent.authority_key, intent.module, intent.owner)
+            or record.role != "integration"
+            or record.lifecycle != "ACTIVE"
+            or record.source_allocations != intent.source_allocations
+            or record.scope_paths != intent.scope_paths
+            or type(journal.get("integration_pending_merge", False)) is not bool
+            or (journal.get("integration_pending_merge") and len(intent.source_handoffs) != 1)
+        ):
+            raise ControllerError(
+                "INTEGRATION_INTENT_MISMATCH", "interrupted integration acquire evidence changed"
+            )
+        if intent.state == "PREPARING_INTEGRATION" and (
+            intent.allocation_id != allocation
+            or intent.base_main_oid != record.base_commit
+            or intent.candidate_oid != record.task_commit
+            or intent.revision != 1
+        ):
+            raise ControllerError(
+                "INTEGRATION_INTENT_MISMATCH", "claimed intent does not match its acquire journal"
+            )
+        if journal["phase"] == "METADATA_WRITTEN":
+            if intent.state != "PREPARING_INTEGRATION":
+                raise ControllerError(
+                    "INTEGRATION_INTENT_MISMATCH", "completed acquire has an unclaimed intent"
+                )
+            return
+        if intent.state == "QUEUED":
+            if intent.allocation_id is not None or snapshot.repository_id is None:
+                raise ControllerError(
+                    "INTEGRATION_INTENT_MISMATCH", "queued intent already has an allocation"
+                )
+            intent = _updated_intent(
+                intent,
+                "CANDIDATE_CLAIMED",
+                state="PREPARING_INTEGRATION",
+                allocation_id=allocation,
+                base_main_oid=record.base_commit,
+                candidate_oid=record.task_commit,
+                revision=1,
+                claimed_at=now_iso(),
+                blocked_reason=None,
+            )
+            if journal.get("integration_pending_merge"):
+                event = {
+                    **intent.history[-1],
+                    "pending_merge_source": intent.source_handoffs[0],
+                    "pending_merge_base": record.task_commit,
+                }
+                intent = replace(intent, history=(*intent.history[:-1], event))
+            store.replace_integration_intent(intent)
+            _emit_lifecycle_event(store, snapshot.repository_id, intent, "PREPARE_SLOT_GRANTED")
+        journal["phase"] = "METADATA_WRITTEN"
+        journal["updated_at"] = now_iso()
+        store.write_transaction(path.stem, journal)
 
 
 def claim_integration(
@@ -1032,6 +1165,14 @@ def claim_integration(
     snapshot = store.load()
     if intent_id is not None:
         requested = snapshot.integration_intents.get(intent_id)
+        if requested is not None and requested.state in {"QUEUED", "PREPARING_INTEGRATION"}:
+            if requested.owner != owner:
+                raise ControllerError("OWNER_MISMATCH", "integration intent owner does not match")
+            _resume_integration_acquire(
+                repository_path, intent_id=intent_id, target=target, branch=branch
+            )
+            snapshot = store.load()
+            requested = snapshot.integration_intents[intent_id]
         if requested is not None and requested.state == "PREPARING_INTEGRATION":
             return _reuse_integration_claim(repository_path, intent_id=intent_id, owner=owner,
                                            target=target, branch=branch)
@@ -1978,6 +2119,8 @@ def _acquire_once(
             expected_head=base_oid,
             expected_record_version=None,
             created_at=transaction_created,
+            integration_intent_id=intent.intent_id if intent is not None else None,
+            integration_pending_merge=pending_merge,
         )
         if resource_request is not None:
             AdmissionLedger().bind(resource_request, transaction_id=transaction_id,
@@ -8752,13 +8895,14 @@ def _recover_or_replay_removed_release(
                 disposable_resources=tuple(resources),
             )
             store.replace_record(updated)
-            store.remove_binding(binding_keys[0])
-            store.remove_writer_lease(record.allocation_id)
             record = updated
-        elif record.record_version != plan.expected_record_version + 1 or binding_keys:
+        elif record.record_version != plan.expected_record_version + 1 or len(binding_keys) > 1:
             raise ControllerError(
                 "RELEASE_RECOVERY_MISMATCH", "released record does not match persisted plan"
             )
+        for binding_key in binding_keys:
+            store.remove_binding(binding_key)
+        store.remove_writer_lease(record.allocation_id)
 
         transaction_id = str(transaction.get("transaction_id"))
         transaction["phase"] = "RELEASED_RECORDED"

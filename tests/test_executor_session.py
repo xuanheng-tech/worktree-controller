@@ -79,6 +79,7 @@ def invoke(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        start_new_session=True,
         **({"timeout": 45, "check": False} if wait else {}),
     )
 
