@@ -149,19 +149,36 @@ def busy_paths(targets: set[str]) -> set[str]:
     Same evidence as ``writer_lease.paths_in_use`` (cwd, open files, mappings), but a
     single scan serves every checkout instead of one full scan per checkout.
     """
+    if not targets:
+        return set()
 
     found: set[str] = set()
+    target_prefixes = tuple((t, t if t.endswith(os.sep) else t + os.sep) for t in targets)
+    try:
+        common_parent = os.path.commonpath(list(targets))
+        if not common_parent.endswith(os.sep):
+            common_prefix = common_parent + os.sep
+        else:
+            common_prefix = common_parent
+    except ValueError:
+        common_parent = None
+        common_prefix = None
+
     own = os.getpid()
     for entry in os.listdir("/proc"):
         if not entry.isdigit() or int(entry) == own:
             continue
         for candidate in _referenced_paths(int(entry)):
-            current = candidate
-            while current and current != os.sep:
-                if current in targets:
-                    found.add(current)
+            if common_prefix is not None and not (
+                candidate == common_parent or candidate.startswith(common_prefix)
+            ):
+                continue
+            for target, prefix in target_prefixes:
+                if target not in found and (candidate == target or candidate.startswith(prefix)):
+                    found.add(target)
                     break
-                current = os.path.dirname(current)
+        if len(found) == len(targets):
+            break
     return found
 
 
@@ -682,12 +699,31 @@ def _converge(
                     "untracked": item.untracked,
                 },
                 owner_action=_dirty_owner_action(item, record),
-                owner_action_request=owner_action(str(repository.canonical_path), {
-                    "path": str(item.path), "head": item.head, "branch": item.branch,
-                    **{key: getattr(record, key) for key in
-                       ("allocation_id", "task_key", "authority_key", "owner", "record_version")},
-                }, reason="DIRTY_WORKTREE", required_actions=(
-                    "review_task_files", "finalize_or_checkpoint", "preserve_unknown_files", "park_or_handoff")),
+                owner_action_request=owner_action(
+                    str(repository.canonical_path),
+                    {
+                        "path": str(item.path),
+                        "head": item.head,
+                        "branch": item.branch,
+                        **{
+                            key: getattr(record, key)
+                            for key in (
+                                "allocation_id",
+                                "task_key",
+                                "authority_key",
+                                "owner",
+                                "record_version",
+                            )
+                        },
+                    },
+                    reason="DIRTY_WORKTREE",
+                    required_actions=(
+                        "review_task_files",
+                        "finalize_or_checkpoint",
+                        "preserve_unknown_files",
+                        "park_or_handoff",
+                    ),
+                ),
             )
             continue
         if _integration_bound(snapshot, record):
@@ -724,22 +760,36 @@ def _converge(
             row.update(outcome=WAITING, reason="idle time is below the current threshold")
             continue
         if dry_run:
-            if dormant or route not in {"release", "release-published-handoff", "release-retained-handoff"}:
-                row.update(outcome=PREREQUISITE, reason=f"{route} must complete before exact release preflight")
+            if dormant or route not in {
+                "release",
+                "release-published-handoff",
+                "release-retained-handoff",
+            }:
+                row.update(
+                    outcome=PREREQUISITE,
+                    reason=f"{route} must complete before exact release preflight",
+                )
                 continue
             try:
                 checked = release(
-                    repository_path, target=Path(item.path),
-                    expected_record_version=record.record_version, owner_release=record.owner,
+                    repository_path,
+                    target=Path(item.path),
+                    expected_record_version=record.record_version,
+                    owner_release=record.owner,
                     teardown_reproducible_venv=any(
-                        resource["state"] == "registered" for resource in record.disposable_resources
-                    ), dry_run=True,
+                        resource["state"] == "registered"
+                        for resource in record.disposable_resources
+                    ),
+                    dry_run=True,
                 )
             except ControllerError as exc:
                 row.update(outcome=BLOCKED, reason=str(exc), code=exc.code)
                 continue
-            row.update(outcome=PLANNED, reason="exact guarded release preflight passed",
-                       release_preflight=checked["decision"])
+            row.update(
+                outcome=PLANNED,
+                reason="exact guarded release preflight passed",
+                release_preflight=checked["decision"],
+            )
             continue
         try:
             current = record

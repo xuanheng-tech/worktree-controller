@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.34.3
+
+- Optimize `/proc` process reference scanning in `busy_paths`: apply early common
+  prefix matching to prune unrelated system maps and exit immediately once all
+  target checkouts are confirmed referenced. Full path matching semantics and
+  existing contracts are preserved. CLI 61/storage 5 unchanged.
+
 ## 1.34.2
 
 - Add `drifted_handoff_reopen_version=1`: `reopen --drifted-head <oid>` reopens a
