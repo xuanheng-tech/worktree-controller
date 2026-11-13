@@ -16,6 +16,9 @@
   the locked sync.
 - An `ACTIVE` task handoff refused with `PATH_SCOPE_VIOLATION` now names the first
   out-of-scope path and the existing owner repair, `review --add-scope`.
+- Resolve a live target worktree even when a sibling worktree in the inventory was
+  released and removed between the inventory read and the repository lock;
+  previously that sibling's missing path failed the whole target lookup.
 - CLI and storage contracts are unchanged.
 
 ## 1.35.3
