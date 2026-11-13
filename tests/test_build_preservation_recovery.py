@@ -13,6 +13,111 @@ from worktree_controller.models import ControllerError
 from worktree_controller.store import MetadataStore
 
 
+@pytest.fixture
+def rebuilt(project, tmp_path, monkeypatch):  # noqa: F811
+    from tests.test_controlled import handoff_one
+    from tests.test_shadow import git
+
+    repo, target, options = project
+    monkeypatch.setattr(p, "evidence_root", lambda: tmp_path / "preservations")
+    store = MetadataStore(repo.repo / ".git")
+    allocation = next(r.allocation_id for r in store.load().records.values() if r.owner == "module-owner")
+    relative = options["paths"][0]
+    old = p.copy_preservation(p.plan_preservation(repo.repo, target, allocation,
+        options["owner"], 2, source_relative=relative))
+    old_receipt = Path(old["receipt"])
+    original = old_receipt.read_bytes()
+    lifecycle.reopen(repo.repo, target=target, owner=options["owner"], expected_record_version=2)
+    lifecycle.park(repo.repo, target=target, owner=options["owner"], expected_record_version=3)
+    lifecycle.resume(repo.repo, target=target, owner=options["owner"], expected_record_version=4)
+    (target / relative).rename(tmp_path / "old-build")
+    (target / relative).mkdir()
+    (target / relative / "output").write_bytes(b"rebuilt bytes")
+    (target / "source.txt").write_text("new committed source\n")
+    git(target, "add", "source.txt")
+    git(target, "commit", "-m", "new source")
+    handoff_one(repo, target, expected=5)
+    options.update(expected_record_version=6, expected_head=git(target, "rev-parse", "HEAD"))
+    registered(repo, options)
+    return repo, target, options, store, allocation, relative, old_receipt, original
+
+
+@pytest.mark.parametrize("project", ["retained-feature"], indirect=True)
+def test_rebuilt_source_requires_current_preservation_before_any_deletion(rebuilt):
+    repo, target, options, _, _, _, receipt, original = rebuilt
+    result = lifecycle.cleanup_typed_disposable(repo.repo, target=target, owner=options["owner"],
+        expected_record_version=7, dry_run=True)["decision"]["plan"]
+    assert result["blockers"] and result["cleanup_paths"] == []
+    assert result["blockers"][0]["code"] == "BUILD_PRESERVATION_BASELINE_REQUIRED"
+    assert receipt.read_bytes() == original
+
+
+@pytest.mark.parametrize("project", ["retained-feature"], indirect=True)
+def test_rebuilt_generation_cleanup_and_release_keep_old_evidence(rebuilt):
+    repo, target, options, _, allocation, relative, receipt, original = rebuilt
+    copied = p.copy_preservation(p.plan_preservation(repo.repo, target, allocation,
+        options["owner"], 7, source_relative=relative))
+    current_receipt = Path(copied["receipt"])
+    current_bytes = current_receipt.read_bytes()
+    arguments = dict(target=target, owner=options["owner"], expected_record_version=7)
+    plan = lifecycle.cleanup_typed_disposable(repo.repo, **arguments, dry_run=True)["decision"]["plan"]
+    assert plan["blockers"] == []
+    result = lifecycle.cleanup_typed_disposable(repo.repo, **arguments, dry_run=False,
+        expected_plan_id=plan["plan_id"])
+    assert result["decision"]["code"] == "TYPED_DISPOSABLE_CLEANED"
+    assert receipt.read_bytes() == original and current_receipt.read_bytes() == current_bytes
+    assert lifecycle.release(repo.repo, target=target, expected_record_version=7,
+        owner_release=options["owner"])["decision"]["code"] == "RELEASED"
+
+
+@pytest.mark.parametrize("project", ["retained-feature"], indirect=True)
+def test_rebuilt_generation_corrupt_old_copy_is_still_blocked(rebuilt):
+    repo, target, options, _, allocation, relative, receipt, _ = rebuilt
+    p.copy_preservation(p.plan_preservation(repo.repo, target, allocation,
+        options["owner"], 7, source_relative=relative))
+    (receipt.parent / "tree/output").write_bytes(b"corrupted old copy")
+    plan = lifecycle.cleanup_typed_disposable(repo.repo, target=target, owner=options["owner"],
+        expected_record_version=7, dry_run=True)["decision"]["plan"]
+    assert plan["blockers"] and plan["cleanup_paths"] == []
+    assert (target / relative / "output").read_bytes() == b"rebuilt bytes"
+
+
+@pytest.mark.parametrize("project", ["retained-feature"], indirect=True)
+@pytest.mark.parametrize("change", ["owner", "event", "history", "head", "registration"])
+def test_rebuilt_lineage_refuses_changed_history(rebuilt, change):
+    import json
+    from dataclasses import replace
+
+    from tests.test_shadow import git
+    from worktree_controller.preserved_cleanup import reopened_source_identity
+
+    _, target, _, store, allocation, _, receipt, _ = rebuilt
+    record = store.load().records[allocation]
+    previous = json.loads(receipt.read_bytes())["allocation_source_identity"]
+    current = {**previous, "expected_record_version": 7,
+               "expected_head": git(target, "rev-parse", "HEAD")}
+    assert reopened_source_identity(previous, current, target, record)
+    if change == "owner":
+        current["owner"] = "foreign"
+    elif change == "head":
+        previous["expected_head"] = "0" * 40
+    else:
+        history = [dict(row) for row in record.history]
+        if change == "event":
+            history[3]["event"] = "UNKNOWN_TRANSITION"
+        elif change == "history":
+            history.pop(3)
+        else:
+            history[-1]["build_resources"] = {**history[-1]["build_resources"], "head": "0" * 40}
+        record = replace(record, history=tuple(history))
+    if change == "head":
+        with pytest.raises(ControllerError, match="commit is not resolvable") as failure:
+            reopened_source_identity(previous, current, target, record)
+        assert failure.value.code == "INVALID_COMMIT"
+    else:
+        assert not reopened_source_identity(previous, current, target, record)
+
+
 def test_old_generation_survives_registration_and_typed_cleanup(project, tmp_path, monkeypatch):  # noqa: F811
     repo, target, options = project
     monkeypatch.setattr(p, "evidence_root", lambda: tmp_path / "preservations")

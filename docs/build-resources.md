@@ -123,6 +123,18 @@ cross-call verdict cache or validation exemption is introduced. Older runtimes
 can read the history event but cannot classify these outputs; they continue to
 refuse unknown ignored content. Do not alternate runtimes during cleanup.
 
+With `rebuilt_preservation_lineage_version=1`, an older generation may belong to a
+source rebuilt during a formally reopened development cycle, including explicit
+park/resume transitions before the next handoff. The original owner, allocation,
+ancestor commits and every source ancestor must match; the rebuilt directory must
+be a distinct node. Both the old immutable copy and a fresh preservation at the
+current registration CAS are required. `BUILD_PRESERVATION_BASELINE_REQUIRED`
+blocks cleanup while allowing the existing preservation plan/copy flow to save the
+selected registered output. It grants copy authority only, never deletion authority.
+After every affected output has its fresh copy, use normal typed cleanup and its
+exact plan ID. Only that cleanup's real completed action proofs cover the absent
+new sources. Old generations remain unchanged; no historical deletion is inferred.
+
 ## Retention preview
 
 `retention_release_preflight_version=1` changes the preview meaning:

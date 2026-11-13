@@ -67,6 +67,78 @@ def test_dirty_canonical_is_refused(published):
     assert _head(repository) == before
 
 
+@pytest.fixture
+def published_edit(published, tmp_path):
+    repository, before, _ = published
+    clone = tmp_path / "publisher"
+    # Use an existing tracked regular file, as instruction edits do in production.
+    name = "README.md"
+    if not (clone / name).exists():
+        name = git(repository.repo, "ls-files").splitlines()[0]
+    content = (clone / name).read_bytes() + b"\n# published instruction\n"
+    (clone / name).write_bytes(content)
+    git(clone, "add", name)
+    git(clone, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "commit", "-qm", "published edit")
+    git(clone, "push", "-q", "origin", "HEAD:main")
+    (repository.repo / name).write_bytes(content)
+    return repository, before, git(clone, "rev-parse", "HEAD"), name, content
+
+
+def test_explicit_published_bytes_refresh_without_overwriting(published_edit):
+    repository, before, target, name, content = published_edit
+    arguments = dict(reconcile_published_paths=(name,), expected_target=target)
+    assert refresh_canonical(repository.repo, dry_run=True, **arguments)["decision"]["code"] == "CANONICAL_REFRESH_READY"
+    assert _head(repository) == before
+    assert git(repository.repo, "diff", "--cached", "--name-only") == ""
+    assert refresh_canonical(repository.repo, **arguments)["decision"]["code"] == "CANONICAL_REFRESHED"
+    assert (repository.repo / name).read_bytes() == content
+    assert git(repository.repo, "status", "--porcelain") == ""
+    assert refresh_canonical(repository.repo, **arguments)["decision"]["code"] == "CANONICAL_CURRENT"
+
+
+@pytest.mark.parametrize("change", ["bytes", "mode", "target", "other", "index", "symlink", "filter", "hidden-index"])
+def test_published_reconciliation_refuses_unproven_changes(published_edit, change):
+    repository, before, target, name, content = published_edit
+    path = repository.repo / name
+    if change == "bytes":
+        path.write_bytes(content + b"private edit")
+    elif change == "mode":
+        path.chmod(path.stat().st_mode ^ 0o100)
+    elif change == "target":
+        target = before
+    elif change == "other":
+        (repository.repo / "unsaved.txt").write_text("keep")
+    elif change == "index":
+        path.write_bytes(b"independent staged content")
+        git(repository.repo, "add", name)
+        path.write_bytes(content)
+    elif change == "symlink":
+        path.unlink()
+        path.symlink_to("published.txt")
+    elif change == "filter":
+        (repository.repo / ".git/info/attributes").write_text(f"{name} filter=untrusted\n")
+    elif change == "hidden-index":
+        # The staged addition is invisible to a HEAD-to-working-tree diff.
+        other = repository.repo / "other.txt"
+        other.write_text("independent staged bytes")
+        git(repository.repo, "add", "other.txt")
+        other.unlink()
+    status_before = git(repository.repo, "status", "--porcelain")
+    with pytest.raises(ControllerError):
+        refresh_canonical(repository.repo, reconcile_published_paths=(name,), expected_target=target)
+    assert _head(repository) == before
+    assert git(repository.repo, "status", "--porcelain") == status_before
+
+
+def test_retry_after_exact_published_index_staging(published_edit):
+    repository, _, target, name, content = published_edit
+    git(repository.repo, "add", name)
+    result = refresh_canonical(repository.repo, reconcile_published_paths=(name,), expected_target=target)
+    assert result["decision"]["code"] == "CANONICAL_REFRESHED"
+    assert (repository.repo / name).read_bytes() == content
+
+
 def test_diverged_canonical_is_refused(published):
     repository, _, _ = published
     (repository.repo / "local.txt").write_text("local\n", encoding="utf-8")

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import stat
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .canonical_transition import _check_target_policy, _published_policy
 from .controller import envelope
-from .git_backend import fetch_remote_branch, git_write, inventory, is_ancestor
+from .git_backend import fetch_remote_branch, git_read, git_write, inventory, is_ancestor
 from .models import ControllerError
 from .policy import load_policy
 from .semantics import record_for as _record_for
@@ -81,7 +82,56 @@ class CanonicalProcessOccupancyError(ControllerError):
         }
 
 
-def refresh_canonical(repository_path: Path, *, dry_run: bool = False) -> dict[str, Any]:
+def _published_paths(root: Path, target: str, paths: tuple[str, ...]) -> list[dict[str, str]]:
+    """Only explicitly selected tracked bytes already published may enter the index.
+
+    No checkout/reset/stash or content conversion is used. An interrupted add may
+    leave the same published blobs staged; the identical request can be retried.
+    """
+    if not paths or len(set(paths)) != len(paths):
+        raise ControllerError("CANONICAL_DIRTY", "unique published paths are required")
+    changed = set(git_read(root, ("diff", "HEAD", "--name-only", "-z")).stdout.split(b"\0")) - {b""}
+    changed |= set(git_read(root, ("diff", "--cached", "HEAD", "--name-only", "-z")).stdout.split(b"\0")) - {b""}
+    untracked = git_read(root, ("ls-files", "--others", "--exclude-standard", "-z")).stdout
+    if untracked or changed - {p.encode() for p in paths}:
+        raise ControllerError("CANONICAL_DIRTY", "unselected or untracked canonical changes remain")
+    proofs = []
+    for name in sorted(paths):
+        relative = PurePosixPath(name)
+        if relative.is_absolute() or relative.as_posix() != name or any(p in {"", ".", "..", ".git"} for p in relative.parts):
+            raise ControllerError("CANONICAL_DIRTY", "invalid published path")
+        path = root / name
+        if path.resolve() != path or not path.is_file() or path.is_symlink():
+            raise ControllerError("CANONICAL_DIRTY", "published path must be a regular unaliased file")
+        entries = []
+        for revision in ("HEAD", target):
+            entry = git_read(root, ("ls-tree", "-z", revision, "--", name)).stdout
+            if not entry.endswith(b"\0") or entry.count(b"\0") != 1:
+                raise ControllerError("CANONICAL_DIRTY", "published path must exist in both commits")
+            metadata, actual_name = entry[:-1].split(b"\t", 1)
+            mode, kind, oid = metadata.decode().split()
+            if actual_name != name.encode() or mode not in {"100644", "100755"} or kind != "blob":
+                raise ControllerError("CANONICAL_DIRTY", "published path is not a regular tracked blob")
+            entries.append((mode, oid))
+        mode, oid = entries[1]
+        current_mode = "100755" if path.stat().st_mode & stat.S_IXUSR else "100644"
+        if current_mode != mode or path.read_bytes() != git_read(root, ("cat-file", "blob", oid)).stdout:
+            raise ControllerError("CANONICAL_DIRTY", "local bytes or mode differ from exact published target")
+        index = git_read(root, ("ls-files", "--stage", "-z", "--", name)).stdout
+        permitted = {f"{m} {o} 0\t{name}\0".encode() for m, o in entries}
+        if index not in permitted:
+            raise ControllerError("CANONICAL_DIRTY", "index contains independent or unmerged changes")
+        # Filters could stage bytes different from those reviewed above.
+        attributes = git_read(root, ("check-attr", "-z", "filter", "working-tree-encoding", "--", name)).stdout.split(b"\0")
+        if any(value not in {b"unspecified", b"unset"} for value in attributes[2::3]):
+            raise ControllerError("CANONICAL_DIRTY", "published reconciliation refuses content filters")
+        proofs.append({"path": name, "mode": mode, "blob": oid})
+    return proofs
+
+
+def refresh_canonical(repository_path: Path, *, dry_run: bool = False,
+                      reconcile_published_paths: tuple[str, ...] = (),
+                      expected_target: str | None = None) -> dict[str, Any]:
     """Move canonical main forward to the fetched publication branch, or say why not.
 
     Integrations publish from candidates, so the canonical checkout falls behind
@@ -110,7 +160,7 @@ def refresh_canonical(repository_path: Path, *, dry_run: bool = False) -> dict[s
             )
         if item.detached or item.branch != policy.publication_branch:
             raise ControllerError("CANONICAL_BRANCH", "canonical is not on the publication branch")
-        if not item.clean or item.locked or item.prunable:
+        if (not item.clean and not reconcile_published_paths) or item.locked or item.prunable:
             raise ControllerError("CANONICAL_DIRTY", "canonical checkout is not clean")
         if record.allocation_id in snapshot.writer_leases or record.external_bindings:
             raise ControllerError("CANONICAL_IN_USE", "canonical holds a writer lease or binding")
@@ -123,12 +173,16 @@ def refresh_canonical(repository_path: Path, *, dry_run: bool = False) -> dict[s
             raise CanonicalProcessOccupancyError(item.path, used)
         before = item.head
         target_oid = fetch_remote_branch(item.path, policy.publication_remote, policy.publication_branch)
+        if reconcile_published_paths and expected_target != target_oid:
+            raise ControllerError("PUBLISHED_TARGET_CHANGED", "published path reconciliation requires the exact fetched target")
+        proofs = _published_paths(item.path, target_oid, reconcile_published_paths) if reconcile_published_paths else []
         decision: dict[str, Any] = {
             "path": str(item.path),
             "branch": item.branch,
             "before": before,
             "target": target_oid,
             "dry_run": dry_run,
+            "reconciled_published_paths": proofs,
         }
         if before == target_oid:
             decision.update(code="CANONICAL_CURRENT", reason="canonical already equals published main")
@@ -140,6 +194,15 @@ def refresh_canonical(repository_path: Path, *, dry_run: bool = False) -> dict[s
             # A published main that this Controller could not govern is refused first.
             _check_target_policy(_published_policy(repository, target_oid, policy),
                                  policy.publication_branch, policy.publication_remote)
+            if proofs:
+                if _published_paths(item.path, target_oid, reconcile_published_paths) != proofs:
+                    raise ControllerError("CANONICAL_DIRTY", "published path observation changed")
+                git_write(item.path, ("add", "--", *reconcile_published_paths))
+                for proof in proofs:
+                    if git_read(item.path, ("ls-files", "--stage", "-z", "--", proof["path"])).stdout != (
+                        f"{proof['mode']} {proof['blob']} 0\t{proof['path']}\0".encode()
+                    ):
+                        raise ControllerError("CANONICAL_DIRTY", "staged bytes differ; preserved index requires inspection")
             git_write(item.path, ("merge", "--ff-only", "--no-edit", "--no-overwrite-ignore", target_oid))
             after = next(worktree for worktree in inventory(item.path).worktrees if worktree.canonical)
             if after.head != target_oid or not after.clean or after.branch != policy.publication_branch:

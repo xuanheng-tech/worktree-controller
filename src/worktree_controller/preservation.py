@@ -377,7 +377,19 @@ def _authority(
     # Copy preparation preserves only the selected ignored node. Other resource
     # classifications stay as cleanup-not-ready evidence, never deletion authority.
     resource_blockers = {(row["path"], row["blocker"]) for row in plan["resources"] if row["blocker"]}
-    blocked = [b for b in plan["blockers"] if (b.get("path"), b["code"]) not in resource_blockers]
+    copy_only_blockers = []
+    if any(b["code"] == "BUILD_PRESERVATION_BASELINE_REQUIRED" for b in plan["blockers"]):
+        from .build_resources import check_resource, declarations
+
+        declaration = declarations(item, record).get(source_relative)
+        if declaration is not None:
+            check_resource(target, source_relative, declaration)
+            # Copy only: old generations were verified, but cleanup still needs
+            # the fresh registered source baseline this operation will preserve.
+            copy_only_blockers = [b for b in plan["blockers"]
+                                  if b["code"] == "BUILD_PRESERVATION_BASELINE_REQUIRED"]
+    blocked = [b for b in plan["blockers"] if (b.get("path"), b["code"]) not in resource_blockers
+               and b not in copy_only_blockers]
     if blocked:
         raise _fail(blocked[0]["code"], "allocation/runtime guards block preservation")
     validate_editable_references(repository, target)
@@ -396,7 +408,8 @@ def _authority(
         },
         "runtime_evidence": plan["runtime_evidence"],
         "warnings": plan["warnings"],
-        "cleanup_not_ready": [b for b in plan["blockers"] if (b.get("path"), b["code"]) in resource_blockers],
+        "cleanup_not_ready": [b for b in plan["blockers"] if (b.get("path"), b["code"]) in resource_blockers
+                              or b in copy_only_blockers],
         "worktree_paths": [str(w.path) for w in repository.worktrees],
     }
 

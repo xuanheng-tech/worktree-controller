@@ -203,6 +203,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="fast-forward an ACTIVE idle canonical checkout to published main",
     )
     refresh_parser.add_argument("--dry-run", action="store_true")
+    refresh_parser.add_argument("--reconcile-published-path", action="append", default=[])
+    refresh_parser.add_argument("--expected-target")
 
     canonical_parser = commands.add_parser(
         "canonical-transition", parents=[common],
@@ -1050,6 +1052,8 @@ def _main(argv: list[str] | None) -> int:
                 "task_workflow_version": 1,
                 "exited_holder_release_version": 1,
                 "canonical_refresh_version": 1,
+                "canonical_published_reconciliation_version": 1,
+                "rebuilt_preservation_lineage_version": 1,
                 "host_handoff_continuation_version": HOST_HANDOFF_CONTINUATION_VERSION,
                 "release_recovery_inspection_version": 1,
                 "rollout_transaction_diagnostics_version": 1,
@@ -1129,7 +1133,9 @@ def _main(argv: list[str] | None) -> int:
         elif parsed.command == "canonical-refresh":
             from .canonical_refresh import refresh_canonical
 
-            payload = refresh_canonical(parsed.repo, dry_run=parsed.dry_run)
+            payload = refresh_canonical(parsed.repo, dry_run=parsed.dry_run,
+                reconcile_published_paths=tuple(parsed.reconcile_published_path),
+                expected_target=parsed.expected_target)
         elif parsed.command == "canonical-transition":
             from .canonical_transition import transition_canonical
 

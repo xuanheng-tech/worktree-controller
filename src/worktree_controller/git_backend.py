@@ -702,5 +702,9 @@ def worktree_content_fingerprint(
     return digest.hexdigest()
 
 
+def git_read(repo: Path, arguments: Iterable[str]) -> subprocess.CompletedProcess[bytes]:
+    return _git(repo, *tuple(arguments))
+
+
 def git_write(repo: Path, arguments: Iterable[str]) -> subprocess.CompletedProcess[bytes]:
     return _git(repo, *tuple(arguments), readonly=False)

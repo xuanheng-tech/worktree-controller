@@ -36,6 +36,13 @@ responsibilities. Preserve the caller's commit, push, remote, and destructive-op
    With `canonical_refresh_version` 1, an ACTIVE canonical that only fell behind published main
    (integrations publish from candidates) is advanced with `canonical-refresh`; it fast-forwards a
    clean, idle checkout and otherwise reports the blocker. Never pull or reset canonical by hand.
+   With `canonical_published_reconciliation_version` 1, explicitly selected tracked local files
+   already identical to fetched published main may use `canonical-refresh --reconcile-published-path
+   PATH --expected-target OID --dry-run`. Review returned exact blobs/modes and repeat without
+   dry-run. Controller stages only those published bytes before ordinary fast-forward; no reset,
+   stash or overwrite. Every independent/unselected change, filter, symlink, remote drift and
+   existing canonical occupancy guard still blocks. An interruption may leave exact target blobs
+   staged; retry the identical supported request, never manually clear the index.
    With `canonical_main_refresh_version` 1, a handoff frozen on policy `main` or `master` uses
    `canonical-transition`, binding the original frozen HEAD and observed local main HEAD separately. Review
    exact published target ancestry and policy. Partial progress leaves main advanced and metadata
@@ -177,6 +184,14 @@ review the dry-run and apply its plan ID. Resume only through the returned
 immutable recovery receipt/hash. Old records remain unchanged and completed
 actions never replay. Unknown/started effects or identity drift remain blocked;
 recovery grants no release or business completion authority.
+
+With `rebuilt_preservation_lineage_version` 1, registered outputs rebuilt across verified same-owner
+reopen/handoff (including park/resume) require unchanged source ancestors, distinct source nodes,
+verified old immutable copies and fresh preservation at the current registration CAS. A
+`BUILD_PRESERVATION_BASELINE_REQUIRED` refusal permits only the existing preservation plan/copy
+flow for the selected registered output. Preserve every affected current baseline, then review
+and execute normal typed cleanup. Real completed action proofs cover the new sources; never infer
+old deletion, rewrite historical generations or treat copy completion as release authority.
 
 With `terminal_preserved_cleanup_version` 1, published integrations and completed
 no-change feature/audit tasks may use the existing preservation and `resource-clean --typed`

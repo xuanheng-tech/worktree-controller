@@ -14,13 +14,17 @@ TYPED_RUNTIME_EVIDENCE = lifecycle._typed_runtime_evidence
 
 
 @pytest.fixture
-def project(monkeypatch):
+def project(monkeypatch, request):
+    from tests.test_retention_admission import POLICY_V5
+    from tests.test_shadow import POLICY
+
+    retained_feature = getattr(request, "param", None) == "retained-feature"
     monkeypatch.setattr(lifecycle, "_validate_runtime_clear", lambda *a, **k: None)
     monkeypatch.setattr(lifecycle, "_typed_runtime_evidence", lambda *a: {
         "managed_references": [], "observed_references": [],
         "managed_visibility_uncertainties": [], "scan_uncertainties": [],
     })
-    with GitRepository(linked=0) as repo:
+    with GitRepository(linked=0, policy_text=POLICY_V5 if retained_feature else POLICY) as repo:
         root = repo.repo / "apps/docs"
         root.mkdir(parents=True)
         (root / "package.json").write_text(json.dumps({"name": "docs", "scripts": {"build": "astro build"}}))
@@ -30,7 +34,7 @@ def project(monkeypatch):
         git(repo.repo, "add", ".")
         git(repo.repo, "commit", "-m", "synthetic build inputs")
         adopt_canonical(repo)
-        target, _ = acquire_one(repo, role="hotfix")
+        target, _ = acquire_one(repo, role="feature" if retained_feature else "hotfix")
         handoff_one(repo, target)
         paths = tuple(f"apps/docs/{n}" for n in names)
         for name in paths:

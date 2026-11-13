@@ -246,12 +246,24 @@ def _source_key(plan: dict[str, Any]) -> str:
     })
 
 
-def _reopened_source_identity(
+def reopened_source_identity(
     previous: dict[str, Any], current: dict[str, Any], target: Path,
     record: MetadataRecord | None,
 ) -> bool:
+    from dataclasses import replace
+
+    from .build_preservation import identity_matches
+    from .build_resources import EVENT
     from .git_backend import inventory, is_ancestor, resolve_commit
 
+    # A registered build is an unchanged final frozen baseline, not a new
+    # development cycle. Verify that one transition before checking its history.
+    if record is not None and record.history and record.history[-1].get("event") == EVENT:
+        predecessor = {**current, "expected_record_version": record.record_version - 1}
+        if not identity_matches(predecessor, current, record):
+            return False
+        current = predecessor
+        record = replace(record, record_version=record.record_version - 1, history=record.history[:-1])
     stable = {"repository_id", "allocation_id", "target_path", "owner", "authority_key"}
     if (
         record is None or set(previous) != set(current)
@@ -295,6 +307,10 @@ def _reopened_source_identity(
         kind, next_state = event.get("event"), event["to"]
         if kind == "REOPENED" and state in {"HANDOFF_READY", "PRESERVED"} and next_state == "ACTIVE":
             opened = True
+        elif opened and (kind, state, next_state) in {
+            ("PARKED", "ACTIVE", "RETAINED"), ("RESUMED", "RETAINED", "ACTIVE"),
+        }:
+            pass
         elif (
             opened and state == "ACTIVE"
             and (kind, next_state) in {
@@ -341,7 +357,7 @@ def _same_completed_source(
         first["source_anchor"]["worktree"] != second["source_anchor"]["worktree"]
         or any(first["source_anchor"]["source"][key] != second["source_anchor"]["source"][key]
                for key in ("device", "file_type"))
-        or not _reopened_source_identity(
+        or not reopened_source_identity(
             first["authority"]["identity"], second["authority"]["identity"], target, record,
         )
     ):

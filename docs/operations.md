@@ -94,6 +94,22 @@ Advance an idle ACTIVE canonical with `canonical-refresh`. A canonical frozen in
 including one already on main/master, uses `canonical-transition` with exact owner, record CAS,
 frozen HEAD, observed local main and published remote main identities.
 
+If a tracked local edit has already reached published main byte for byte, capability
+`canonical_published_reconciliation_version=1` supports an explicit safe reconciliation:
+
+```text
+worktree-controller canonical-refresh --repo <canonical-repo> --dry-run --json \
+  --reconcile-published-path AGENTS.md --expected-target <full-published-main-oid>
+```
+
+Review the returned blob/mode identities, then repeat without `--dry-run`. Repeat
+the path option for every selected file. This stages only exact published content
+before the guarded fast-forward; it never resets, stashes or overwrites local edits.
+Unselected changes, untracked files, symlinks, content filters, independent index
+content and a changed remote target remain blocked. If interrupted after staging,
+the identical request accepts those exact target blobs and can resume. Ordinary
+canonical refresh still requires cleanliness; all process and authority guards stay.
+
 A frozen source cannot accept feature writes. Same-session continuation requires a compatible
 consumer to send `--access read|exec|write` and the actual write target. Continuing feature work on
 the source uses the supported reopen flow; handing off does not end the whole business task.

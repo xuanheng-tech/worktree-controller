@@ -45,7 +45,7 @@ def generations(bound, record, *, topology=None, completed=(), completed_topolog
     """
     from . import hardlinks
     from .cleanup_evidence import read_document
-    from .preserved_cleanup import coverage, source_absent
+    from .preserved_cleanup import coverage, reopened_source_identity, source_absent
 
     events = [event for event in record.history if event.get("event") == EVENT]
     if not events:
@@ -58,7 +58,7 @@ def generations(bound, record, *, topology=None, completed=(), completed_topolog
     allocation = p.evidence_root() / bound["repository_id"] / bound["allocation_id"]
     if not os.path.lexists(allocation):
         return [], []
-    entries, plans = [], []
+    entries, plans, historical = [], [], []
     with p._absolute_directory(allocation) as chain:
         for name in sorted(os.listdir(chain[-1].fd)):
             with p._absolute_directory(allocation / name) as generation:
@@ -75,7 +75,27 @@ def generations(bound, record, *, topology=None, completed=(), completed_topolog
                     continue
                 previous = receipt["allocation_source_identity"]
                 if not identity_matches(previous, bound, record):
-                    raise _blocked("preserved build output has no exact registration CAS lineage")
+                    if not reopened_source_identity(previous, bound, Path(bound["target_path"]), record):
+                        raise _blocked("preserved build output has no exact registration CAS lineage")
+                    # The old copy is still verified and retained. It is not
+                    # evidence of the new source's bytes or of a past deletion.
+                    evidence, plan = coverage(allocation / name / "receipt.json", digest,
+                                              identity=previous, verify_source=False)
+                    anchors = registration["anchors"]
+                    ancestors = plan.get("source_ancestor_identities", {})
+                    with p._absolute_directory(source.parent) as source_chain:
+                        expected_ancestors = p._chain_identities(source_chain)
+                    if (ancestors != expected_ancestors
+                            or ancestors.get(bound["target_path"]) != anchors["."]
+                            or plan["source_anchor"]["worktree"] != anchors[Path(relative).parent.as_posix()]
+                            or plan["source_anchor"]["source"] == anchors[relative]
+                            or any(plan["source_anchor"]["source"][key] != anchors[relative][key]
+                                   for key in ("device", "file_type"))):
+                        raise _blocked("rebuilt preservation requires unchanged ancestors and a distinct source node")
+                    entries.append({"source_relative": relative, "historical_rebuilt_source": True,
+                                    "evidence": evidence})
+                    historical.append(relative)
+                    continue
                 absent = relative in completed
                 evidence, plan = coverage(
                     allocation / name / "receipt.json", digest, identity=previous,
@@ -105,4 +125,9 @@ def generations(bound, record, *, topology=None, completed=(), completed_topolog
                         raise _blocked("completed build bytes differ from the preserved generation")
                 entries.append({"source_relative": relative, "evidence": evidence})
                 plans.append(plan)
+    current_sources = {plan["source_relative"] for plan in plans
+                       if plan["authority"]["identity"] == bound}
+    if set(historical) - current_sources:
+        raise ControllerError("BUILD_PRESERVATION_BASELINE_REQUIRED",
+                              "rebuilt outputs require fresh preservation of the exact registered baseline")
     return entries, plans

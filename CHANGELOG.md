@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.35.0
+
+- Add explicit published-path reconciliation to canonical refresh. Only selected
+  tracked regular files whose bytes and modes exactly match the fetched target
+  can be staged before the ordinary guarded fast-forward. Independent edits,
+  unselected paths, filters, target drift and occupied canonical checkouts remain
+  refused. No reset, stash or overwrite is used.
+- Verify rebuilt build-output preservation across same-owner reopen/handoff and
+  park/resume history. Require retained old copies, stable ancestors, distinct
+  source nodes and fresh exact-registration preservation before cleanup. Real
+  completed actions cover the new baseline; old receipts remain unchanged.
+- Advertise `canonical_published_reconciliation_version=1` and
+  `rebuilt_preservation_lineage_version=1`; CLI 61 and storage 5 remain unchanged.
+
 ## 1.34.4
 
 - Recover interrupted releases across record, binding and writer-lease metadata
