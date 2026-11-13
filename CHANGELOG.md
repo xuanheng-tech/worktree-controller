@@ -1,7 +1,15 @@
 # Changelog
 
-## Unreleased
+## 1.35.2
 
+- Reconcile selected canonical edits that exactly match a published main baseline
+  even when a later publication changed the same files. Fast-forward through that
+  common baseline before latest main; preserve the exact fetched-target check.
+  Interrupted intermediate fast-forwards resume normally. No reset, stash,
+  overwrite, fabricated commit or independent edit reconciliation is used.
+- Advertise `canonical_published_reconciliation_version=2`; CLI 61 and storage 5
+  remain unchanged. Validation reuses the preceding full release gate and adds
+  focused canonical reconciliation, contract and installed acceptance.
 - Rewrite the `worktree-lifecycle` Skill from about 44 KB to a 7 KB normal flow,
   recovery routing and invariants. Per-capability recovery narratives are replaced
   by the existing `recovery-guide`, refusal `recovery_argv`, `capabilities --json`

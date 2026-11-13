@@ -1052,7 +1052,7 @@ def _main(argv: list[str] | None) -> int:
                 "task_workflow_version": 1,
                 "exited_holder_release_version": 1,
                 "canonical_refresh_version": 1,
-                "canonical_published_reconciliation_version": 1,
+                "canonical_published_reconciliation_version": 2,
                 "rebuilt_preservation_lineage_version": 1,
                 "registered_build_absence_version": 1,
                 "canonical_refresh_scope_version": 1,

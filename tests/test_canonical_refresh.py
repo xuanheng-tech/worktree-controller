@@ -140,6 +140,75 @@ def test_retry_after_exact_published_index_staging(published_edit):
     assert (repository.repo / name).read_bytes() == content
 
 
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_published_baseline_survives_later_main_edit(published_edit, tmp_path, monkeypatch, interrupt):
+    repository, before, baseline, name, content = published_edit
+    clone = tmp_path / "publisher"
+    latest = content + b"\n# later published instruction\n"
+    (clone / name).write_bytes(latest)
+    git(clone, "add", name)
+    git(clone, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "commit", "-qm", "later edit")
+    git(clone, "push", "-q", "origin", "HEAD:main")
+    target = git(clone, "rev-parse", "HEAD")
+    arguments = dict(reconcile_published_paths=(name,), expected_target=target)
+    preview = refresh_canonical(repository.repo, dry_run=True, **arguments)["decision"]
+    assert preview["reconciliation_baseline"] == baseline
+    assert preview["target"] == target and _head(repository) == before
+    assert (repository.repo / name).read_bytes() == content
+    if interrupt:
+        original = canonical_refresh.git_write
+
+        def stop_after_baseline(root, command):
+            result = original(root, command)
+            if command[0] == "merge" and command[-1] == baseline:
+                raise RuntimeError("interrupted after published baseline")
+            return result
+
+        with monkeypatch.context() as patch:
+            patch.setattr(canonical_refresh, "git_write", stop_after_baseline)
+            with pytest.raises(RuntimeError, match="interrupted after published baseline"):
+                refresh_canonical(repository.repo, **arguments)
+        assert _head(repository) == baseline
+        assert (repository.repo / name).read_bytes() == content
+    result = refresh_canonical(repository.repo, **arguments)["decision"]
+    assert result["code"] == "CANONICAL_REFRESHED" and _head(repository) == target
+    assert (repository.repo / name).read_bytes() == latest
+    assert git(repository.repo, "show", f"{baseline}:{name}").encode() == content.rstrip(b"\n")
+    assert git(repository.repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_selected_paths_require_one_published_baseline(published, tmp_path, mixed):
+    repository, _, _ = published
+    refresh_canonical(repository.repo)
+    before = _head(repository)
+    clone = tmp_path / "publisher"
+    first = git(repository.repo, "ls-files").splitlines()[0]
+    paths = (first, "published.txt")
+    originals = {name: (clone / name).read_bytes() for name in paths}
+    for revision in (1, 2):
+        for name in paths:
+            (clone / name).write_bytes(originals[name] + f"\n# revision {revision}\n".encode())
+        git(clone, "add", "--", *paths)
+        git(clone, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "-qm", f"published revision {revision}")
+    git(clone, "push", "-q", "origin", "HEAD:main")
+    for name in paths:
+        revision = 2 if mixed and name == "published.txt" else 1
+        (repository.repo / name).write_bytes(originals[name] + f"\n# revision {revision}\n".encode())
+    target = git(clone, "rev-parse", "HEAD")
+    arguments = dict(reconcile_published_paths=paths, expected_target=target)
+    if mixed:
+        with pytest.raises(ControllerError, match="no matching published main baseline"):
+            refresh_canonical(repository.repo, **arguments)
+        assert _head(repository) == before
+        assert git(repository.repo, "diff", "--cached", "--name-only") == ""
+    else:
+        assert refresh_canonical(repository.repo, **arguments)["decision"]["code"] == "CANONICAL_REFRESHED"
+        assert _head(repository) == target and git(repository.repo, "status", "--porcelain") == ""
+
+
 def test_diverged_canonical_is_refused(published):
     repository, _, _ = published
     (repository.repo / "local.txt").write_text("local\n", encoding="utf-8")
