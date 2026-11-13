@@ -1,4 +1,4 @@
-"""Fast-forward an ACTIVE, idle canonical checkout to its published main."""
+"""Fast-forward canonical without treating passive root cwd as content occupancy."""
 
 from __future__ import annotations
 
@@ -136,9 +136,10 @@ def refresh_canonical(repository_path: Path, *, dry_run: bool = False,
 
     Integrations publish from candidates, so the canonical checkout falls behind
     published main. This only ever fast-forwards a clean checkout that is ACTIVE,
-    on the publication branch, holds no writer lease or binding and is not used by
-    any live process; a frozen canonical keeps the exact ``canonical-transition``
-    flow. Controller metadata is not changed.
+    on the publication branch, holds no writer lease or binding and has no live
+    content references. Root cwd and shared Git metadata references survive a
+    fast-forward; unlike worktree removal, refresh does not delete those nodes.
+    A frozen canonical keeps the exact ``canonical-transition`` flow.
     """
 
     repository_initial = inventory(repository_path)
@@ -167,8 +168,14 @@ def refresh_canonical(repository_path: Path, *, dry_run: bool = False,
         if conflicts(store, allocation=record.allocation_id, target=item.path, assume_serialized=True):
             raise ControllerError("INTERRUPTED_TRANSACTION", "canonical refresh conflicts with a transaction")
         ancestry = own_ancestry()
-        used = [entry for entry in ProcessPathScan().referenced_paths_in_use(item.path)
-                if entry[0] not in ancestry]
+        observed = [entry for entry in ProcessPathScan().referenced_paths_in_use(item.path)
+                    if entry[0] not in ancestry]
+        used = []
+        for pid, paths in observed:
+            content_paths = [path for path in paths if Path(path) != item.path
+                             and not Path(path).is_relative_to(repository.common_dir)]
+            if content_paths:
+                used.append((pid, content_paths))
         if used:
             raise CanonicalProcessOccupancyError(item.path, used)
         before = item.head
@@ -183,6 +190,7 @@ def refresh_canonical(repository_path: Path, *, dry_run: bool = False,
             "target": target_oid,
             "dry_run": dry_run,
             "reconciled_published_paths": proofs,
+            "non_content_process_count": len(observed) - len(used),
         }
         if before == target_oid:
             decision.update(code="CANONICAL_CURRENT", reason="canonical already equals published main")

@@ -83,6 +83,98 @@ def test_rebuilt_generation_corrupt_old_copy_is_still_blocked(rebuilt):
 
 
 @pytest.mark.parametrize("project", ["retained-feature"], indirect=True)
+@pytest.mark.parametrize("corrupt_copy", [False, True])
+def test_absent_registered_rebuild_keeps_copy_without_claiming_cleanup(rebuilt, corrupt_copy):
+    import shutil
+
+    repo, target, options, store, allocation, _, receipt, original = rebuilt
+    for relative in options["paths"]:
+        shutil.rmtree(target / relative)
+    if corrupt_copy:
+        (receipt.parent / "tree/output").write_bytes(b"corrupted copy")
+        with pytest.raises(ControllerError):
+            lifecycle.release(repo.repo, target=target, expected_record_version=7,
+                              owner_release=options["owner"], dry_run=True)
+        assert target.exists()
+        return
+    args = dict(target=target, expected_record_version=7, owner_release=options["owner"])
+    preview = lifecycle.release(repo.repo, **args, dry_run=True)["decision"]
+    observations = preview["registered_build_absences"]
+    assert {r["path"] for r in observations} == set(options["paths"])
+    assert all(r["cleanup_attribution"] == "NOT_ESTABLISHED_BY_OBSERVATION" for r in observations)
+    assert list(store.completion_receipts_dir.glob("*.json")) == []
+    result = lifecycle.release(repo.repo, **args)["decision"]
+    assert result["code"] == "RELEASED"
+    assert result["registered_build_absences"] == observations
+    assert store.load().records[allocation].history[-1]["registered_build_absences"] == observations
+    assert receipt.read_bytes() == original
+    assert list(store.completion_receipts_dir.glob("*.json")) == []
+
+
+def test_absent_preserved_output_without_registration_still_blocks(project, tmp_path, monkeypatch):  # noqa: F811
+    import shutil
+
+    repo, target, options = project
+    monkeypatch.setattr(p, "evidence_root", lambda: tmp_path / "preservations")
+    store = MetadataStore(repo.repo / ".git")
+    allocation = next(r.allocation_id for r in store.load().records.values() if r.owner == "module-owner")
+    relative = options["paths"][0]
+    p.copy_preservation(p.plan_preservation(repo.repo, target, allocation,
+        options["owner"], 2, source_relative=relative))
+    shutil.rmtree(target / relative)
+    with pytest.raises(ControllerError, match="actual completed action evidence"):
+        lifecycle.release(repo.repo, target=target, expected_record_version=2,
+                          owner_release=options["owner"], dry_run=True)
+
+
+@pytest.mark.parametrize("project", ["retained-feature"], indirect=True)
+def test_registered_absence_survives_interrupted_release(rebuilt, monkeypatch):
+    import shutil
+
+    repo, target, options, store, allocation, _, receipt, original = rebuilt
+    for relative in options["paths"]:
+        shutil.rmtree(target / relative)
+
+    def crash(name):
+        if name == "release_worktree_removed":
+            raise RuntimeError("simulated interruption")
+
+    args = dict(target=target, expected_record_version=7, owner_release=options["owner"])
+    with monkeypatch.context() as patch:
+        patch.setattr(lifecycle, "_crash_point", crash)
+        with pytest.raises(RuntimeError, match="simulated interruption"):
+            lifecycle.release(repo.repo, **args)
+    result = lifecycle.release(repo.repo, **args)["decision"]
+    assert result["code"] == "RELEASE_RECOVERED"
+    event = store.load().records[allocation].history[-1]
+    assert {r["path"] for r in event["registered_build_absences"]} == set(options["paths"])
+    assert receipt.read_bytes() == original
+
+
+@pytest.mark.parametrize("project", ["retained-feature"], indirect=True)
+@pytest.mark.parametrize("change", ["ancestor", "unknown_file"])
+def test_registered_absence_does_not_cover_other_drift(rebuilt, change):
+    import shutil
+
+    repo, target, options, _, _, _, _, _ = rebuilt
+    for relative in options["paths"]:
+        shutil.rmtree(target / relative)
+    if change == "ancestor":
+        parent = target / "apps"
+        previous = target / "previous-apps"
+        parent.rename(previous)
+        shutil.copytree(previous, parent)
+        shutil.rmtree(previous)
+    else:
+        (target / "evidence").mkdir()
+        (target / "evidence/result").write_bytes(b"unknown evidence")
+    with pytest.raises(ControllerError):
+        lifecycle.release(repo.repo, target=target, expected_record_version=7,
+                          owner_release=options["owner"], dry_run=True)
+    assert target.exists()
+
+
+@pytest.mark.parametrize("project", ["retained-feature"], indirect=True)
 @pytest.mark.parametrize("change", ["owner", "event", "history", "head", "registration"])
 def test_rebuilt_lineage_refuses_changed_history(rebuilt, change):
     import json
@@ -118,7 +210,10 @@ def test_rebuilt_lineage_refuses_changed_history(rebuilt, change):
         assert not reopened_source_identity(previous, current, target, record)
 
 
-def test_old_generation_survives_registration_and_typed_cleanup(project, tmp_path, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize("preexisting_absence", [False, True])
+def test_old_generation_survives_registration_and_typed_cleanup(
+    project, tmp_path, monkeypatch, preexisting_absence,  # noqa: F811
+):
     repo, target, options = project
     monkeypatch.setattr(p, "evidence_root", lambda: tmp_path / "preservations")
     store = MetadataStore(repo.repo / ".git")
@@ -131,8 +226,15 @@ def test_old_generation_survives_registration_and_typed_cleanup(project, tmp_pat
     receipt = Path(copied["receipt"])
     original = receipt.read_bytes()
     registered(repo, options)
+    if preexisting_absence:
+        import shutil
+
+        shutil.rmtree(target / options["paths"][0])
     plan = clean(repo, target, dry_run=True)["plan"]
     assert plan["blockers"] == []
+    if preexisting_absence:
+        assert options["paths"][0] not in plan["cleanup_paths"]
+        assert plan["registered_build_absences"][0]["path"] == options["paths"][0]
     result = clean(repo, target, dry_run=False, expected_plan_id=plan["plan_id"])
     assert result["code"] == "TYPED_DISPOSABLE_CLEANED"
     assert all(not (target / path).exists() for path in options["paths"])

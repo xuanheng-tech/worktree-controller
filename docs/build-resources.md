@@ -137,6 +137,23 @@ new sources. Old generations remain unchanged; no historical deletion is inferre
 
 ## Retention preview
 
+With `registered_build_absence_version=1`, an output already registered as
+`owner-rebuildable-no-evidence` may be absent before cleanup starts. Its absence
+does not need a fabricated cleanup receipt or a copy of a directory that no longer
+exists. The original registration must still match owner, HEAD, CAS, committed
+build inputs and every surviving ancestor. Historical preservation copies and
+their lineage are verified and retained unchanged. Unregistered missing sources
+keep the existing completion-evidence requirement.
+
+The ordinary release dry-run reports `registered_build_absences` with state
+`ABSENT_AT_OBSERVATION` and attribution `NOT_ESTABLISHED_BY_OBSERVATION`. Successful
+release retains those observations in the allocation history, including after
+interrupted-release recovery. This records present state, not who removed the
+output. Typed cleanup pins any initial absence separately from its action list;
+absence arising during an action cannot replace real action/recovery evidence.
+No unknown file, failed transaction, writer, runtime, ref or publication check is
+relaxed. Existing outputs retain their normal cleanup and preservation requirements.
+
 `retention_release_preflight_version=1` changes the preview meaning:
 `WOULD_RELEASE` requires the exact release dry-run to succeed at observation time.
 Its decision is attached as `release_preflight`. `CLOSEOUT_REQUIRED` means a park,

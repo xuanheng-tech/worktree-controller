@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.35.1
+
+- Separate current absence of owner-registered rebuildable outputs from claims
+  that Controller completed their cleanup. Verify registration, retained copies
+  and ancestors, then allow ordinary release checks. Preserve absence observations
+  in release history, including interrupted-release recovery; invent no cleanup receipt.
+- Pin pre-existing absence in typed cleanup plans. An in-progress or failed action
+  still requires its own real completion/recovery evidence; unknown ignored files,
+  corrupt preservation and runtime occupancy remain blocked.
+- Stop treating a passive canonical-root cwd or shared Git metadata descriptor as
+  checkout-content occupancy. Refresh preserves these nodes. Writer leases,
+  runtime bindings, transactions and references within content still block;
+  destructive worktree removal keeps its stricter process guards.
+- Advertise `registered_build_absence_version=1` and
+  `canonical_refresh_scope_version=1`; CLI 61 and storage 5 are unchanged.
+
 ## 1.35.0
 
 - Add explicit published-path reconciliation to canonical refresh. Only selected

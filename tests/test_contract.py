@@ -165,7 +165,7 @@ def test_public_contract_matches_package_and_commands(tmp_path: Path) -> None:
         "release",
     ]
     assert contract["metadata_schema_version"] == 4
-    assert contract["tool_version"] == project["version"] == __version__ == "1.35.0"
+    assert contract["tool_version"] == project["version"] == __version__ == "1.35.1"
     assert contract["aborted_integration_branch_retirement_version"] == 1
     assert contract["drifted_handoff_reopen_version"] == 1
     assert (
@@ -321,7 +321,7 @@ def test_release_versions_are_independently_declared_and_advertised(capsys) -> N
         == 1
     )
 
-    assert payload["tool_version"] == contract["tool_version"] == "1.35.0"
+    assert payload["tool_version"] == contract["tool_version"] == "1.35.1"
     assert advertised["writer_lease_schema_version"] == contract["writer_lease_schema_version"] == 3
     assert advertised["holder_resolver_version"] == contract["holder_resolver_version"] == 2
     assert (
@@ -496,6 +496,8 @@ def test_release_versions_are_independently_declared_and_advertised(capsys) -> N
         "multiple_preservation_recovery_version",
         "build_preservation_recovery_version",
         "rebuilt_preservation_lineage_version",
+        "registered_build_absence_version",
+        "canonical_refresh_scope_version",
         "preservation_supersession_version",
     ):
         assert advertised[capability] == contract[capability] == 1

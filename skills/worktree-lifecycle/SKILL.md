@@ -43,6 +43,12 @@ responsibilities. Preserve the caller's commit, push, remote, and destructive-op
    stash or overwrite. Every independent/unselected change, filter, symlink, remote drift and
    existing canonical occupancy guard still blocks. An interruption may leave exact target blobs
    staged; retry the identical supported request, never manually clear the index.
+   With `canonical_refresh_scope_version` 1, references only to the canonical root directory
+   or Git common metadata are non-blocking observations: fast-forward preserves those nodes.
+   Writer leases, external runtime bindings, transactions and references inside checkout content
+   still block. This is not worktree removal or production activation; never stop shared processes
+   merely to clear a passive cwd. A runtime consuming mutable canonical source requires its
+   actual runtime binding; cwd alone is not one.
    With `canonical_main_refresh_version` 1, a handoff frozen on policy `main` or `master` uses
    `canonical-transition`, binding the original frozen HEAD and observed local main HEAD separately. Review
    exact published target ancestry and policy. Partial progress leaves main advanced and metadata
@@ -192,6 +198,14 @@ verified old immutable copies and fresh preservation at the current registration
 flow for the selected registered output. Preserve every affected current baseline, then review
 and execute normal typed cleanup. Real completed action proofs cover the new sources; never infer
 old deletion, rewrite historical generations or treat copy completion as release authority.
+
+With `registered_build_absence_version` 1, an already registered rebuildable output without
+evidence value may be absent before cleanup. Use the ordinary release dry-run: it verifies the
+original registration, surviving ancestors and retained copies and reports
+`registered_build_absences`. Release history preserves `ABSENT_AT_OBSERVATION` with
+`NOT_ESTABLISHED_BY_OBSERVATION` attribution, never a synthetic cleanup receipt. Do not rebuild a
+missing directory to manufacture preservation coverage. Unregistered absence, damaged copies,
+unresolved cleanup actions and the other release guards remain blocked.
 
 With `terminal_preserved_cleanup_version` 1, published integrations and completed
 no-change feature/audit tasks may use the existing preservation and `resource-clean --typed`

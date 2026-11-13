@@ -108,7 +108,17 @@ before the guarded fast-forward; it never resets, stashes or overwrites local ed
 Unselected changes, untracked files, symlinks, content filters, independent index
 content and a changed remote target remain blocked. If interrupted after staging,
 the identical request accepts those exact target blobs and can resume. Ordinary
-canonical refresh still requires cleanliness; all process and authority guards stay.
+canonical refresh still requires cleanliness and its authority and content-use guards.
+
+With `canonical_refresh_scope_version=1`, a process whose references are only the
+canonical root directory or shared Git metadata is an observer, not a content
+occupant. Fast-forward preserves those nodes; there is no reason to stop a shared
+service or shell just to clear its cwd. References inside checkout content, writer
+leases, external runtime bindings and conflicting transactions still block. Git
+continues to enforce its index/ref locks. The decision reports
+`non_content_process_count`; it does not attest production activation. A runtime
+that consumes mutable canonical source must register that runtime binding rather
+than relying on cwd as a substitute. Worktree removal keeps its stricter guards.
 
 A frozen source cannot accept feature writes. Same-session continuation requires a compatible
 consumer to send `--access read|exec|write` and the actual write target. Continuing feature work on

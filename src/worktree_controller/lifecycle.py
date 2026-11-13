@@ -5158,6 +5158,12 @@ def _typed_cleanup_plan_locked(
         identity["recovery"] = recovery
     if build_preservations:
         identity["build_preservation_evidences"] = build_preservations
+    from .build_resources import absent_outputs
+
+    build_absences = (cleanup_plan.get("registered_build_absences", []) if cleanup_transaction_id
+                      else absent_outputs(item, record))
+    if build_absences:
+        identity["registered_build_absences"] = build_absences
     return {**identity, "plan_id": _release_plan_id(identity)}
 
 
@@ -8367,6 +8373,9 @@ def _release_registered_target(
                 release_intent=release_intent,
             )
         has_registered_teardown = bool(plan.resource_actions)
+        from .build_resources import absent_outputs
+
+        build_absences = absent_outputs(item, record)
         if teardown_reproducible_venv and not has_registered_teardown:
             raise ControllerError(
                 "UNREGISTERED_RESOURCE",
@@ -8583,6 +8592,9 @@ def _release_registered_target(
                 repository, exclude_keys=frozenset({item.key})
             )
             existing_refs = public_refs(repository.canonical_path)
+            if build_absences:
+                journal["registered_build_absences"] = build_absences
+                store.write_transaction(transaction_id, journal)
             git_write(repository.canonical_path, ("worktree", "remove", str(item.path)))
             journal["phase"] = "WORKTREE_REMOVED"
             journal["updated_at"] = now_iso()
@@ -8600,6 +8612,9 @@ def _release_registered_target(
                 owner="unassigned",
                 disposable_resources=tuple(resources),
             )
+            if build_absences:
+                updated = replace(updated, history=(*updated.history[:-1],
+                    {**updated.history[-1], "registered_build_absences": build_absences}))
             store.replace_record(updated)
             store.remove_binding(item.key)
             store.remove_writer_lease(record.allocation_id)
@@ -8671,6 +8686,8 @@ def _release_registered_target(
             "head": item.head,
             "plan": asdict(plan),
         }
+        if build_absences:
+            payload["decision"]["registered_build_absences"] = build_absences
         if recovery_dry_run is not None:
             payload["decision"]["recovery"] = recovery_dry_run
         return payload
@@ -8689,6 +8706,8 @@ def _release_registered_target(
         "release_plan_id": plan.plan_id if plan else None,
         "release_intent_id": plan.release_intent_id if plan else None,
     }
+    if build_absences:
+        payload["decision"]["registered_build_absences"] = build_absences
     return payload
 
 
@@ -8894,6 +8913,10 @@ def _recover_or_replay_removed_release(
                 owner="unassigned",
                 disposable_resources=tuple(resources),
             )
+            if transaction.get("registered_build_absences"):
+                updated = replace(updated, history=(*updated.history[:-1],
+                    {**updated.history[-1],
+                     "registered_build_absences": transaction["registered_build_absences"]}))
             store.replace_record(updated)
             record = updated
         elif record.record_version != plan.expected_record_version + 1 or len(binding_keys) > 1:

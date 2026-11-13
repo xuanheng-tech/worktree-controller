@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -152,10 +153,27 @@ def test_diverged_canonical_is_refused(published):
     assert _head(repository) == local
 
 
-def test_a_process_using_canonical_blocks_the_refresh(published):
-    repository, before, _ = published
+def test_passive_root_cwd_survives_canonical_refresh(published):
+    repository, _, target = published
     user = subprocess.Popen(["sleep", "30"], cwd=repository.repo)
     try:
+        result = refresh_canonical(repository.repo)["decision"]
+        assert result["code"] == "CANONICAL_REFRESHED"
+        assert result["non_content_process_count"] >= 1
+        assert user.poll() is None and _head(repository) == target
+    finally:
+        user.terminate()
+        user.wait(timeout=10)
+
+
+def test_open_checkout_content_still_blocks_refresh(published):
+    repository, before, _ = published
+    source = repository.repo / git(repository.repo, "ls-files").splitlines()[0]
+    user = subprocess.Popen([sys.executable, "-c",
+        "import sys,time; f=open(sys.argv[1]); print('ready',flush=True); time.sleep(30)",
+        str(source)], stdout=subprocess.PIPE, text=True)
+    try:
+        assert user.stdout.readline() == "ready\n"
         with pytest.raises(ControllerError) as refused:
             refresh_canonical(repository.repo)
         assert refused.value.code == "CANONICAL_IN_USE" and str(user.pid) in str(refused.value)
@@ -185,7 +203,8 @@ def test_process_diagnostics_use_kernel_names_and_never_read_arguments(published
     (proc / "501/cmdline").write_text("fixture-private-argument")
     monkeypatch.setattr(canonical_refresh, "_PROC_ROOT", proc)
     monkeypatch.setattr(writer_lease, "_command", lambda _pid: pytest.fail("command arguments read"))
-    _occupancy(monkeypatch, [(501, [str(repository.repo)])])
+    source = str(repository.repo / "source.py")
+    _occupancy(monkeypatch, [(501, [source])])
 
     assert controller_main(["canonical-refresh", "--repo", str(repository.repo), "--json"]) == 2
     output = capsys.readouterr().out
@@ -195,7 +214,7 @@ def test_process_diagnostics_use_kernel_names_and_never_read_arguments(published
     assert diagnostic["processes"] == [{
         "pid": 501, "name": "node_repl", "parent_pid": 401,
         "metadata_status": "observed", "parent_name": "codex",
-        "matched_paths": [str(repository.repo)], "paths_truncated": False,
+        "matched_paths": [source], "paths_truncated": False,
     }]
     assert "shared daemon" in " ".join(diagnostic["recovery_steps"])
     assert diagnostic["retry_argv"] == [
@@ -228,15 +247,25 @@ def test_unknown_process_metadata_keeps_the_original_refusal(published, tmp_path
 
         monkeypatch.setattr(Path, "open", denied)
     monkeypatch.setattr(canonical_refresh, "_PROC_ROOT", proc)
-    _occupancy(monkeypatch, [(501, [str(repository.repo)])])
+    source = str(repository.repo / "source.py")
+    _occupancy(monkeypatch, [(501, [source])])
     with pytest.raises(ControllerError) as refused:
         refresh_canonical(repository.repo)
     assert refused.value.code == "CANONICAL_IN_USE"
     process = refused.value.diagnostics["processes"][0]
     assert process["metadata_status"] == process["name"] == process["parent_name"] == "unknown"
     assert process["parent_pid"] is None
-    assert process["matched_paths"] == [str(repository.repo)]
+    assert process["matched_paths"] == [source]
     assert _head(repository) == before
+
+
+def test_git_metadata_references_do_not_block_canonical_content_refresh(published, monkeypatch):
+    repository, _, target = published
+    _occupancy(monkeypatch, [(501, [str(repository.repo),
+                                   str(repository.repo / ".git/worktree-controller/v1/repo.lock")])])
+    result = refresh_canonical(repository.repo, dry_run=True)["decision"]
+    assert result["code"] == "CANONICAL_REFRESH_READY"
+    assert result["target"] == target and result["non_content_process_count"] == 1
 
 
 def test_process_diagnostics_bound_processes_and_paths(published, tmp_path, monkeypatch, capsys):
@@ -260,7 +289,7 @@ def test_text_refusal_shows_process_and_normal_session_recovery(published, tmp_p
     _fake_stat(proc, 501, "node\nworker", 401)
     _fake_stat(proc, 401, "codex", 1)
     monkeypatch.setattr(canonical_refresh, "_PROC_ROOT", proc)
-    _occupancy(monkeypatch, [(501, [str(repository.repo)])])
+    _occupancy(monkeypatch, [(501, [str(repository.repo / "source.py")])])
     assert controller_main(["canonical-refresh", "--repo", str(repository.repo)]) == 2
     output = capsys.readouterr().out
     assert "pid=501 name='node\\nworker' parent_pid=401 parent_name='codex'" in output

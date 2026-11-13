@@ -1054,6 +1054,8 @@ def _main(argv: list[str] | None) -> int:
                 "canonical_refresh_version": 1,
                 "canonical_published_reconciliation_version": 1,
                 "rebuilt_preservation_lineage_version": 1,
+                "registered_build_absence_version": 1,
+                "canonical_refresh_scope_version": 1,
                 "host_handoff_continuation_version": HOST_HANDOFF_CONTINUATION_VERSION,
                 "release_recovery_inspection_version": 1,
                 "rollout_transaction_diagnostics_version": 1,

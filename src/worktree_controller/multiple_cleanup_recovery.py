@@ -129,7 +129,7 @@ def _frozen_authority(record: dict[str, Any]) -> MetadataRecord:
 def _released_record(frozen: MetadataRecord, current: MetadataRecord,
                      release_plan: dict[str, Any]) -> bool:
     event = current.history[-1]
-    if (set(event) != {"at", "event", "from", "to", "owner"}
+    if (set(event) - {"registered_build_absences"} != {"at", "event", "from", "to", "owner"}
             or event.get("event") != "RELEASED" or event.get("from") != frozen.lifecycle
             or event.get("to") != "RELEASED" or event.get("owner") != "unassigned"
             or release_plan.get("lifecycle") != frozen.lifecycle

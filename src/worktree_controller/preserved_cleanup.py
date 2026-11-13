@@ -418,11 +418,12 @@ def _resumed_cleanup_identity(
 
 def _require_completion_coverage(
     bound: dict[str, Any], plans: list[dict[str, Any]], *, record: MetadataRecord | None = None,
+    registered_absences: tuple[dict[str, Any], ...] = (),
 ) -> None:
-    """A completed copy with an absent source requires actual action evidence.
+    """Verify copy retention separately from owner-classified disposable absence.
 
-    Inspect only this allocation's official generation metadata. Unreferenced
-    generation payloads are not opened, and source absence grants no authority.
+    Inspect only this allocation's official generations. Registered disposable
+    absence additionally verifies retained copy bytes; it never proves cleanup.
     """
     from .build_preservation import identity_matches
     from .source_preservation import CONTRACT as SOURCE_CONTRACT
@@ -430,6 +431,13 @@ def _require_completion_coverage(
     allocation = p.evidence_root() / bound["repository_id"] / bound["allocation_id"]
     if not os.path.lexists(allocation):
         return
+    if registered_absences:
+        from .build_preservation import generations
+
+        # Verify retained copies and exact registration/reopen lineage. Absence
+        # does not supply a completed action or excuse corrupt historical bytes.
+        generations(bound, record)
+    disposable_absences = {row["path"] for row in registered_absences}
     if any(
         plan["authority"]["identity"] != bound
         and not _resumed_cleanup_identity(plan["authority"]["identity"], bound, record)
@@ -513,7 +521,8 @@ def _require_completion_coverage(
                 ):
                     raise _blocked("legacy generation metadata changed")
                 if source_absent(plan, Path(bound["target_path"])) and (
-                    not (plan["authority"]["identity"] == bound and _source_key(plan) in covered)
+                    relative not in disposable_absences
+                    and not (plan["authority"]["identity"] == bound and _source_key(plan) in covered)
                     and not any(_same_completed_source(
                         plan, completed, Path(bound["target_path"]), record=record,
                     ) for completed in plans)
@@ -825,7 +834,17 @@ def cleanup_receipts(
                 store, item, bound, cleanup_transaction_id, cleanup_recovery,
                 record,
             ))
-        _require_completion_coverage(bound, completed_preservation_plans, record=record)
+        from .build_resources import absent_outputs
+
+        registered_absences = absent_outputs(item, record)
+        if cleanup_transaction_id is not None:
+            pending = store._read_json(store.transactions_dir / f"{cleanup_transaction_id}.json")
+            initial_absences = pending["cleanup_plan"].get("registered_build_absences", [])
+            if any(row not in registered_absences for row in initial_absences):
+                raise _blocked("registered absence changed during cleanup")
+            registered_absences = initial_absences
+        _require_completion_coverage(bound, completed_preservation_plans, record=record,
+                                     registered_absences=tuple(registered_absences))
         if expected_refs is not None:
             if not isinstance(expected_refs, list) or len(expected_refs) != len(refs):
                 raise _blocked("archive cleanup receipt set changed")

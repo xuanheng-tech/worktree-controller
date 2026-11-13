@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,26 @@ def check_resource(root: Path, relative: str, declaration: dict[str, Any]) -> No
         path = root if name == "." else root / name
         if path.is_symlink() or path_identity(path) != expected:
             raise _fail("registered resource or ancestor identity changed")
+
+
+def absent_outputs(item: WorktreeGitState, record: MetadataRecord) -> list[dict[str, Any]]:
+    """Observe registered disposable outputs, without attributing their removal."""
+    outputs = declarations(item, record)
+    missing = [relative for relative in outputs if not os.path.lexists(item.path / relative)]
+    if not missing:
+        return []
+    proof = outputs[missing[0]]["registration"]
+    if proof["attestation"] != "owner-rebuildable-no-evidence":
+        raise _fail("absent output requires its original rebuildability attestation")
+    for name, expected in proof["anchors"].items():
+        if name in proof["paths"]:
+            continue
+        path = item.path if name == "." else item.path / name
+        if path.is_symlink() or path_identity(path) != expected:
+            raise _fail("absent output ancestor identity changed")
+    return [{"path": relative, "state": "ABSENT_AT_OBSERVATION",
+             "registration_record_version": proof["record_version"],
+             "cleanup_attribution": "NOT_ESTABLISHED_BY_OBSERVATION"} for relative in missing]
 
 
 def register(

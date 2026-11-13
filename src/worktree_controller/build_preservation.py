@@ -94,17 +94,27 @@ def generations(bound, record, *, topology=None, completed=(), completed_topolog
                         raise _blocked("rebuilt preservation requires unchanged ancestors and a distinct source node")
                     entries.append({"source_relative": relative, "historical_rebuilt_source": True,
                                     "evidence": evidence})
-                    historical.append(relative)
+                    if not source_absent(plan, Path(bound["target_path"])):
+                        historical.append(relative)
                     continue
                 absent = relative in completed
+                observed_absence = verify_live and not absent and not os.path.lexists(source)
                 evidence, plan = coverage(
                     allocation / name / "receipt.json", digest, identity=previous,
-                    verify_source=verify_live and not absent, source_topology=topology if not absent else None,
+                    verify_source=verify_live and not absent and not observed_absence,
+                    source_topology=topology if not absent and not observed_absence else None,
                 )
                 anchors = registration["anchors"]
                 if (plan["source_anchor"]["source"] != anchors[relative]
                         or plan.get("source_ancestor_identities", {}).get(bound["target_path"]) != anchors["."]):
                     raise _blocked("preservation and registration source/root anchors differ")
+                if observed_absence:
+                    if not source_absent(plan, Path(bound["target_path"])):
+                        raise _blocked("registered absent output reappeared")
+                    # This is an existing owner-classified disposable output,
+                    # not a completed cleanup action or a new preserved baseline.
+                    entries.append({"source_relative": relative, "evidence": evidence})
+                    continue
                 if absent or not verify_live:
                     original = completed_topology if completed_topology is not None else topology
                     if original is None or (verify_live and not source_absent(plan, Path(bound["target_path"]))):
