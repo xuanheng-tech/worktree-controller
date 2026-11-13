@@ -243,7 +243,9 @@ def main():
                 "retention_convergence_version", "integration_publication_execution_version"):
         if capabilities["decision"][key] != contract[key]:
             raise RuntimeError(f"{key} mismatch")
-    run("uv", "sync", "--locked", "--python", sys.executable,
+    # uv.lock is resolved against public PyPI; a contributor's mirror config would make --locked fail.
+    run("uv", "sync", "--locked", "--no-config", "--default-index", "https://pypi.org/simple",
+        "--python", sys.executable,
         *(["--offline"] if arguments.offline else []))
     binaries = work_dir / "controller-bin"
     binaries.mkdir()

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.35.4
+
+- Classify a retained `resource-clean` journal as `RELEASE_EVIDENCE_SUPERSEDED`
+  before consulting preservation generations. That proof reads only Controller
+  metadata (RELEASED record, exactly one matching release receipt, target and Git
+  registration gone, no writer lease), so archiving historical preservation
+  payloads off the host no longer turns long-released cleanups into
+  `INVALID_TRANSACTION` / `MULTIPLE_CLEANUP_RECOVERY_BLOCKED` and no longer blocks
+  activation's rollout check or `doctor`. Journals without that exact evidence keep
+  their previous classification.
+- `scripts/check-project` and `scripts/check-cross-tool` run `uv sync --locked`
+  with `--no-config --default-index https://pypi.org/simple`, the index `uv.lock`
+  is resolved against, so a contributor's mirror configuration no longer fails
+  the locked sync.
+- An `ACTIVE` task handoff refused with `PATH_SCOPE_VIOLATION` now names the first
+  out-of-scope path and the existing owner repair, `review --add-scope`.
+- CLI and storage contracts are unchanged.
+
 ## 1.35.3
 
 - Settle a finished host-scoped execution run once its recorded holder has exited,

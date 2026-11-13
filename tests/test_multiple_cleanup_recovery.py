@@ -183,7 +183,10 @@ def test_public_multi_recovery_with_another_released_terminal_journal(interrupte
     assert all(path.read_bytes() == raw for path, raw in before.items())
     with store.lock(exclusive=False):
         assert terminal_state(store, other.stem, verify_generations=True) == "ACQUIRE_RELEASE_SUPERSEDED"
-        assert terminal_state(store, recovery["original_transaction_id"], verify_generations=True) == "RECOVERY_CLEANED"
+        assert r.completed(store, recovery["original_transaction_id"], verify_generations=True)
+        assert terminal_state(store, recovery["original_transaction_id"], verify_generations=True) == (
+            "RELEASE_EVIDENCE_SUPERSEDED"
+        )
     assert cleanup_recovery.rollout_check(repository.repo)["decision"]["code"] == "ROLLOUT_RECOVERY_COMPATIBLE"
 
 
@@ -387,8 +390,13 @@ def test_archived_release_keeps_terminal_and_rollout_valid(interrupted):
     archive_retained(repository.repo, **options, plan_id=archived["decision"]["plan_id"])
     lifecycle.release(repository.repo, target=target, expected_record_version=3, owner_release="module-owner")
     with store.lock(exclusive=False):
-        assert terminal_state(store, recovery["original_transaction_id"], verify_generations=True) == "RECOVERY_CLEANED"
-    assert cleanup_recovery.rollout_check(repository.repo)["decision"]["transactions"][0]["state"] == "RECOVERY_CLEANED"
+        assert r.completed(store, recovery["original_transaction_id"], verify_generations=True)
+        assert terminal_state(store, recovery["original_transaction_id"], verify_generations=True) == (
+            "RELEASE_EVIDENCE_SUPERSEDED"
+        )
+    assert cleanup_recovery.rollout_check(repository.repo)["decision"]["transactions"][0]["state"] == (
+        "RELEASE_EVIDENCE_SUPERSEDED"
+    )
 
 
 @pytest.mark.parametrize("mutation", ["released-head", "release-cas", "release-plan", "missing-release"])
@@ -500,7 +508,10 @@ def test_reopened_twelve_generations_multi_resume_release_preserves_history(inte
     assert all(path.read_bytes() == raw for path, raw in before.items())
     lifecycle.release(repository.repo, target=target, expected_record_version=4, owner_release="module-owner")
     with store.lock(exclusive=False):
-        assert terminal_state(store, recovery["original_transaction_id"], verify_generations=True) == "RECOVERY_CLEANED"
+        assert r.completed(store, recovery["original_transaction_id"], verify_generations=True)
+        assert terminal_state(store, recovery["original_transaction_id"], verify_generations=True) == (
+            "RELEASE_EVIDENCE_SUPERSEDED"
+        )
     assert all(path.read_bytes() == raw for path, raw in before.items())
 
 
@@ -558,8 +569,10 @@ def test_released_combined_recovery_freezes_all_generation_metadata(interrupted,
         (generation / "manifest.json").write_bytes(manifest_bytes)
     with store.lock(exclusive=False), pytest.raises(ControllerError):
         r.completed(store, recovery["original_transaction_id"], verify_generations=True)
-    with pytest.raises(ControllerError):
-        cleanup_recovery.rollout_check(repository.repo)
+    # The formal release alone keeps the journal terminal for activation, so
+    # archived or altered generations no longer block the rollout check.
+    rows = cleanup_recovery.rollout_check(repository.repo)["decision"]["transactions"]
+    assert [row["state"] for row in rows] == ["RELEASE_EVIDENCE_SUPERSEDED"]
 
 
 def test_unreceipted_partial_generation_keeps_existing_no_authority_rule(interrupted):

@@ -216,7 +216,9 @@ def main():
         raise RuntimeError("source CLI contract mismatch")
     check_public_lock(tomllib.loads((ROOT / "uv.lock").read_text()))
     offline = ["--offline"] if arguments.offline else []
-    run("uv", "sync", "--locked", "--python", sys.executable, *offline)
+    # uv.lock is resolved against public PyPI; a contributor's mirror config would make --locked fail.
+    run("uv", "sync", "--locked", "--no-config", "--default-index", PUBLIC_INDEX,
+        "--python", sys.executable, *offline)
     run(
         ROOT / ".venv/bin/ruff", "check", "--no-cache", "src", "tests",
         "scripts/controller-activate", "scripts/check-writer-rollout", "scripts/check-project",

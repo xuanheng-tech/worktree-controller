@@ -80,6 +80,25 @@ def test_exact_release_evidence_makes_the_journal_terminal(tmp_path):
         assert scope.conflicts(store, allocation=allocation, target=target) == []
 
 
+def test_release_evidence_wins_before_archived_generation_checks(tmp_path, monkeypatch):
+    """Archived preservation payloads must not hide an exact formal release."""
+    from worktree_controller import cleanup_recovery, source_recovery
+
+    store, allocation, target, transaction = _ready(tmp_path)
+    _record(store, allocation)
+    _receipt(store, allocation=allocation, target=target)
+
+    def archived(*_args, **_kwargs):
+        raise FileNotFoundError("preservation generation archived off host")
+
+    monkeypatch.setattr(cleanup_recovery, "completed", archived)
+    monkeypatch.setattr(source_recovery, "terminal_state", archived)
+    with store.lock(exclusive=False):
+        assert scope.terminal_state(store, transaction, verify_generations=True) == (
+            "RELEASE_EVIDENCE_SUPERSEDED"
+        )
+
+
 def test_retained_journal_bytes_are_never_rewritten(tmp_path):
     store, allocation, target, transaction = _ready(tmp_path)
     _record(store, allocation)
