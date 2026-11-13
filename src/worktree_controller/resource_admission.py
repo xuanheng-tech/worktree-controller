@@ -1164,17 +1164,11 @@ def _host_runtime_holders(row: dict[str, Any], *, allow_broad_scope: bool = Fals
     except (OSError, TypeError, ValueError) as exc:
         raise ControllerError("ADMISSION_RECOVERY_REQUIRED",
                               "host execution recovery target is uncertain") from exc
-    if not allow_broad_scope:
-        # Unqualified recovery is identity-only: it needs a present, bounded
-        # target to tie the recorded runtime chain to one session. Typed
-        # recovery carries its own recorded-holder authority and may instead
-        # proceed against a provably absent target (orphan release).
-        if not target_present:
-            raise ControllerError("ADMISSION_RECOVERY_REQUIRED",
-                                  "host execution recovery target is uncertain")
-        if unbounded_host_scope(target):
-            raise ControllerError("ADMISSION_RECOVERY_REQUIRED",
-                                  "host execution target is too broad for identity-only recovery")
+    # The recorded holder (client/session/run, PID, start ticks, boot) identifies the
+    # process; a target that has since been removed does not make its exit uncertain.
+    if not allow_broad_scope and target_present and unbounded_host_scope(target):
+        raise ControllerError("ADMISSION_RECOVERY_REQUIRED",
+                              "host execution target is too broad for identity-only recovery")
     try:
         primary = WriterHolder(**recorded)
     except (TypeError, ValueError) as exc:
@@ -1245,8 +1239,10 @@ def _reconcile_finished_host_executions(ledger: AdmissionLedger, request_ids: li
                     or row["request"].get("allocation_id") is not None
                     or row["request"].get("owner") != os.getuid()):
                 continue
+            # Settlement only needs proof that the recorded holder exited. The run's
+            # checkout may have been released or re-created since, which says
+            # nothing about that process.
             try:
-                _check_host_target(row["request"])
                 _check_host_exit(row)
             except (ControllerError, OSError):
                 continue

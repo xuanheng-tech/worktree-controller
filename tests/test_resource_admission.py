@@ -1133,7 +1133,7 @@ def _typed(host, key, *, digest=True, terminal=True, mutate=None, evidence=None)
         terminal_evidence=evidence)
 
 
-def _host_reservation(host, session, *, live=False):
+def _host_reservation(host, session, *, live=False, target=None):
     """Inject a historical home-scoped ALLOCATED execution row.
 
     The M2 producer invariant makes new home admissions impossible, so
@@ -1148,7 +1148,7 @@ def _host_reservation(host, session, *, live=False):
     from worktree_controller.writer_lease import describe_holder
 
     _, ledger, _ = host
-    target = Path.home()
+    target = target or Path.home()
     info = target.stat()
     request = resources.execution_request(None, f"host:{os.getuid()}", None, target,
                                           client_id="agent-workspace", session_id=session,
@@ -1180,6 +1180,24 @@ def _home_reservation(host, session="dead-home"):
     """A home-scoped reservation whose recorded holder has already exited."""
     key, _child = _host_reservation(host, session)
     return key
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_finished_run_settles_after_its_checkout_was_removed(host, tmp_path, live):
+    import shutil
+
+    _, ledger, _ = host
+    checkout = tmp_path / "released-checkout"
+    checkout.mkdir()
+    key, child = _host_reservation(host, f"removed-{live}", live=live, target=checkout)
+    shutil.rmtree(checkout)
+    try:
+        resources.reconcile_finished_executions()
+        assert ledger.read()["requests"][key]["state"] == ("ALLOCATED" if live else "RELEASED")
+    finally:
+        if live:
+            child.terminate()
+            child.wait(timeout=5)
 
 
 def test_typed_recovery_releases_provably_dead_home_holder(host, tmp_path):

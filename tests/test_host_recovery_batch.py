@@ -115,7 +115,7 @@ def test_exited_host_rows_settle_in_one_write_and_replay_without_writes(executio
 
 
 @pytest.mark.parametrize("fault", [
-    "missing", "replaced", "symlink", "EACCES", "EIO", "uncertain-binding",
+    "EACCES", "EIO", "uncertain-binding",
     "lease", "binding-lease", "foreign-owner", "home-scope", "live", "live-binding", "unknown-proc",
 ])
 def test_only_proven_exits_settle_in_a_mixed_batch(executions, monkeypatch, fault, reconcile_exits):
@@ -126,15 +126,7 @@ def test_only_proven_exits_settle_in_a_mixed_batch(executions, monkeypatch, faul
     if fault != "live":
         _exit(child)
     ledger = resources.AdmissionLedger()
-    if fault == "missing":
-        target.rmdir()
-    elif fault in {"replaced", "symlink"}:
-        target.rename(target.with_name("old-protected"))
-        if fault == "replaced":
-            target.mkdir()
-        else:
-            target.symlink_to(target.with_name("old-protected"), target_is_directory=True)
-    elif fault in {"EACCES", "EIO"}:
+    if fault in {"EACCES", "EIO"}:
         original = os.lstat
 
         def lstat(path, *args, **kwargs):
@@ -189,6 +181,24 @@ def test_only_proven_exits_settle_in_a_mixed_batch(executions, monkeypatch, faul
         }
         assert outcomes[extra]["result"]["code"] == "EXECUTION_OCCUPIED"
         assert "blocker" in outcomes[protected] or outcomes[protected]["result"]["code"] == "EXECUTION_OCCUPIED"
+
+
+@pytest.mark.parametrize("change", ["missing", "replaced", "symlink"])
+def test_exited_holder_settles_after_its_target_changed(executions, reconcile_exits, change):
+    # Exit is proven by the recorded holder and its process group; a released,
+    # re-created or relinked checkout says nothing about that process.
+    key, child, target = executions("moved")
+    _exit(child)
+    if change == "missing":
+        target.rmdir()
+    else:
+        target.rename(target.with_name("old-moved"))
+        if change == "replaced":
+            target.mkdir()
+        else:
+            target.symlink_to(target.with_name("old-moved"), target_is_directory=True)
+    reconcile_exits()
+    assert resources.AdmissionLedger().read()["requests"][key]["state"] == "RELEASED"
 
 
 def test_exited_holder_with_a_live_process_group_keeps_its_budget(executions, reconcile_exits):

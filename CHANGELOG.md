@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.35.3
+
+- Settle a finished host-scoped execution run once its recorded holder has exited,
+  even when the run's checkout has since been released, removed or re-created. Exit
+  is proven by the recorded holder identity (client, session, run, PID, start ticks,
+  boot), not the target directory. Previously such a row stayed ALLOCATED forever
+  and every later run in the same agent session was refused with
+  `ADMISSION_REQUEST_DRIFT`. Broad home-scoped targets that still exist keep their
+  refusal for identity-only recovery. CLI and storage contracts are unchanged.
+
 ## 1.35.2
 
 - Reconcile selected canonical edits that exactly match a published main baseline
