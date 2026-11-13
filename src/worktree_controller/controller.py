@@ -769,7 +769,13 @@ def _resolve_target(
     except OSError as exc:
         raise ControllerError("INVALID_TARGET", f"target path is unavailable: {target}") from exc
     for item in repository.worktrees:
-        if item.path.resolve(strict=True) == resolved:
+        try:
+            registered = item.path.resolve(strict=True)
+        except FileNotFoundError:
+            # A sibling may be released after inventory was read, before the lock.
+            # The requested target itself was validated above.
+            continue
+        if registered == resolved:
             return item
     raise ControllerError("UNREGISTERED_WORKTREE", f"target is not registered: {resolved}")
 

@@ -18,7 +18,8 @@ from tests.test_shadow import GitRepository, git
 from tests.test_writer_lease import POLICY_V6
 from worktree_controller import lifecycle, semantics, writer_lease, writer_session
 from worktree_controller.cli import main as controller_main
-from worktree_controller.controller import guard_write
+from worktree_controller.controller import _resolve_target, guard_write
+from worktree_controller.git_backend import inventory
 from worktree_controller.models import ControllerError
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -232,6 +233,62 @@ def test_missing_repository_lock_invalidates_existing_entitlement(task):
     )
     _store(repository).lock_file.unlink()
     assert guard(repository, path, holder) == "BLOCK_INVALID_METADATA"
+
+
+def test_released_sibling_in_inventory_does_not_invalidate_target_authority(task):
+    repository, path, _ = task
+    holder = writer_lease.describe_holder(os.getpid(), client_id="manual")
+    writer_lease.acquire_writer_lease(
+        repository.repo, target=path, client_id="manual", holder_pid=holder.pid
+    )
+    state = inventory(repository.repo)
+    sibling = repository.root / "released-sibling"
+    sibling.mkdir()
+    stale = replace(state.worktrees[0], path=sibling)
+    state = replace(state, worktrees=(stale, *state.worktrees))
+    sibling.rmdir()  # Deterministic inventory-before-release / guard-after-release ordering.
+    snapshot = _store(repository).load()
+
+    def decision(owner="review-owner", actual_holder=holder):
+        return guard_write(
+            repository.repo,
+            target=path,
+            task_key="mine",
+            authority_key="mine",
+            owner=owner,
+            operation="feature-write",
+            holder=actual_holder,
+            observe=False,
+            state=state,
+            snapshot=snapshot,
+        )["decision"]["code"]
+
+    assert decision() == "WRITE_ALLOWED"
+    assert decision(owner="other-owner") == "BLOCK_OWNER_MISMATCH"
+    assert decision(actual_holder=None) == "BLOCK_WRITER_LEASE_REQUIRED"
+    with pytest.raises(ControllerError, match="target path is unavailable") as error:
+        _resolve_target(state, sibling)
+    assert error.value.code == "INVALID_TARGET"
+    unregistered = repository.root / "unregistered"
+    unregistered.mkdir()
+    with pytest.raises(ControllerError) as error:
+        _resolve_target(state, unregistered)
+    assert error.value.code == "UNREGISTERED_WORKTREE"
+
+
+def test_target_resolution_does_not_hide_sibling_permission_error(task, monkeypatch):
+    repository, path, _ = task
+    state = inventory(repository.repo)
+    original = Path.resolve
+
+    def denied(self, *args, **kwargs):
+        if self == state.worktrees[0].path:
+            raise PermissionError("unreadable registered path")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", denied)
+    with pytest.raises(PermissionError, match="unreadable registered path"):
+        _resolve_target(state, path)
 
 
 def guard(repository, path, holder=None, operation="feature-write"):
