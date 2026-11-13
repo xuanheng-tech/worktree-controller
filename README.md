@@ -6,7 +6,7 @@ It checks repository policy before allocating a worktree, grants writing authori
 process, and records handoff, integration, recovery and release evidence. Git remains the source
 of truth for files, branches, commits and registered worktrees.
 
-**Current release: 1.35.3 · Linux · Python 3.12 · Apache-2.0**
+**Current release: 1.35.4 · Linux · Python 3.12 · Apache-2.0**
 
 ## Install
 

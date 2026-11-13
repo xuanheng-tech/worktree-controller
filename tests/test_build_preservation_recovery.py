@@ -288,7 +288,7 @@ def test_partial_prefix_recovery_keeps_history_and_only_runs_suffix(partial):
     from worktree_controller.transaction_scope import terminal_state
 
     with store.lock(exclusive=False):
-        assert terminal_state(store, journal.stem, verify_generations=True) == "RECOVERY_CLEANED"
+        assert terminal_state(store, journal.stem, verify_generations=True) == "RELEASE_EVIDENCE_SUPERSEDED"
 
 
 @pytest.mark.parametrize("change", ["owner", "cas", "journal", "receipt", "action", "reappeared",

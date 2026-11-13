@@ -3202,6 +3202,11 @@ def handoff(
             )
         if issues:
             issue = issues[0]
+            if issue["code"] == "PATH_SCOPE_VIOLATION" and record.lifecycle == "ACTIVE":
+                raise ControllerError(issue["code"], (
+                    f"{issue['message']}: {issue['path']}; the owner can record it first with "
+                    "review --add-scope <path> --scope-reason <why> --expected-head <HEAD>"
+                ))
             raise ControllerError(issue["code"], issue["message"])
         lifecycle = "HANDOFF_READY" if kind == "integration-ready" else "PRESERVED"
         _cancel_release_intents(

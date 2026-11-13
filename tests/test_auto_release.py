@@ -1166,7 +1166,7 @@ def test_automatic_release_uses_typed_cleanup_and_preserves_unknown_content(scen
                 with store.lock(exclusive=False):
                     assert (
                         transaction_scope.terminal_state(store, journal.stem)
-                        == "TYPED_ATTEMPT_SUPERSEDED"
+                        == "RELEASE_EVIDENCE_SUPERSEDED"
                     )
 
 

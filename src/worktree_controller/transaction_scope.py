@@ -779,6 +779,10 @@ def terminal_state(
     holds the repository flock (or explicitly declares it is already serialized
     by a locked caller), so no reader can classify a journal that a live writer
     is still mid-flight updating.
+
+    Release supersession is checked first: it reads only Controller metadata, so a
+    cleanup whose allocation has a proven formal release stays terminal even after
+    its preservation generations were archived off this host.
     """
     _require_flock(store, assume_serialized=assume_serialized)
     from .cleanup_attempts import typed_terminal
@@ -786,6 +790,8 @@ def terminal_state(
     from .source_recovery import terminal_state as source_terminal_state
 
     try:
+        if release_evidence_terminal(store, transaction):
+            return "RELEASE_EVIDENCE_SUPERSEDED"
         if typed_terminal(store, transaction):
             return "TYPED_ATTEMPT_SUPERSEDED"
         if completed(store, transaction, verify_generations=verify_generations):
@@ -795,8 +801,6 @@ def terminal_state(
         )
         if source_state is not None:
             return source_state
-        if release_evidence_terminal(store, transaction):
-            return "RELEASE_EVIDENCE_SUPERSEDED"
         acquire_state = acquire_evidence_terminal(store, transaction)
         if acquire_state is not None:
             return acquire_state

@@ -47,7 +47,7 @@ def test_scope_review_preserves_identity_and_unblocks_handoff(omitted_scope):
     repository, target, allocation = omitted_scope
     store = MetadataStore(repository.repo / ".git")
     before = store.load().records[allocation]
-    with pytest.raises(ControllerError, match="outside"):
+    with pytest.raises(ControllerError, match="outside.*uv.lock.*review --add-scope"):
         handoff_one(repository, target)
     assert amend(repository, target)["decision"]["code"] == "SCOPE_AMENDED"
     after = store.load().records[allocation]
