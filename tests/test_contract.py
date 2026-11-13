@@ -165,7 +165,7 @@ def test_public_contract_matches_package_and_commands(tmp_path: Path) -> None:
         "release",
     ]
     assert contract["metadata_schema_version"] == 4
-    assert contract["tool_version"] == project["version"] == __version__ == "1.35.1"
+    assert contract["tool_version"] == project["version"] == __version__ == "1.35.2"
     assert contract["aborted_integration_branch_retirement_version"] == 1
     assert contract["drifted_handoff_reopen_version"] == 1
     assert (
@@ -321,7 +321,7 @@ def test_release_versions_are_independently_declared_and_advertised(capsys) -> N
         == 1
     )
 
-    assert payload["tool_version"] == contract["tool_version"] == "1.35.1"
+    assert payload["tool_version"] == contract["tool_version"] == "1.35.2"
     assert advertised["writer_lease_schema_version"] == contract["writer_lease_schema_version"] == 3
     assert advertised["holder_resolver_version"] == contract["holder_resolver_version"] == 2
     assert (
@@ -382,7 +382,7 @@ def test_release_versions_are_independently_declared_and_advertised(capsys) -> N
         == 2
     )
     assert advertised["canonical_refresh_version"] == contract["canonical_refresh_version"] == 1
-    assert advertised["canonical_published_reconciliation_version"] == contract["canonical_published_reconciliation_version"] == 1
+    assert advertised["canonical_published_reconciliation_version"] == contract["canonical_published_reconciliation_version"] == 2
     assert contract["canonical_refresh_contract"]["contract"] == "canonical-refresh/v1"
     diagnostic = contract["canonical_refresh_contract"]["process_diagnostics"]
     assert diagnostic["location"] == "decision.process_diagnostics on live-process CANONICAL_IN_USE"

@@ -110,6 +110,16 @@ content and a changed remote target remain blocked. If interrupted after staging
 the identical request accepts those exact target blobs and can resume. Ordinary
 canonical refresh still requires cleanliness and its authority and content-use guards.
 
+Version 2 also accepts selected bytes that match one common baseline on the
+fetched main's first-parent history between canonical HEAD and the target.
+The preview names `reconciliation_baseline`. Controller stages those exact bytes,
+fast-forwards through that published baseline, then fast-forwards to the expected
+latest target. The original content remains in published Git history. A later
+published edit is therefore applied by ordinary Git fast-forward, not discarded
+or reverted to make local bytes match. An interruption after the intermediate
+fast-forward resumes from that clean baseline. Independent edits, mixed snapshots
+without a common matching baseline and changed expected targets remain refused.
+
 With `canonical_refresh_scope_version=1`, a process whose references are only the
 canonical root directory or shared Git metadata is an observer, not a content
 occupant. Fast-forward preserves those nodes; there is no reason to stop a shared

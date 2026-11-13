@@ -43,6 +43,11 @@ responsibilities. Preserve the caller's commit, push, remote, and destructive-op
    stash or overwrite. Every independent/unselected change, filter, symlink, remote drift and
    existing canonical occupancy guard still blocks. An interruption may leave exact target blobs
    staged; retry the identical supported request, never manually clear the index.
+   Version 2 also accepts selected bytes matching one common first-parent published main
+   baseline between canonical HEAD and the fetched target. Review `reconciliation_baseline`;
+   the same command fast-forwards through it and then to the exact expected target. Original
+   content remains in published history. Retry normally after an interrupted intermediate
+   fast-forward; independent edits and mixed baselines are not reconciled.
    With `canonical_refresh_scope_version` 1, references only to the canonical root directory
    or Git common metadata are non-blocking observations: fast-forward preserves those nodes.
    Writer leases, external runtime bindings, transactions and references inside checkout content
