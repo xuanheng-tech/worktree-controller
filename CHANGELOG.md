@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Rewrite the `worktree-lifecycle` Skill from about 44 KB to a 7 KB normal flow,
+  recovery routing and invariants. Per-capability recovery narratives are replaced
+  by the existing `recovery-guide`, refusal `recovery_argv`, `capabilities --json`
+  and installed `--help`. Document `worktree-session` for hook-gated clients.
+  No runtime, CLI contract or storage change.
+
 ## 1.35.1
 
 - Separate current absence of owner-registered rebuildable outputs from claims
