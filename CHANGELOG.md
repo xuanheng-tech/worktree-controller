@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.35.5
+
+- Read integration intents through their effective state when planning branch
+  retirement. A raw `REMOTE_VERIFIED` (or other non-terminal) intent that already
+  has a `STALE_INTENT_TERMINAL_ACKNOWLEDGED` reconciliation receipt with effective
+  state `RELEASED` no longer reports `INTEGRATION_INTENT_UNRESOLVED`, matching
+  convergence, retry and lifecycle checks. Intents without terminal evidence keep
+  blocking retirement. CLI and storage contracts are unchanged.
+
 ## 1.35.4
 
 - Classify a retained `resource-clean` journal as `RELEASE_EVIDENCE_SUPERSEDED`

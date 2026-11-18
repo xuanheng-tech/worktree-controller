@@ -33,7 +33,7 @@ from worktree_controller.lifecycle import (
     reconcile_publication_receipts,
     release,
 )
-from worktree_controller.models import ControllerError
+from worktree_controller.models import ControllerError, IntegrationReconciliationReceipt
 from worktree_controller.store import MetadataStore
 
 
@@ -560,6 +560,55 @@ def test_integration_retirement_preserves_existing_safety_guards(fault: str, blo
         )["decision"]
         assert decision["code"] == "BRANCH_RETIREMENT_BLOCKED"
         assert blocker in decision["plan"]["blockers"]
+
+
+def test_integration_retirement_honors_terminal_reconciliation_receipt() -> None:
+    with GitRepository(linked=0, policy_text=POLICY_MANUAL) as repository:
+        allocation, _head = _released_candidate(repository, "stale")
+        store = MetadataStore(inventory(repository.repo).common_dir)
+        snapshot = store.load()
+        intent = next(
+            i for i in snapshot.integration_intents.values() if i.allocation_id == allocation
+        )
+        stale = replace(intent, state="REMOTE_VERIFIED")
+        store._atomic_json(
+            store.integration_intents_dir / f"{intent.intent_id}.json", asdict(stale)
+        )
+
+        def plan() -> dict[str, object]:
+            return plan_branch_retirement(
+                repository.repo,
+                allocation_id=allocation,
+                remote="origin",
+                integrated_into="main",
+                dry_run=True,
+            )["decision"]
+
+        blocked = plan()
+        assert blocked["code"] == "BRANCH_RETIREMENT_BLOCKED"
+        assert "INTEGRATION_INTENT_UNRESOLVED" in blocked["plan"]["blockers"]
+
+        with store.lock(exclusive=True):
+            store.write_integration_reconciliation_receipt(
+                IntegrationReconciliationReceipt(
+                    schema_version=1,
+                    receipt_id=str(uuid4()),
+                    repository_id=snapshot.repository_id,
+                    intent_id=intent.intent_id,
+                    observed_intent_schema_version=stale.schema_version,
+                    observed_intent_state=stale.state,
+                    observed_allocation_id=allocation,
+                    observed_record_version=snapshot.records[allocation].record_version,
+                    observed_record_lifecycle="RELEASED",
+                    effective_terminal_state="RELEASED",
+                    result="STALE_INTENT_TERMINAL_ACKNOWLEDGED",
+                    actor="synthetic-reconciler",
+                    reconciled_at=stale.updated_at,
+                )
+            )
+        ready = plan()
+        assert ready["code"] == "BRANCH_RETIREMENT_READY"
+        assert "INTEGRATION_INTENT_UNRESOLVED" not in ready["plan"]["blockers"]
 
 
 def _record_version(repository: GitRepository, allocation_id: str) -> int:

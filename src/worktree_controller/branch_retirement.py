@@ -42,7 +42,7 @@ from .models import (
 )
 from .policy import load_policy
 from .resource_admission import canonical_holder_digest
-from .semantics import integration_intent_abandoned
+from .semantics import effective_intent_state, integration_intent_abandoned
 from .store import MetadataStore, now_iso
 from .writer_lease import describe_holder, holder_is_live, resolve_holder
 
@@ -66,7 +66,6 @@ OPERATIONS = frozenset({"local", "remote"})
 REMOTE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 PROTECTED_BRANCHES = frozenset({"main", "master", "trunk", "production"})
 SPECIAL_PREFIXES = ("rescue/", "archive/", "recovery/")
-TERMINAL_INTEGRATION_STATES = frozenset({"RELEASED"})
 TERMINAL_RELEASE_STATES = frozenset({"RELEASED", "CANCELLED"})
 
 # Only authority-bearing Controller state participates.  Branch retirement plans and
@@ -746,8 +745,7 @@ def _evaluate(
             blockers.append("RELEASE_INTENT_UNRESOLVED")
         if any(
             (intent.allocation_id == resolved_allocation or resolved_allocation in intent.source_allocations)
-            and intent.state not in TERMINAL_INTEGRATION_STATES
-            and not integration_intent_abandoned(intent)
+            and effective_intent_state(snapshot, intent) not in {"RELEASED", "ABANDONED"}
             for intent in snapshot.integration_intents.values()
         ):
             blockers.append("INTEGRATION_INTENT_UNRESOLVED")
