@@ -182,15 +182,23 @@ def resolve_holder(
                 break
             try:
                 before = start_ticks(pid)
-                argv0 = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0", 1)[0]
-                executable = Path(os.readlink(f"/proc/{pid}/exe"))
                 raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
                 parent = int(raw[raw.rfind(")") + 2 :].split()[1])
             except (OSError, ValueError, IndexError) as exc:
                 raise ControllerError("INVALID_HOLDER", "ancestor identity unavailable") from exc
             if before is None or start_ticks(pid) != before:
                 raise ControllerError("INVALID_HOLDER", "ancestor process changed")
-            if Path(os.fsdecode(argv0)).name == name or executable.name == name:
+            matched = False
+            with contextlib.suppress(OSError):
+                executable = Path(os.readlink(f"/proc/{pid}/exe"))
+                if executable.name == name:
+                    matched = True
+            if not matched:
+                with contextlib.suppress(OSError):
+                    argv0 = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0", 1)[0]
+                    if argv0 and Path(os.fsdecode(argv0)).name == name:
+                        matched = True
+            if matched:
                 holder = describe_holder(
                     pid, client_id=client_id, session_id=session_id, run_id=run_id
                 )
@@ -325,6 +333,40 @@ def own_ancestry() -> set[int]:
     return chain
 
 
+def live_descendant_exists(holder_pid: int) -> bool:
+    """Return True if ``holder_pid`` still owns any non-zombie child or isolated pgrp member."""
+    ancestry = own_ancestry() | {holder_pid}
+    try:
+        holder_pgid = os.getpgid(holder_pid)
+    except OSError:
+        holder_pgid = None
+    check_pgid = holder_pgid == holder_pid
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        candidate = int(entry)
+        if candidate in ancestry:
+            continue
+        try:
+            raw = Path(f"/proc/{candidate}/stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        cut = raw.rfind(")")
+        if cut == -1:
+            continue
+        fields = raw[cut + 2 :].split()
+        if len(fields) < 3 or fields[0] in {"Z", "X"}:
+            continue
+        try:
+            ppid = int(fields[1])
+            pgid = int(fields[2])
+        except ValueError:
+            continue
+        if ppid == holder_pid or (check_pgid and pgid == holder_pgid):
+            return True
+    return False
+
+
 def paths_in_use(target: Path) -> list[tuple[int, str]]:
     """Live processes whose cwd, open files, or mappings sit inside ``target``.
 
@@ -347,7 +389,7 @@ class ProcessPathScan:
         self._references: list[tuple[int, list[str]]] | None = None
 
     def in_use(self, target: Path) -> list[tuple[int, str]]:
-        root = str(target)
+        root = os.path.realpath(str(target))
         prefix = root + os.sep
         return [
             (pid, _command(pid))
@@ -366,7 +408,7 @@ class ProcessPathScan:
 
     def referenced_paths_in_use(self, target: Path) -> list[tuple[int, list[str]]]:
         """Reuse the same scan without reading process command-line arguments."""
-        root = str(target)
+        root = os.path.realpath(str(target))
         prefix = root + os.sep
         result = []
         for pid, candidates in self._read_references():
@@ -391,9 +433,16 @@ def _referenced_paths(pid: int) -> list[str]:
     try:
         with open(f"/proc/{pid}/maps", encoding="utf-8") as stream:
             for line in stream:
-                parts = line.rstrip("\n").split(" ", 5)
-                if len(parts) == 6 and parts[5].startswith("/"):
-                    seen.append(parts[5].strip())
+                parts = line.rstrip("\n").split(maxsplit=5)
+                if len(parts) == 6:
+                    mapped = parts[5].strip()
+                    if mapped.endswith(" (deleted)"):
+                        mapped = mapped[:-10]
+                    if mapped.startswith("/"):
+                        try:
+                            seen.append(os.path.realpath(mapped))
+                        except OSError:
+                            seen.append(mapped)
     except OSError:
         pass
     return seen
@@ -530,10 +579,6 @@ def acquire_writer_lease(
                 "INVALID_LIFECYCLE",
                 f"lifecycle {record.lifecycle} cannot take a writer lease; resume it first",
             )
-        if existing is not None and not same_holder(existing.holder, holder) and (
-            holder_is_live(existing.holder) or process_group_is_live(existing.holder) or paths_in_use(item.path)
-        ):
-            raise ControllerError("WRITER_LEASE_HELD", "another live process already holds this allocation")
         if existing is not None:
             same = same_holder(existing.holder, holder)
             if (existing.repository_id, existing.worktree_path, existing.owner) != (
@@ -562,16 +607,17 @@ def acquire_writer_lease(
                 store.write_writer_lease(renewed)
                 lease = renewed
                 code = "WRITER_LEASE_RENEWED"
-            elif (
-                holder_is_live(existing.holder)
-                or process_group_is_live(existing.holder)
-                or paths_in_use(item.path)
-            ):
-                raise ControllerError(
-                    "WRITER_LEASE_HELD",
-                    "another live process already holds the writer lease for this allocation",
-                )
             else:
+                ancestry = own_ancestry()
+                if (
+                    holder_is_live(existing.holder)
+                    or process_group_is_live(existing.holder)
+                    or any(pid not in ancestry for pid, _ in paths_in_use(item.path))
+                ):
+                    raise ControllerError(
+                        "WRITER_LEASE_HELD",
+                        "another live process already holds the writer lease for this allocation",
+                    )
                 lease = new_lease(
                     repository_id=snapshot.repository_id or "unknown",
                     allocation_id=record.allocation_id,

@@ -264,10 +264,23 @@ class RolloutFixture:
 
     def cli(self, *arguments, crash=None, binary=None):
         environment = dict(self.environment)
+        target_binary = binary or self.installed
         if crash:
-            environment["WORKTREE_CONTROLLER_TEST_CRASH_AT"] = crash
+            runner = (
+                "import os, sys, worktree_controller.lifecycle as lc, worktree_controller.cli as cli; "
+                f"lc._crash_point = lambda stage: os._exit(97) if stage == {crash!r} else None; "
+                "raise SystemExit(cli.main(sys.argv[1:]))"
+            )
+            command = [
+                str(Path(target_binary).parent / "python"), "-c", runner,
+                *map(str, arguments), "--repo", str(self.repository.repo), "--json",
+            ]
+        else:
+            command = [
+                str(target_binary), *map(str, arguments), "--repo", str(self.repository.repo), "--json",
+            ]
         result = subprocess.run(
-            [str(binary or self.installed), *map(str, arguments), "--repo", str(self.repository.repo), "--json"],
+            command,
             env=environment, capture_output=True, text=True, timeout=30, check=False,
         )
         if crash:

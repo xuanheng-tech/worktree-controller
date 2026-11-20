@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.36.0 - 2026-11-20
+
+- **Critical reliability fixes**:
+  - Fix `/proc/<pid>/maps` multi-space and `(deleted)` path parsing (`split(maxsplit=5)` + symlink realpath normalization) in `writer_lease`.
+  - Fix `abandon_integration_intent` dereferencing `snapshot.publication_lease.intent_id` -> `allocation_id`.
+  - Break `reconcile_integration_intents(dispatch=True)` on `RESOURCE_WAIT` and follow `integration_queue_order`.
+- **Security, isolation & locking**:
+  - Harden Git invocations against untrusted `.git/config` and `GIT_CONFIG_*`/`GIT_EXEC_PATH`/`GIT_TEMPLATE_DIR` injection, enforce `--`, and reject `-`-prefixed remotes/branches.
+  - Enforce `client_id`, `session_id`, and `owner` matching in `writer-session` `_held_checkout`; clean up `runtime:process-v1:` bindings on abnormal abort and settle `host` executions cleanly on exit.
+  - Eliminate cross-worktree `BLOCK_DRIFT` coupling and handle missing `.git/index`, symlinked/prunable/relative `gitdir` pointers, and `editable_references` path-boundary + URI unquoting.
+  - Move network/stdio operations outside `LOCK_EX`, make `--dry-run` paths read-only (`O_RDONLY` / `LOCK_SH`, non-mutating `--refmap=` fetch), validate remote/ancestor convergence on publication lease complete/abort, fail closed on corrupt retirement receipts/tokens, and remove test crash env switches from production code.
+- **Open-source hygiene, portability & performance**:
+  - Support Python `3.12–3.14` (`requires-python = ">=3.12,<3.15"`), default timestamps to UTC, make `websockets` optional under `[native-session]`, and strip private repository hardcoding in favor of `.agents/worktree-policy.toml` (`[keyed_documents]`, `[disposable_resources]`).
+  - Optimize hot read paths (`include_history=False`), bound `AdmissionLedger` retained terminal requests with rolling archive, skip redundant hashing on `st_nlink == 1` in `hardlinks.inventory`, drop `O_NOATIME`, and auto-prune old installed versions (keeping latest 5) in `scripts/controller-activate`.
+- **Frontier capabilities & contract 62**:
+  - Add read-only `conflict-check` (`git merge-tree --write-tree -z`), `hook-adapter --client claude|codex|gemini` (including `WorktreeCreate`/`WorktreeRemove`/`PreToolUse`/`SessionEnd`), and `worktree-session --sandbox auto|bwrap`.
+  - Bump CLI contract from **61** to **62** (`sandbox_mode_version=1`, `conflict_check_version=1`, `hook_adapter_version=1`); storage layout remains **5**.
+
 ## 1.35.5
 
 - Read integration intents through their effective state when planning branch

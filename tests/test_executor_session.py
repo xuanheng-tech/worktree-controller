@@ -272,11 +272,40 @@ def test_next_standalone_admission_recovers_finished_host_execution(tmp_path):
     second_path.mkdir()
     command = [sys.executable, "-c", "raise SystemExit(0)"]
     assert invoke(first_path, home, "terminal", command).returncode == 0
-    first = next(iter(resource_admission.AdmissionLedger().read()["requests"]))
+    rows = resource_admission.AdmissionLedger().read()["requests"]
+    first = next(iter(rows))
+    assert rows[first]["state"] == "RELEASED"
+    # A leftover ALLOCATED row whose bound holder process exited is settled by the next admission.
+    resource_admission.host_execution(
+        "admit",
+        target=first_path,
+        client_id="terminal",
+        session_id="stale-session",
+        run_id="stale-run",
+        memory_bytes=resource_admission.DEFAULT_EXECUTION_MEMORY,
+    )
+    stale_id = next(
+        key
+        for key, row in resource_admission.AdmissionLedger().read()["requests"].items()
+        if row["request"].get("run_id") == "stale-run"
+    )
+    dead_proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+    )
+    try:
+        resource_admission.host_execution(
+            "bind",
+            request_id=stale_id,
+            holder_pid=dead_proc.pid,
+        )
+    finally:
+        dead_proc.kill()
+        dead_proc.wait(timeout=5)
     assert invoke(second_path, home, "terminal", command, run_id="next-run").returncode == 0
     rows = resource_admission.AdmissionLedger().read()["requests"]
-    assert rows[first]["state"] == "RELEASED"
-    assert sum(row["state"] == "ALLOCATED" for row in rows.values()) == 1
+    assert rows[stale_id]["state"] == "RELEASED"
+    assert sum(row["state"] == "ALLOCATED" for row in rows.values()) == 0
 
 
 def test_next_admission_recovers_only_the_previous_managed_binding(task, tmp_path):

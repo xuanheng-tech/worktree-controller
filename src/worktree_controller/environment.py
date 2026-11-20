@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import os
 import re
 import stat
@@ -62,10 +63,21 @@ def _candidate_reference_file(path: Path) -> bool:
 def _environment_roots(
     repository: RepositoryInventory, excluded_roots: frozenset[Path]
 ) -> tuple[Path, ...]:
+    from .policy import load_policy
+
+    venv_names = [".venv"]
+    try:
+        policy = load_policy(repository.canonical_path)
+    except ControllerError:
+        policy = None
+    if policy is not None:
+        for rel_path, kind in policy.disposable_resources:
+            if kind == "python-venv" and rel_path not in venv_names:
+                venv_names.append(rel_path)
     roots: set[Path] = set()
     for worktree in repository.worktrees:
         if worktree.path.exists():
-            for venv_name in (".venv", "backend/.venv"):
+            for venv_name in venv_names:
                 candidate = worktree.path / venv_name
                 if candidate.is_dir() and not candidate.is_symlink():
                     resolved = candidate.resolve(strict=True)
@@ -74,13 +86,64 @@ def _environment_roots(
     return tuple(sorted(roots))
 
 
+def _reference_matches_target(path: Path, payload: bytes, target_resolved: Path) -> bool:
+    import re
+    from urllib.parse import unquote, urlsplit
+
+    text = payload.decode("utf-8", "surrogateescape")
+    if path.name == "direct_url.json":
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            url = data.get("url")
+            if isinstance(url, str):
+                parsed = urlsplit(url)
+                if parsed.scheme == "file" and parsed.path:
+                    try:
+                        candidate = Path(unquote(parsed.path)).resolve(strict=False)
+                        if candidate == target_resolved or candidate.is_relative_to(target_resolved):
+                            return True
+                    except (OSError, ValueError):
+                        pass
+    target_str = str(target_resolved)
+    boundary = re.compile(
+        rf"(?:^|[\s'\"=:,;(\[])({re.escape(target_str)})(?:$|[/\\\s'\",;)\]])"
+    )
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("file://"):
+            parsed = urlsplit(stripped)
+            try:
+                candidate = Path(unquote(parsed.path)).resolve(strict=False)
+                if candidate == target_resolved or candidate.is_relative_to(target_resolved):
+                    return True
+            except (OSError, ValueError):
+                pass
+        else:
+            try:
+                direct = Path(stripped)
+                if direct.is_absolute():
+                    candidate = direct.resolve(strict=False)
+                    if candidate == target_resolved or candidate.is_relative_to(target_resolved):
+                        return True
+            except (OSError, ValueError):
+                pass
+        if boundary.search(stripped) or boundary.search(unquote(stripped)):
+            return True
+    return False
+
+
 def editable_references(
     repository: RepositoryInventory,
     target: Path,
     *,
     exclude_environments: tuple[Path, ...] = (),
 ) -> tuple[dict[str, str], ...]:
-    target_bytes = os.fsencode(target.resolve(strict=True))
+    target_resolved = target.resolve(strict=True)
     excluded_roots = frozenset(
         path.resolve(strict=True) for path in exclude_environments if path.exists()
     )
@@ -106,7 +169,7 @@ def editable_references(
                         "ENVIRONMENT_SCAN_LIMIT", "editable reference scan exceeded its bound"
                     )
                 payload = _reference_payload(path)
-                if target_bytes in payload:
+                if _reference_matches_target(path, payload, target_resolved):
                     matches.append({"environment": str(root), "file": str(path)})
     return tuple(matches)
 

@@ -18,7 +18,6 @@ from .git_backend import (
     inventory,
     is_ancestor,
     public_refs,
-    worktree_content_fingerprint,
 )
 from .models import (
     ControllerError,
@@ -318,20 +317,13 @@ def apply_prune(
                 raise ControllerError("GC_PLAN_DRIFT", "Git admin registration remains uncertain")
         transaction_id = journal["transaction_id"]
         if item is not None:
-            refs_before = public_refs(repository.canonical_path)
-            others_before = worktree_content_fingerprint(
-                repository, exclude_keys=frozenset({item.key})
-            )
             if not _path_absent(target):
                 raise ControllerError("PATH_REAPPEARED", "GC target reappeared before Git removal")
-            git_write(repository.canonical_path, ("worktree", "remove", str(target)))
+            git_write(repository.canonical_path, ("worktree", "remove", "--", str(target)))
             after = inventory(repository_path)
-            if any(row.path == target for row in after.worktrees) or (
-                public_refs(after.canonical_path) != refs_before
-                or worktree_content_fingerprint(after) != others_before
-            ):
+            if any(row.path == target for row in after.worktrees):
                 raise ControllerError(
-                    "BLOCK_DRIFT", "registration prune changed another Git identity"
+                    "BLOCK_DRIFT", "registration prune did not remove target worktree registration"
                 )
             journal["phase"] = "WORKTREE_REMOVED"
             journal["updated_at"] = now_iso()

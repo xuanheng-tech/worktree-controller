@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -1002,6 +1003,21 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = commands.add_parser("doctor", parents=[common], help="diagnose controller drift")
     doctor_parser.add_argument("--namespace-pid", type=int,
                                help="compare mounts with an existing writer process")
+    conflict_parser = commands.add_parser(
+        "conflict-check",
+        parents=[common],
+        help="check merge conflicts across branches or registered worktrees without mutating checkouts",
+    )
+    conflict_parser.add_argument("--branch", action="append", default=[], help="branch or revision to compare")
+    conflict_parser.add_argument("--target", action="append", type=Path, default=[], help="registered worktree path to compare")
+    conflict_parser.add_argument("--base", help="optional explicit merge-base revision")
+    hook_parser = commands.add_parser(
+        "hook-adapter",
+        help="normalize Claude, Codex, or Gemini hook JSON from stdin onto Controller verbs",
+    )
+    hook_parser.add_argument("--client", required=True, choices=("claude", "codex", "gemini"))
+    hook_parser.add_argument("--repo", type=Path, default=None, help="optional repository path override")
+    hook_parser.add_argument("--json", action="store_true", help="emit the stable JSON contract")
     return parser
 
 
@@ -1048,7 +1064,10 @@ def _main(argv: list[str] | None) -> int:
             payload = envelope("capabilities")
             payload["decision"] = {
                 "code": "CAPABILITIES",
-                "contract_version": 61,
+                "contract_version": 62,
+                "sandbox_mode_version": 1,
+                "conflict_check_version": 1,
+                "hook_adapter_version": 1,
                 "task_workflow_version": 1,
                 "exited_holder_release_version": 1,
                 "canonical_refresh_version": 1,
@@ -1288,10 +1307,12 @@ def _main(argv: list[str] | None) -> int:
                     source_handoffs=tuple(parsed.source_handoff),
                     external_bindings=tuple(parsed.external_binding),
                 )
-            finally:
-                # After the acquisition, including a refused one, so the detached
-                # pass never queues this admission behind its repository lock.
-                convergence = admission_convergence(parsed.repo)
+            except BaseException:
+                # Run convergence after refused acquisition without masking the primary error.
+                with suppress(ControllerError, OSError):
+                    admission_convergence(parsed.repo)
+                raise
+            convergence = admission_convergence(parsed.repo)
             if convergence is not None:
                 payload["retention_convergence"] = convergence
         elif parsed.command == "integration-queue":
@@ -1481,7 +1502,16 @@ def _main(argv: list[str] | None) -> int:
                 scope_paths=tuple(parsed.scope),
             )
         elif parsed.command == "acquire-across":
-            payload = acquire_across([json.loads(item) for item in parsed.request])
+            requests = []
+            for item in parsed.request:
+                try:
+                    parsed_item = json.loads(item)
+                except ValueError as exc:
+                    raise ControllerError("INVALID_REQUEST", f"invalid JSON in --request: {exc}") from exc
+                if not isinstance(parsed_item, dict):
+                    raise ControllerError("INVALID_REQUEST", "--request item must be a JSON object")
+                requests.append(parsed_item)
+            payload = acquire_across(requests)
         elif parsed.command == "park":
             payload = park(
                 parsed.repo,
@@ -1918,6 +1948,24 @@ def _main(argv: list[str] | None) -> int:
                 dry_run=parsed.dry_run,
                 dispatch=parsed.dispatch,
             )
+        elif parsed.command == "conflict-check":
+            from .frontier import conflict_check
+
+            payload = conflict_check(
+                parsed.repo,
+                branches=tuple(parsed.branch),
+                targets=tuple(parsed.target),
+                base=parsed.base,
+            )
+        elif parsed.command == "hook-adapter":
+            from .frontier import hook_adapter
+
+            payload, hook_exit = hook_adapter(
+                client=parsed.client,
+                repository_path=parsed.repo,
+            )
+            _print(payload, True)
+            return hook_exit
         elif parsed.command == "doctor":
             payload = doctor(parsed.repo, namespace_pid=parsed.namespace_pid)
         else:
@@ -1941,7 +1989,7 @@ def _main(argv: list[str] | None) -> int:
             payload["decision"]["admission"] = "REFUSED"
         if parsed.command == "session-bind" and isinstance(getattr(exc, "details", None), dict):
             payload["decision"]["lease_outcome"] = exc.details
-        _print(payload, parsed.json)
+        _print(payload, bool(parsed.json or parsed.command == "hook-adapter"))
         return 2
     _print(payload, parsed.json)
     if parsed.command == "task" and (
@@ -1954,6 +2002,8 @@ def _main(argv: list[str] | None) -> int:
     }:
         return 1
     if parsed.command == "doctor" and payload.get("decision", {}).get("code") == "FAIL":
+        return 1
+    if parsed.command == "conflict-check" and payload.get("decision", {}).get("conflicts_detected"):
         return 1
     if (
         parsed.command == "write-guard"

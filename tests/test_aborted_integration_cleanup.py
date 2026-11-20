@@ -15,7 +15,7 @@ from tests.test_integration_abort import POLICY_THREE_CANDIDATES_V5
 from tests.test_integration_pipeline import _claim, _source
 from tests.test_shadow import GitRepository, git
 from tests.test_typed_disposable import empty_runtime_evidence
-from worktree_controller import lifecycle, preservation, resource_admission
+from worktree_controller import disposable, lifecycle, preservation, resource_admission
 from worktree_controller.git_backend import inventory
 from worktree_controller.models import ControllerError
 from worktree_controller.store import MetadataStore
@@ -260,14 +260,14 @@ def test_interrupted_environment_cleanup_retries_without_second_transition(
     register_environment(f)
     abort(f)
     before = record(f)
-    original = lifecycle.shutil.rmtree
+    original = disposable.safe_rmtree_nofollow
 
-    def interrupted(path):
-        original(path)
+    def interrupted(parent_path, relative):
+        original(parent_path, relative)
         raise OSError("fixture interruption after removal, before metadata update")
 
     with monkeypatch.context() as patch:
-        patch.setattr(lifecycle.shutil, "rmtree", interrupted)
+        patch.setattr(disposable, "safe_rmtree_nofollow", interrupted)
         with pytest.raises(OSError, match="fixture interruption"):
             lifecycle.cleanup_disposable(
                 f[0].repo,

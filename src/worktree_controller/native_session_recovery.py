@@ -46,7 +46,13 @@ def _shared_daemon(holder: WriterHolder) -> None:
 
 def _native_observation(holder: WriterHolder) -> dict[str, Any]:
     # Lazy import keeps ordinary Controller observations usable without a transport.
-    from websockets.sync.client import unix_connect
+    try:
+        from websockets.sync.client import unix_connect
+    except ImportError as exc:
+        raise _blocked(
+            "native-session recovery requires optional dependency 'websockets' "
+            "(install worktree-controller[native-session])"
+        ) from exc
 
     path = Path.home() / ".codex/app-server-control/app-server-control.sock"
     if path.lstat().st_uid != os.getuid():

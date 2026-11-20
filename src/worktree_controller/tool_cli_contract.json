@@ -409,12 +409,25 @@
       "name": "recovery-guide",
       "operation_class": "read_only",
       "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "conflict-check",
+      "operation_class": "read_only",
+      "result_contract": "worktree-controller/v1"
+    },
+    {
+      "name": "hook-adapter",
+      "operation_class": "metadata_mutation",
+      "result_contract": "worktree-controller/v1"
     }
   ],
   "branch_retirement_version": 1,
   "branch_retirement_verify_version": 1,
   "cleanup_hardlink_topology_version": 2,
-  "contract_version": 61,
+  "contract_version": 62,
+  "sandbox_mode_version": 1,
+  "conflict_check_version": 1,
+  "hook_adapter_version": 1,
   "registered_build_resources_version": 1,
   "build_preservation_recovery_version": 1,
   "rebuilt_preservation_lineage_version": 1,
@@ -511,7 +524,7 @@
     "contract": "integration-keyed-document-scope/v1",
     "entry_points": "normal enqueue, claim, reconcile and retry scope checks",
     "identity": "original frozen source commits, scopes and queue sequence; no mutable checkout evidence",
-    "supported_document": "docs/nexus/business-progress.json with qp-nexus-progress, or historical docs/handbook/business-progress.json with qp-handbook-progress; quant-platform schema 2, unchanged committed merge profile",
+    "supported_document": "repository-configured [keyed_documents] entries in .agents/worktree-policy.toml (disabled/empty unless declared), with matching committed merge driver and schema profile",
     "proof": "unique non-ancestor merge base for every frozen source pair; whole-record changed keys must be disjoint across tasks.authority_key and development_lines/modules/decisions.id",
     "bounds": "at most 8 sources per intent, 2 MiB regular document blobs, 64 KiB attributes blobs",
     "fail_closed": "shared record, metadata/schema/order changes, broad paths, code overlap, duplicate keys, invalid/missing/oversized Git evidence, ancestry dependency, explicit prerequisite or earlier publishing/recovery/attention state",
@@ -985,10 +998,9 @@
       "--expected-plan-id"
     ],
     "paths": {
-      "backend/.venv": "python-venv",
-      "frontend/node_modules": "node-modules",
-      "frontend/dist": "frontend-build-output"
+      ".venv": "python-venv"
     },
+    "policy_paths": "additional paths configured under [disposable_resources].paths in .agents/worktree-policy.toml",
     "dry_run_fields": [
       "resource_type",
       "path",
@@ -1114,7 +1126,7 @@
   "session_launcher_entrypoint": "worktree-session",
   "session_entrypoint": "worktree-session-end",
   "tool_name": "worktree-controller",
-  "tool_version": "1.35.5",
+  "tool_version": "1.36.0",
   "delivered_closeout_version": 1,
   "retained_archive_version": 1,
   "retention_convergence_version": 2,
@@ -1576,7 +1588,7 @@
     "quarantine": "direct cleanup stays refused; only the existing explicit owner/CAS integration-abort transition may abort a quarantined candidate, preserving quarantine and failure history",
     "abort_identity": "new abort history pins receipt ID and raw SHA-256; legacy single exact matching receipt remains supported; missing, changed or ambiguous evidence blocks",
     "resource_lineage": "capability 2 accepts only exact single-.venv registered/cleaned transitions with unchanged terminal owner/state, unique ordered registration and actual resource identity; new events bind resource payloads; legacy unambiguous producer history remains supported without rewriting old evidence",
-    "generated_paths": "no Astro or directory-name allowlist; ignored and untracked does not mean disposable; even recognized disposable trees require preservation in this lifecycle",
+    "generated_paths": "no path or directory-name allowlist; ignored and untracked does not mean disposable; even recognized disposable trees require preservation in this lifecycle",
     "lease_and_runtime": "any recorded writer lease including expired, publication authority, bindings, managed runtime, uncertain scans and unresolved transactions block; no lease is reclaimed here",
     "admission": "request identity and reservation stay unchanged until guarded allocation release; only verified release evidence settles the old budget before a changed-source intent can be claimed",
     "source_identity": "unchanged-source retries keep their existing retry contract; changed sources require their own frozen reviewed intent, never source replacement or queue priority inheritance",

@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .models import CANONICAL_ROLES, ControllerError, ConvergencePolicy, WorktreePolicy
+from .models import (
+    CANONICAL_ROLES,
+    ControllerError,
+    ConvergencePolicy,
+    KeyedDocumentRule,
+    WorktreePolicy,
+)
 
 EXPECTED_TOP_LEVEL = {
     "schema_version",
@@ -23,6 +29,8 @@ EXPECTED_TOP_LEVEL_V5 = EXPECTED_TOP_LEVEL_V4
 EXPECTED_TOP_LEVEL_V6 = EXPECTED_TOP_LEVEL_V5 | {"reconciler"}
 EXPECTED_TOP_LEVEL_V7 = EXPECTED_TOP_LEVEL_V6 | {"admission"}
 EXPECTED_TOP_LEVEL_V8 = EXPECTED_TOP_LEVEL_V7 | {"convergence"}
+OPTIONAL_TOP_LEVEL = frozenset({"keyed_documents", "disposable_resources"})
+DISPOSABLE_KINDS = frozenset({"python-venv", "node-modules", "frontend-build-output", "build-output"})
 CONVERGENCE_FIELDS = {
     "enabled",
     "grace_minutes",
@@ -109,36 +117,102 @@ def load_policy(canonical_path: Path) -> WorktreePolicy:
     return parse_policy(canonical_path, data)
 
 
+def _parse_relative_path(raw: str, *, field: str) -> str:
+    if not raw or "\x00" in raw or raw.startswith("/"):
+        raise ControllerError("INVALID_POLICY", f"invalid {field} path: {raw}")
+    posix = PurePosixPath(raw)
+    if posix.as_posix() != raw or any(part in {"", ".", "..", ".git"} for part in posix.parts):
+        raise ControllerError("INVALID_POLICY", f"invalid {field} path: {raw}")
+    return raw
+
+
+def _parse_keyed_documents(data: dict[str, Any]) -> tuple[KeyedDocumentRule, ...]:
+    if "keyed_documents" not in data:
+        return ()
+    raw_table = _table(data, "keyed_documents")
+    rules: list[KeyedDocumentRule] = []
+    for rel_path, spec in sorted(raw_table.items()):
+        path = _parse_relative_path(rel_path, field="keyed_documents")
+        if not isinstance(spec, dict):
+            raise ControllerError("INVALID_POLICY", f"keyed_documents rule [{rel_path}] must be a table")
+        allowed_rule_fields = {"merge_driver", "collections", "schema_version", "repo_id", "extra_fields"}
+        if set(spec) - allowed_rule_fields:
+            raise ControllerError("INVALID_POLICY", f"unknown fields in keyed_documents[{rel_path}]")
+        merge_driver = _nonempty_string(spec, "merge_driver")
+        collections_raw = spec.get("collections")
+        if not isinstance(collections_raw, dict) or not collections_raw:
+            raise ControllerError("INVALID_POLICY", f"keyed_documents[{rel_path}].collections must be non-empty")
+        collections: list[tuple[str, str]] = []
+        for col_name, id_field in sorted(collections_raw.items()):
+            if (
+                not isinstance(col_name, str)
+                or not col_name.strip()
+                or not isinstance(id_field, str)
+                or not id_field.strip()
+            ):
+                raise ControllerError("INVALID_POLICY", f"invalid collection key in keyed_documents[{rel_path}]")
+            collections.append((col_name, id_field))
+        schema_version = spec.get("schema_version")
+        if schema_version is not None and (type(schema_version) is not int or schema_version < 1):
+            raise ControllerError("INVALID_POLICY", f"invalid schema_version in keyed_documents[{rel_path}]")
+        repo_id = spec.get("repo_id")
+        if repo_id is not None and (not isinstance(repo_id, str) or not repo_id.strip()):
+            raise ControllerError("INVALID_POLICY", f"invalid repo_id in keyed_documents[{rel_path}]")
+        extra_raw = spec.get("extra_fields", [])
+        if not isinstance(extra_raw, list) or not all(isinstance(v, str) and v.strip() for v in extra_raw):
+            raise ControllerError("INVALID_POLICY", f"invalid extra_fields in keyed_documents[{rel_path}]")
+        rules.append(
+            KeyedDocumentRule(
+                path=path,
+                merge_driver=merge_driver,
+                collections=tuple(collections),
+                schema_version=schema_version,
+                repo_id=repo_id,
+                extra_fields=tuple(extra_raw),
+            )
+        )
+    return tuple(rules)
+
+
+def _parse_disposable_resources(data: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    if "disposable_resources" not in data:
+        return ()
+    raw_table = _table(data, "disposable_resources")
+    if set(raw_table) != {"paths"}:
+        raise ControllerError("INVALID_POLICY", "policy [disposable_resources] supports only 'paths'")
+    mapping = raw_table.get("paths")
+    if not isinstance(mapping, dict):
+        raise ControllerError("INVALID_POLICY", "policy [disposable_resources].paths must be a table")
+    parsed: list[tuple[str, str]] = []
+    for raw_path, kind in sorted(mapping.items()):
+        path = _parse_relative_path(raw_path, field="disposable_resources.paths")
+        if not isinstance(kind, str) or kind not in DISPOSABLE_KINDS:
+            raise ControllerError("INVALID_POLICY", f"unsupported disposable kind for {path}: {kind}")
+        parsed.append((path, kind))
+    return tuple(parsed)
+
+
 def parse_policy(canonical_path: Path, data: dict[str, Any]) -> WorktreePolicy:
     """Validate policy data read from the checkout or a pinned publication tree."""
     path = canonical_path / ".agents" / "worktree-policy.toml"
     schema_version = data.get("schema_version")
-    if schema_version == 1:
-        if set(data) != EXPECTED_TOP_LEVEL:
-            raise ControllerError("INVALID_POLICY", "policy schema v1 fields are invalid")
-    elif schema_version == 2:
-        if set(data) != EXPECTED_TOP_LEVEL_V2:
-            raise ControllerError("INVALID_POLICY", "policy schema v2 fields are invalid")
-    elif schema_version == 3:
-        if set(data) != EXPECTED_TOP_LEVEL_V3:
-            raise ControllerError("INVALID_POLICY", "policy schema v3 fields are invalid")
-    elif schema_version == 4:
-        if set(data) != EXPECTED_TOP_LEVEL_V4:
-            raise ControllerError("INVALID_POLICY", "policy schema v4 fields are invalid")
-    elif schema_version == 5:
-        if set(data) != EXPECTED_TOP_LEVEL_V5:
-            raise ControllerError("INVALID_POLICY", "policy schema v5 fields are invalid")
-    elif schema_version == 6:
-        if set(data) != EXPECTED_TOP_LEVEL_V6:
-            raise ControllerError("INVALID_POLICY", "policy schema v6 fields are invalid")
-    elif schema_version == 7:
-        if set(data) != EXPECTED_TOP_LEVEL_V7:
-            raise ControllerError("INVALID_POLICY", "policy schema v7 fields are invalid")
-    elif schema_version == 8:
-        if set(data) != EXPECTED_TOP_LEVEL_V8:
-            raise ControllerError("INVALID_POLICY", "policy schema v8 fields are invalid")
-    else:
+    expected_by_version = {
+        1: EXPECTED_TOP_LEVEL,
+        2: EXPECTED_TOP_LEVEL_V2,
+        3: EXPECTED_TOP_LEVEL_V3,
+        4: EXPECTED_TOP_LEVEL_V4,
+        5: EXPECTED_TOP_LEVEL_V5,
+        6: EXPECTED_TOP_LEVEL_V6,
+        7: EXPECTED_TOP_LEVEL_V7,
+        8: EXPECTED_TOP_LEVEL_V8,
+    }
+    expected = expected_by_version.get(schema_version)
+    if expected is None or type(schema_version) is not int:
         raise ControllerError("INVALID_POLICY", "unsupported policy schema version")
+    if not (expected <= set(data) <= expected | OPTIONAL_TOP_LEVEL):
+        raise ControllerError("INVALID_POLICY", f"policy schema v{schema_version} fields are invalid")
+    keyed_documents = _parse_keyed_documents(data)
+    disposable_resources = _parse_disposable_resources(data)
 
     limits = _table(data, "limits")
     canonical = _table(data, "canonical")
@@ -229,7 +303,17 @@ def parse_policy(canonical_path: Path, data: dict[str, Any]) -> WorktreePolicy:
                 "INVALID_POLICY", "this controller version requires main_publish_limit = 1"
             )
         publication_remote = _nonempty_string(publication, "remote")
+        if publication_remote.startswith("-") or not all(
+            ch.isalnum() or ch in "._-" for ch in publication_remote
+        ):
+            raise ControllerError("INVALID_REMOTE", f"remote name is unsafe: {publication_remote}")
         publication_branch = _nonempty_string(publication, "branch")
+        if (
+            publication_branch.startswith("-")
+            or ".." in publication_branch
+            or any(ch.isspace() or ord(ch) < 32 for ch in publication_branch)
+        ):
+            raise ControllerError("INVALID_POLICY", f"invalid publication branch: {publication_branch}")
 
     if schema_version < 3:
         automatic_feature_audit_release = False
@@ -330,4 +414,7 @@ def parse_policy(canonical_path: Path, data: dict[str, Any]) -> WorktreePolicy:
         checkout_growth_bytes=growth_bytes,
         checkout_growth_inodes=growth_inodes,
         convergence=convergence,
+        keyed_documents=keyed_documents,
+        disposable_resources=disposable_resources,
+        disposable_resources_configured="disposable_resources" in data,
     )

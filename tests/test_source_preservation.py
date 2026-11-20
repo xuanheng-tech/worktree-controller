@@ -12,7 +12,7 @@ import pytest
 from tests.test_controlled import acquire_one, adopt_canonical
 from tests.test_retention_admission import POLICY_V5
 from tests.test_shadow import GitRepository, git
-from tests.test_typed_disposable import empty_runtime_evidence
+from tests.test_typed_disposable import DISPOSABLE_POLICY_BLOCK, empty_runtime_evidence
 from worktree_controller import lifecycle
 from worktree_controller import source_preservation as s
 from worktree_controller.models import ControllerError
@@ -25,7 +25,7 @@ def source(monkeypatch):
     monkeypatch.setattr(
         lifecycle, "runtime_authority_evidence", lambda *a, **k: empty_runtime_evidence()
     )
-    with GitRepository(linked=0, policy_text=POLICY_V5) as repository:
+    with GitRepository(linked=0, policy_text=POLICY_V5 + DISPOSABLE_POLICY_BLOCK) as repository:
         root = repository.repo
         (root / "src").mkdir()
         (root / "src/plain.py").write_bytes(b"before\n")

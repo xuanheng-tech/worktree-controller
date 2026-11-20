@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import asdict
@@ -142,7 +143,7 @@ def host_check(
         # Hold the existing shared lock through the ordinary guard: lease ID and
         # entitlement cannot come from different Controller mutation snapshots.
         with store.lock(exclusive=False):
-            snapshot = store._load_unlocked()
+            snapshot = store._load_unlocked(include_history=False, include_intents=False)
             item, record = _managed_record(state, snapshot, root)
             if item.detached or item.locked or item.prunable:
                 raise ControllerError("INVALID_TARGET", "writer checkout requires review")
@@ -303,8 +304,23 @@ def _held_checkout(
         snapshot = MetadataStore(state.common_dir).load()
     _item, record = _managed_record(state, snapshot, root)
     lease = snapshot.writer_leases.get(record.allocation_id)
-    if lease is None or (lease.holder.pid, lease.holder.boot_id, lease.holder.start_ticks) != (
-        holder.pid, holder.boot_id, holder.start_ticks
+    if (
+        lease is None
+        or lease.owner != record.owner
+        or (
+            lease.holder.pid,
+            lease.holder.boot_id,
+            lease.holder.start_ticks,
+            lease.holder.client_id,
+            lease.holder.session_id,
+        )
+        != (
+            holder.pid,
+            holder.boot_id,
+            holder.start_ticks,
+            holder.client_id,
+            holder.session_id,
+        )
     ):
         return None
     decision = guard_write(
@@ -314,7 +330,7 @@ def _held_checkout(
         authority_key=record.authority_key,
         owner=record.owner,
         operation="feature-write",
-        holder=lease.holder,
+        holder=holder,
         observe=False,
         state=state,
         snapshot=snapshot,
@@ -433,7 +449,7 @@ def describe(path: Path, *, selector: str | None = None) -> dict[str, Any]:
         if not store.lock_file.is_file() or store.lock_file.is_symlink():
             raise ControllerError("INVALID_METADATA", "governed read requires its repository lock")
         with store.lock(exclusive=False):
-            snapshot = store._load_unlocked()
+            snapshot = store._load_unlocked(include_history=False, include_intents=False)
             item, record = _managed_record(state, snapshot, root)
             lease = snapshot.writer_leases.get(record.allocation_id)
         matches: bool | None = None
@@ -513,7 +529,7 @@ def check(
         # Keep the guard and its continuation on one locked snapshot, as in
         # host_check. A concurrent lease/lifecycle change waits for this decision.
         with store.lock(exclusive=False):
-            snapshot = store._load_unlocked()
+            snapshot = store._load_unlocked(include_history=False, include_intents=False)
             item, record = _managed_record(state, snapshot, root)
             if item.detached or item.locked or item.prunable:
                 raise ControllerError("INVALID_TARGET", "writer checkout requires review")
@@ -700,6 +716,59 @@ def main(argv: list[str] | None = None) -> int:
     return result
 
 
+def _bwrap_available(bwrap_path: str) -> bool:
+    probe = subprocess.run(
+        [bwrap_path, "--ro-bind", "/", "/", "--", "/bin/true"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return probe.returncode == 0
+
+
+def _sandbox_command(
+    command: list[str],
+    *,
+    sandbox: str | None,
+    worktree_path: Path,
+    common_dir: Path | None,
+) -> list[str]:
+    if sandbox is None:
+        return command
+    bwrap_path = shutil.which("bwrap")
+    if bwrap_path is None or not _bwrap_available(bwrap_path):
+        if sandbox == "bwrap":
+            raise ControllerError(
+                "SANDBOX_UNAVAILABLE",
+                "bwrap sandbox was explicitly requested but is unavailable in this environment",
+            )
+        return command
+    argv = [
+        bwrap_path,
+        "--die-with-parent",
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--tmpfs",
+        "/tmp",
+        "--bind",
+        str(worktree_path),
+        str(worktree_path),
+    ]
+    if common_dir is not None and common_dir != worktree_path:
+        argv.extend(["--bind", str(common_dir), str(common_dir)])
+        controller_dir = common_dir / "worktree-controller"
+        if controller_dir.exists():
+            argv.extend(["--ro-bind", str(controller_dir), str(controller_dir)])
+    argv.append("--")
+    argv.extend(command)
+    return argv
+
+
 def run_main(argv: list[str] | None = None) -> int:
     """Run any executable under the same explicit writer contract.
 
@@ -711,6 +780,7 @@ def run_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--client-id", required=True)
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--run-id")
+    parser.add_argument("--sandbox", choices=("auto", "bwrap"), default=None)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     parsed = parser.parse_args(argv)
     command = parsed.command
@@ -730,6 +800,11 @@ def run_main(argv: list[str] | None = None) -> int:
     except ControllerError as exc:
         parser.error(str(exc))
     path = parsed.path.expanduser().resolve()
+    try:
+        launch_command = _sandbox_command(command, sandbox=parsed.sandbox, worktree_path=path, common_dir=None)
+    except (ControllerError, OSError) as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
     identity = {
         "client_id": parsed.client_id,
         "selector": str(os.getpid()),
@@ -796,9 +871,11 @@ def run_main(argv: list[str] | None = None) -> int:
                 print(f"Admission cleanup deferred: {exc}", file=sys.stderr)
         return 2
     own_lease = not hosted and admitted.get("admission") == "GRANTED"
-    projection = None
+    projection: dict[str, Any] | None = None
     finished = False
     runtime_bound = False
+    managed_binding: tuple[str, str, str, str] | None = None
+    host_request_id: str | None = None
     try:
         checked = host_check(path) if hosted else check(path, **identity)
         if checked.get("admission") not in {"GRANTED", "NOT_APPLICABLE"}:
@@ -830,19 +907,43 @@ def run_main(argv: list[str] | None = None) -> int:
             from .lifecycle import update_external_binding
             from .writer_lease import RUNTIME_BINDING_PREFIX
 
-            snapshot = MetadataStore(inventory(path).common_dir).load()
+            if not own_lease or projection is None:
+                raise ControllerError(
+                    "WRITER_LEASE_REQUIRED",
+                    "managed execution requires a verified active writer lease projection",
+                )
+            common_dir = inventory(path).common_dir
+            snapshot = MetadataStore(common_dir).load(include_history=False, include_intents=False)
             record = snapshot.records[projection["allocation_id"]]
             binding = RUNTIME_BINDING_PREFIX + json.dumps({"holder": recorded,
                 "lease_id": admitted["lease_id"], "kind": "command"}, sort_keys=True, separators=(",", ":"))
             update_external_binding(Path(projection["repository_path"]), target=Path(projection["worktree_path"]),
                 owner=record.owner, expected_record_version=record.record_version, binding=binding, action="add")
+            managed_binding = (
+                projection["repository_path"],
+                projection["worktree_path"],
+                record.owner,
+                binding,
+            )
             runtime_bound = True
         elif execution == "host":
             from .resource_admission import host_execution
 
-            host_execution("bind", request_id=resources["request_ids"][0], holder_pid=os.getpid())
+            common_dir = None
+            host_request_id = resources["request_ids"][0]
+            host_execution("bind", request_id=host_request_id, holder_pid=os.getpid())
             runtime_bound = True
-        result = subprocess.run(command, cwd=path, env=environment, check=False).returncode
+        else:
+            governed = governed_target(path, load_metadata=False)
+            common_dir = resolve_repository(governed[1])[1] if governed is not None else None
+        if parsed.sandbox is not None and common_dir is not None:
+            launch_command = _sandbox_command(
+                command,
+                sandbox=parsed.sandbox,
+                worktree_path=path,
+                common_dir=common_dir,
+            )
+        result = subprocess.run(launch_command, cwd=path, env=environment, check=False).returncode
         finished = True
         return result if result >= 0 else 128 - result
     except KeyboardInterrupt:
@@ -865,6 +966,20 @@ def run_main(argv: list[str] | None = None) -> int:
             except (ControllerError, OSError) as exc:
                 print(f"Session cleanup deferred: {exc}", file=sys.stderr)
         elif own_lease:
+            if managed_binding is not None:
+                try:
+                    from .lifecycle import release_own_aborted_runtime_binding
+
+                    repo_dir, wt_dir, bind_owner, binding_value = managed_binding
+                    release_own_aborted_runtime_binding(
+                        Path(repo_dir),
+                        target=Path(wt_dir),
+                        owner=bind_owner,
+                        binding=binding_value,
+                        holder_pid=os.getpid(),
+                    )
+                except (ControllerError, OSError) as exc:
+                    print(f"Runtime binding cleanup deferred: {exc}", file=sys.stderr)
             try:
                 target = governed_target(path)
                 if target is not None:
@@ -880,7 +995,14 @@ def run_main(argv: list[str] | None = None) -> int:
                     )
             except (ControllerError, OSError) as exc:
                 print(f"Session cleanup deferred: {exc}", file=sys.stderr)
-        if execution and not runtime_bound:
+        if execution == "host" and runtime_bound and host_request_id is not None:
+            try:
+                from .resource_admission import settle_own_host_execution
+
+                settle_own_host_execution(host_request_id, holder_pid=os.getpid())
+            except (ControllerError, OSError) as exc:
+                print(f"Host execution cleanup deferred: {exc}", file=sys.stderr)
+        elif execution and not runtime_bound:
             try:
                 reserve_execution(cancel=True)
             except (ControllerError, OSError) as exc:

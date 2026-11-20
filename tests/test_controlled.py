@@ -105,9 +105,16 @@ def handoff_one(
 def _cli(arguments: list[str], *, crash_at: str | None = None) -> subprocess.CompletedProcess[str]:
     environment = {**os.environ, "PYTHONPATH": str(SOURCE)}
     if crash_at:
-        environment["WORKTREE_CONTROLLER_TEST_CRASH_AT"] = crash_at
+        runner = (
+            "import os, sys, worktree_controller.lifecycle as lc, worktree_controller.cli as cli; "
+            f"lc._crash_point = lambda stage: os._exit(97) if stage == {crash_at!r} else None; "
+            "raise SystemExit(cli.main(sys.argv[1:]))"
+        )
+        command = [sys.executable, "-c", runner, *arguments]
+    else:
+        command = [sys.executable, "-m", "worktree_controller.cli", *arguments]
     return subprocess.run(
-        [sys.executable, "-m", "worktree_controller.cli", *arguments],
+        command,
         check=False,
         capture_output=True,
         text=True,

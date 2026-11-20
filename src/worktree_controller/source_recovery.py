@@ -171,9 +171,31 @@ def _reconciled(
     return value
 
 
+def _completed_clean(store: MetadataStore, transaction: str) -> bool:
+    directory = _directory(store, transaction)
+    marker_path = directory / "completed.json"
+    if not marker_path.is_file():
+        return False
+    marker, _ = e.read(marker_path)
+    ref = marker.get("receipt", {})
+    receipt_path = store.completion_receipts_dir / f"{transaction}.json"
+    if marker.get("contract") != "tracked-source-cleanup/v1" or not e.matches_reference(
+        ref, receipt_path
+    ):
+        return False
+    receipt, _ = e.read(receipt_path, ref["sha256"])
+    return (
+        receipt.get("contract") == "tracked-source-cleanup/v1"
+        and receipt.get("receipt_id") == transaction
+        and receipt.get("result") == "SOURCE_CLEANUP_COMPLETE"
+    )
+
+
 def terminal_state(
     store: MetadataStore, transaction: str, *, verify_generation: bool = False
 ) -> str | None:
+    if _completed_clean(store, transaction):
+        return "SOURCE_CLEANUP_COMPLETE"
     if _progress_reconciled(store, transaction, verify_generation=verify_generation) is not None:
         return PROGRESS_STATE
     if _reconciled(store, transaction, verify_generation=verify_generation) is not None:
@@ -359,7 +381,7 @@ def _progress_inputs(
     tree = cleanup["preservation_plan"]["source_tree"]
     if (
         not actions
-        or len(actions) >= len(rows)
+        or len(actions) > len(rows)
         or [row["path"] for row in rows] != tree["dirty_paths"]
         or any(action["path"] != rows[i]["path"] for i, action in enumerate(actions))
     ):
@@ -499,7 +521,7 @@ def plan_progress(
     inputs = _progress_inputs(store, transaction, receipt_sha)
     journal, cleanup, refs, actions, completed = inputs
     completed = dict(completed)
-    if _store(cleanup["preservation_plan"]).root != store.root:
+    if _store(cleanup["preservation_plan"]).root.parent.parent != store.root.parent.parent:
         raise _blocked()
     plan = cleanup["preservation_plan"]
     # A STARTED action is observed now, never retrospectively marked completed.

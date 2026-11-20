@@ -8,6 +8,7 @@ import re
 import subprocess
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import suppress
 from pathlib import Path
 
 from .models import ControllerError, RepositoryInventory, WorktreeGitState
@@ -45,12 +46,31 @@ REPOSITORY_SELECTION_ENVIRONMENT = frozenset(
 )
 
 
+UNTRUSTED_EXECUTION_ENVIRONMENT = frozenset(
+    {
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_EXEC_PATH",
+        "GIT_TEMPLATE_DIR",
+        "GIT_ATTR_SOURCE",
+        "GIT_EXTERNAL_DIFF",
+        "GIT_DIFF_OPTS",
+    }
+)
+
+
 def git_environment() -> dict[str, str]:
-    """The caller's environment without inherited repository selection."""
+    """The caller's environment without inherited repository selection or config injection."""
     environment = {
         key: value
         for key, value in os.environ.items()
         if key not in REPOSITORY_SELECTION_ENVIRONMENT
+        and key not in UNTRUSTED_EXECUTION_ENVIRONMENT
+        and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
     }
     environment["LC_ALL"] = "C"
     return environment
@@ -67,6 +87,8 @@ def _git(
     environment["GIT_TERMINAL_PROMPT"] = "0"
     environment["GIT_ASKPASS"] = "/bin/false"
     environment["SSH_ASKPASS"] = "/bin/false"
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
     # Authority, integration and retirement evidence must share the stored DAG.
     # Repository-local replacement refs cannot redefine commit ancestry or trees.
     environment["GIT_NO_REPLACE_OBJECTS"] = "1"
@@ -75,7 +97,19 @@ def _git(
     command = ["git"]
     if readonly:
         command.append("--no-optional-locks")
-    command.extend(("-C", os.fspath(repo), *arguments))
+    command.extend(
+        (
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "protocol.ext.allow=never",
+            "-C",
+            os.fspath(repo),
+            *arguments,
+        )
+    )
     try:
         result = subprocess.run(
             command,
@@ -96,6 +130,9 @@ def _git(
     return result
 
 
+run_git = _git
+
+
 def _text(repo: Path, *arguments: str) -> str:
     return _git(repo, *arguments).stdout.decode("utf-8", "strict").strip()
 
@@ -111,8 +148,9 @@ def resolve_repository(path: Path) -> tuple[Path, Path]:
 
 def commit_tree_oid(repo: Path, commit: str) -> str:
     """Resolve the immutable tree identity for an already validated commit OID."""
-
-    oid = _text(repo, "rev-parse", "--verify", f"{commit}^{{tree}}")
+    if not commit or commit.startswith("-"):
+        raise ControllerError("INVALID_COMMIT", "commit value is empty or unsafe")
+    oid = _text(repo, "rev-parse", "--verify", "--end-of-options", f"{commit}^{{tree}}")
     if len(oid) != 40 or any(character not in "0123456789abcdef" for character in oid):
         raise ControllerError("GIT_PARSE_ERROR", "Git returned an invalid tree OID")
     return oid
@@ -155,21 +193,43 @@ def _parse_porcelain(payload: bytes) -> list[dict[str, str | bool]]:
     return records
 
 
+def resolve_gitdir_pointer(admin_dir: Path) -> Path | None:
+    """Resolve a linked worktree's ``gitdir`` file, supporting relative paths."""
+    pointer = admin_dir / "gitdir"
+    if not pointer.is_file():
+        return None
+    try:
+        target = pointer.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return None
+    if not target:
+        return None
+    candidate = Path(target)
+    if not candidate.is_absolute():
+        candidate = admin_dir / candidate
+    try:
+        parent = candidate.parent.resolve(strict=False)
+    except OSError:
+        parent = candidate.parent
+    return parent / candidate.name
+
+
 def _linked_git_dir(common: Path, path: Path) -> Path:
     if path.exists():
         return Path(_text(path, "rev-parse", "--absolute-git-dir")).resolve(strict=True)
     admin_root = common / "worktrees"
     if admin_root.is_dir():
-        expected = os.fspath(path / ".git")
+        try:
+            expected_parent = path.parent.resolve(strict=False)
+        except OSError:
+            expected_parent = path.parent
+        expected_git = expected_parent / path.name / ".git"
+        expected_raw = path / ".git"
         for candidate in sorted(admin_root.iterdir()):
-            pointer = candidate / "gitdir"
-            if not pointer.is_file():
+            resolved_pointer = resolve_gitdir_pointer(candidate)
+            if resolved_pointer is None:
                 continue
-            try:
-                target = pointer.read_text(encoding="utf-8").strip()
-            except (OSError, UnicodeError):
-                continue
-            if target == expected:
+            if resolved_pointer in (expected_git, expected_raw):
                 return candidate.resolve(strict=True)
     raise ControllerError("GIT_DRIFT", f"cannot resolve linked worktree admin dir: {path}")
 
@@ -319,9 +379,9 @@ def inventory(path: Path) -> RepositoryInventory:
 
 
 def resolve_commit(repo: Path, value: str) -> str:
-    if not value:
-        raise ControllerError("INVALID_COMMIT", "commit value is empty")
-    result = _git(repo, "rev-parse", "--verify", f"{value}^{{commit}}", check=False)
+    if not value or value.startswith("-"):
+        raise ControllerError("INVALID_COMMIT", "commit value is empty or unsafe")
+    result = _git(repo, "rev-parse", "--verify", "--end-of-options", f"{value}^{{commit}}", check=False)
     if result.returncode != 0:
         raise ControllerError("INVALID_COMMIT", f"commit is not resolvable: {value}")
     oid = result.stdout.decode("ascii", "strict").strip()
@@ -367,7 +427,7 @@ def changed_paths(repo: Path, base: str, head: str) -> tuple[str, ...]:
     base_oid = resolve_commit(repo, base)
     head_oid = resolve_commit(repo, head)
     payload = _git(
-        repo, "--no-replace-objects", "diff", "--name-only", "-z", base_oid, head_oid
+        repo, "--no-replace-objects", "diff", "--name-only", "-z", base_oid, head_oid, "--"
     ).stdout
     return tuple(sorted(os.fsdecode(item) for item in payload.split(b"\0") if item))
 
@@ -383,6 +443,8 @@ def trusted_publication_base(
     attribution evidence. The frozen allocation base is never changed.
     """
     try:
+        if not ref or ref.startswith("-") or "\x00" in ref:
+            return base
         _root, common = resolve_repository(repo)
         if _text(repo, "rev-parse", "--is-shallow-repository") != "false":
             return base
@@ -392,7 +454,7 @@ def trusted_publication_base(
             return base
         if os.environ.get("GIT_REPLACE_REF_BASE") or os.environ.get("GIT_SHALLOW_FILE"):
             return base
-        if _git(repo, "symbolic-ref", "--quiet", ref, check=False).returncode != 1:
+        if _git(repo, "symbolic-ref", "--quiet", "--", ref, check=False).returncode != 1:
             return base
         publication = resolve_commit(repo, ref)
         history = (common / "logs" / ref).read_text(encoding="utf-8").splitlines()
@@ -556,11 +618,66 @@ def checkout_branch(repo: Path, branch: str) -> None:
     git_write(repo, ("checkout", branch))
 
 
+def ls_remote_branch(repo: Path, remote: str, branch: str) -> str | None:
+    """Read-only remote branch OID query; never mutates ``refs/remotes/``."""
+    if REMOTE_NAME_PATTERN.fullmatch(remote) is None:
+        raise ControllerError("INVALID_REMOTE", f"remote name is unsafe: {remote}")
+    validate_branch_name(repo, branch)
+    if _git(repo, "remote", "get-url", "--", remote, check=False).returncode != 0:
+        raise ControllerError("INVALID_REMOTE", f"remote is not configured: {remote}")
+    target_ref = f"refs/heads/{branch}"
+    result = _git(
+        repo, "ls-remote", "--exit-code", "--refs", "--", remote, target_ref, check=False
+    )
+    if result.returncode == 2:
+        return None
+    if result.returncode != 0:
+        raise ControllerError("PUBLICATION_FETCH_FAILED", "configured publication branch query failed")
+    lines = result.stdout.decode("utf-8", "strict").splitlines()
+    if len(lines) != 1:
+        return None
+    parts = lines[0].split("\t")
+    if len(parts) != 2 or parts[1] != target_ref:
+        raise ControllerError("GIT_PARSE_ERROR", "Git returned an invalid ls-remote row")
+    oid = parts[0]
+    if len(oid) != 40 or any(character not in "0123456789abcdef" for character in oid):
+        raise ControllerError("GIT_PARSE_ERROR", "Git returned an invalid remote OID")
+    return oid
+
+
+def fetch_remote_branch_readonly(repo: Path, remote: str, branch: str) -> str:
+    """Query remote branch OID and fetch missing objects without mutating local refs."""
+    oid = ls_remote_branch(repo, remote, branch)
+    if oid is None:
+        raise ControllerError("PUBLICATION_FETCH_FAILED", "configured publication branch fetch failed")
+    if _git(repo, "cat-file", "-e", f"{oid}^{{commit}}", check=False).returncode != 0:
+        target_ref = f"refs/heads/{branch}"
+        result = _git(
+            repo,
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--refmap=",
+            "--",
+            remote,
+            target_ref,
+            check=False,
+        )
+        if (
+            result.returncode != 0
+            or _git(repo, "cat-file", "-e", f"{oid}^{{commit}}", check=False).returncode != 0
+        ):
+            raise ControllerError(
+                "PUBLICATION_FETCH_FAILED", "configured publication branch fetch failed"
+            )
+    return oid
+
+
 def fetch_remote_branch(repo: Path, remote: str, branch: str) -> str:
     if REMOTE_NAME_PATTERN.fullmatch(remote) is None:
         raise ControllerError("INVALID_REMOTE", f"remote name is unsafe: {remote}")
     validate_branch_name(repo, branch)
-    if _git(repo, "remote", "get-url", remote, check=False).returncode != 0:
+    if _git(repo, "remote", "get-url", "--", remote, check=False).returncode != 0:
         raise ControllerError("INVALID_REMOTE", f"remote is not configured: {remote}")
     tracking_ref = f"refs/remotes/{remote}/{branch}"
     result = _git(
@@ -568,6 +685,7 @@ def fetch_remote_branch(repo: Path, remote: str, branch: str) -> str:
         "fetch",
         "--no-tags",
         "--no-write-fetch-head",
+        "--",
         remote,
         f"+refs/heads/{branch}:{tracking_ref}",
         check=False,
@@ -648,9 +766,15 @@ def git_state_fingerprint(repository: RepositoryInventory) -> str:
 
 def _index_and_status(path: Path) -> tuple[bytes, bytes]:
     index_path = Path(_text(path, "rev-parse", "--path-format=absolute", "--git-path", "index"))
-    index_bytes = index_path.read_bytes()
+    try:
+        index_bytes = index_path.read_bytes()
+    except FileNotFoundError:
+        index_bytes = b""
     status = _git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all").stdout
     return index_bytes, status
+
+
+index_and_status = _index_and_status
 
 
 def public_refs(repo: Path) -> dict[str, str]:
@@ -695,7 +819,8 @@ def worktree_content_fingerprint(
         index_path = Path(
             _text(item.path, "rev-parse", "--path-format=absolute", "--git-path", "index")
         )
-        digest.update(index_path.read_bytes())
+        with suppress(FileNotFoundError):
+            digest.update(index_path.read_bytes())
         digest.update(
             _git(item.path, "status", "--porcelain=v1", "-z", "--untracked-files=all").stdout
         )

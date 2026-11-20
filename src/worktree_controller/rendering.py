@@ -42,6 +42,12 @@ def render(payload: dict[str, Any]) -> str:
         if decision.get("reason"):
             lines.append(f"Reason: {decision['reason']}")
         if command == "recovery-guide":
+            if decision.get("terminal_status"):
+                lines.append(f"Terminal status: {decision['terminal_status']}")
+            if decision.get("terminal_evidence"):
+                evidence = decision["terminal_evidence"]
+                details = ", ".join(f"{k}={v}" for k, v in sorted(evidence.items()))
+                lines.append(f"Terminal evidence: {details}")
             for blocker in decision.get("blockers", []):
                 lines.append(f"Blocker: {blocker}")
             for number, step in enumerate(decision.get("next_steps", []), 1):
@@ -49,6 +55,12 @@ def render(payload: dict[str, Any]) -> str:
                 if step.get("argv"):
                     lines.append(f"   {shlex.join(step['argv'])}")
             lines.append("Read-only guidance; recheck identity and guards after every step.")
+        if command == "conflict-check":
+            for pair in decision.get("pairs", []):
+                status_word = "clean" if pair.get("clean") else "CONFLICT"
+                lines.append(f"  {pair.get('left')} vs {pair.get('right')}: {status_word}")
+                for conflict_path in pair.get("conflicting_paths", []):
+                    lines.append(f"    conflict: {conflict_path}")
         if command == "canonical-refresh" and (diagnostics := decision.get("process_diagnostics")):
             lines.append(f"Process occupancy (advisory): {diagnostics['process_count']} processes")
             for row in diagnostics["processes"]:

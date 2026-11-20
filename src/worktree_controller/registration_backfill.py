@@ -13,12 +13,12 @@ import hashlib
 import json
 import os
 import stat
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .controller import envelope
-from .git_backend import inventory, is_ancestor
+from .git_backend import inventory, is_ancestor, resolve_gitdir_pointer
 from .models import ControllerError
 from .store import REGISTRATION_MARKER, MetadataStore
 
@@ -61,10 +61,13 @@ def _evaluate(store: MetadataStore, item: Any, record: Any) -> tuple[list[str], 
         blockers.append("CHECKOUT_MISSING")
     if os.path.lexists(admin / REGISTRATION_MARKER):
         blockers.append("STALE_REGISTRATION_MARKER")
-    if _pointer(admin) != os.fspath(item.path / ".git"):
+    gitdir = resolve_gitdir_pointer(admin)
+    if gitdir != (item.path / ".git"):
         blockers.append("GIT_POINTER_MISMATCH")
     registered_ns = _registered_at_ns(admin)
     created = datetime.fromisoformat(record.created_at)
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
     limit_ns = int(created.timestamp() + REGISTRATION_WINDOW_SECONDS) * 1_000_000_000
     if registered_ns is None:
         blockers.append("REGISTRATION_TIME_UNKNOWN")

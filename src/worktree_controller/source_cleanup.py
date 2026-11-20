@@ -175,7 +175,7 @@ def _restore(plan: dict, row: dict, data: bytes) -> list[int]:
                 or metadata.st_nlink != 1
             ):
                 raise s._fail("SOURCE_CHANGED")
-            fd = os.open(f"/proc/self/fd/{pin}", os.O_RDWR | os.O_NOATIME | os.O_CLOEXEC)
+            fd = os.open(f"/proc/self/fd/{pin}", os.O_RDWR | os.O_CLOEXEC)
             try:
                 source = next(r for r in tree["files"] if r["path"] == path)
                 if p._identity(os.fstat(fd)) != expected or p._transfer(fd) != (
@@ -352,29 +352,29 @@ def cleanup_source(cleanup: dict, *, state_root: Path | None = None) -> dict:
             "evidence_write_error": evidence_error,
             "release_authorized": False,
         }
-    receipt = evidence.write(
-        store.completion_receipts_dir,
-        f"{transaction_id}.json",
-        {
-            "contract": CONTRACT,
-            "receipt_id": transaction_id,
-            "kind": "tracked_source_cleanup",
-            "result": "SOURCE_CLEANUP_COMPLETE",
-            "allocation_source_identity": identity,
-            "journal": journal_ref,
-            "plan": journal["cleanup_plan"]["source_plan"],
-            "actions": actions,
-            "checks": checks,
-            "post_scan": post,
-            "index_unchanged": True,
-            "release_authorized": False,
-            "timestamp": now_iso(),
-        },
-    )
     with store.lock(exclusive=True):
         actual, _ = evidence.read(Path(journal_ref["path"]), journal_ref["sha256"])
         if actual != journal:
             raise s._fail("SOURCE_TRANSACTION_CHANGED")
+        receipt = evidence.write(
+            store.completion_receipts_dir,
+            f"{transaction_id}.json",
+            {
+                "contract": CONTRACT,
+                "receipt_id": transaction_id,
+                "kind": "tracked_source_cleanup",
+                "result": "SOURCE_CLEANUP_COMPLETE",
+                "allocation_source_identity": identity,
+                "journal": journal_ref,
+                "plan": journal["cleanup_plan"]["source_plan"],
+                "actions": actions,
+                "checks": checks,
+                "post_scan": post,
+                "index_unchanged": True,
+                "release_authorized": False,
+                "timestamp": now_iso(),
+            },
+        )
         # Keep the exact journal as immutable evidence before the formal removal.
         evidence.write(directory, "journal.json", journal)
         evidence.write(directory, "completed.json", {"contract": CONTRACT, "receipt": receipt})
@@ -401,10 +401,13 @@ def verify_completed(store: MetadataStore, item, record) -> list[dict]:
         identity = plan["authority"]["identity"]
         if identity["allocation_id"] != record.allocation_id:
             continue
-        from .source_recovery import terminal
+        from .source_recovery import PROGRESS_STATE, terminal_state
 
-        if terminal(store, directory.name, verify_generation=True):
-            continue  # Terminal historical attempts grant no cleanup completion or release.
+        if terminal_state(store, directory.name, verify_generation=True) in {
+            "SOURCE_ATTEMPT_SUPERSEDED",
+            PROGRESS_STATE,
+        }:
+            continue  # Terminal superseded/recovered attempts grant no cleanup completion or release.
         try:
             marker, _ = evidence.read(directory / "completed.json")
             ref = marker["receipt"]

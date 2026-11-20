@@ -1144,10 +1144,7 @@ def outstanding_retirement_authorizations(
     for path in sorted(directory.glob("*.json")):
         if is_atomic_temp(path.name) or path.name.endswith("-abandoned.json"):
             continue
-        try:
-            value = dict(store._read_json(path))
-        except ControllerError:
-            continue
+        value = dict(store._read_json(path))
         if value.get("contract") != execution.AUTHORIZATION_CONTRACT:
             continue
         if branch is not None and value.get("branch") != branch:
@@ -1243,13 +1240,34 @@ def authorize_branch_retirement(
             if operation == "local"
             else str(current["remote_tracking_ref"])
         )
+        selector = holder or "self"
+        if selector != "self" and not selector.startswith("ancestor:"):
+            raise ControllerError(
+                "INVALID_HOLDER",
+                "a grant binds the calling process tree: use self or ancestor:<program>, never a "
+                "detached pid that names somebody else's process",
+            )
+        resolved = (
+            describe_holder(os.getpid(), client_id=client_id, session_id=session_id, run_id=run_id)
+            if selector == "self"
+            else resolve_holder(
+                selector, client_id=client_id, session_id=session_id, run_id=run_id
+            )
+        )
+        caller_holder_sha256 = canonical_holder_digest(asdict(resolved))
         live = [
             item
             for item in outstanding_retirement_authorizations(store, branch=str(current["branch"]))
             if item.get("operation") == operation
         ]
         replayed = next((item for item in live if item.get("request_id") == request_id), None)
-        if replayed is not None:
+        if (
+            replayed is not None
+            and code == "RETIREMENT_EXECUTABLE"
+            and replayed.get("plan_id") == plan_id
+            and not grant_expired(replayed)
+            and replayed.get("holder_sha256") == caller_holder_sha256
+        ):
             return _payload(
                 "branch-retirement-authorize",
                 {
@@ -1257,6 +1275,7 @@ def authorize_branch_retirement(
                     "idempotent": True,
                     "plan_id": plan_id,
                     "operation": operation,
+                    "authorization_id": replayed["authorization_id"],
                     "authorization": replayed,
                     "blockers": [],
                 },
@@ -1286,21 +1305,6 @@ def authorize_branch_retirement(
                     "outstanding_authorization_id": live[0]["authorization_id"],
                 },
             )
-
-        selector = holder or "self"
-        if selector != "self" and not selector.startswith("ancestor:"):
-            raise ControllerError(
-                "INVALID_HOLDER",
-                "a grant binds the calling process tree: use self or ancestor:<program>, never a "
-                "detached pid that names somebody else's process",
-            )
-        resolved = (
-            describe_holder(os.getpid(), client_id=client_id, session_id=session_id, run_id=run_id)
-            if selector == "self"
-            else resolve_holder(
-                selector, client_id=client_id, session_id=session_id, run_id=run_id
-            )
-        )
         issued_at = now_iso()
         expires_at = (
             datetime.fromisoformat(issued_at)
@@ -1407,10 +1411,41 @@ def complete_branch_retirement(
     repository = inventory(repository_path)
     store = MetadataStore(repository.common_dir)
     with store.lock(exclusive=True, create=False):
+        if not re.fullmatch(r"[0-9a-f]{64}", authorization_id):
+            raise ControllerError("INVALID_AUTHORIZATION_ID", "authorization id must be sha256")
+        grant_exists = _authorization_path(store, authorization_id).is_file()
+        grant: dict[str, Any] | None = None
+        if grant_exists:
+            grant = _load_authorization(store, authorization_id)
+            if not hmac.compare_digest(str(grant["token"]), str(token)):
+                raise ControllerError("AUTHORIZATION_TOKEN_MISMATCH", "execution token differs")
+            for field in ("plan_id", "operation", "kind", "ref", "expected_oid", "expected_integrated_oid"):
+                if result[field] != grant[field]:
+                    raise ControllerError(
+                        "EXECUTION_RESULT_MISMATCH", f"result {field} differs from the authorization"
+                    )
+            if result["integrated_ref"] is not None and result["integrated_ref"] != grant["integrated_ref"]:
+                raise ControllerError("EXECUTION_RESULT_MISMATCH", "result integrated_ref differs")
         settled = _receipt_by_authorization(store, authorization_id)
         if settled is not None:
             receipt, plan_id, operation = settled
-            if _authorization_path(store, authorization_id).is_file():
+            if not grant_exists:
+                if (
+                    result["plan_id"] != receipt.get("plan_id")
+                    or result["operation"] != receipt.get("operation")
+                    or result["expected_oid"] != receipt.get("expected_oid")
+                    or result["expected_integrated_oid"] != receipt.get("expected_integrated_oid")
+                ):
+                    raise ControllerError(
+                        "EXECUTION_RESULT_MISMATCH", "result differs from settled retirement receipt"
+                    )
+                recorded_token_hash = receipt.get("token_sha256")
+                if recorded_token_hash is not None and not hmac.compare_digest(
+                    hashlib.sha256(str(token).encode("utf-8")).hexdigest(),
+                    str(recorded_token_hash),
+                ):
+                    raise ControllerError("AUTHORIZATION_TOKEN_MISMATCH", "execution token differs")
+            if grant_exists:
                 # Crash between the receipt write and the grant close: the decision
                 # is already recorded, so finishing the close needs no new one.
                 _close_authorization(store, authorization_id)
@@ -1426,20 +1461,18 @@ def complete_branch_retirement(
                     "provenance": receipt.get("provenance", RECEIPT_PROVENANCE_CLAIM),
                 },
             )
-        grant = _load_authorization(store, authorization_id)
-        if not hmac.compare_digest(str(grant["token"]), str(token)):
-            raise ControllerError("AUTHORIZATION_TOKEN_MISMATCH", "execution token differs")
-        for field in ("plan_id", "operation", "kind", "ref", "expected_oid", "expected_integrated_oid"):
-            if result[field] != grant[field]:
-                raise ControllerError(
-                    "EXECUTION_RESULT_MISMATCH", f"result {field} differs from the authorization"
-                )
-        if result["integrated_ref"] is not None and result["integrated_ref"] != grant["integrated_ref"]:
-            raise ControllerError("EXECUTION_RESULT_MISMATCH", "result integrated_ref differs")
+        if grant is None:
+            grant = _load_authorization(store, authorization_id)
         plan = _load_plan(store, str(grant["plan_id"]))
         authorization_id_value = str(grant["authorization_id"])
         receipt_path = _receipt_path(store, str(grant["plan_id"]), str(grant["operation"]))
         if receipt_path.is_file():
+            existing_receipt = dict(store._read_json(receipt_path))
+            if existing_receipt.get("authorization_id") != authorization_id_value:
+                raise ControllerError(
+                    "EXECUTION_RESULT_MISMATCH",
+                    "existing completion receipt belongs to a different authorization",
+                )
             # A receipt without a closed grant is a crash between the two writes;
             # finishing the close is the only safe repair and needs no new decision.
             _close_authorization(store, authorization_id_value)
@@ -1451,7 +1484,7 @@ def complete_branch_retirement(
                     "authorization_id": authorization_id_value,
                     "plan_id": grant["plan_id"],
                     "operation": grant["operation"],
-                    "receipt": dict(store._read_json(receipt_path)),
+                    "receipt": existing_receipt,
                     "provenance": RECEIPT_PROVENANCE_AUTHORIZED,
                     "grant_expired_at_settle": False,
                 },
@@ -1497,7 +1530,13 @@ def complete_branch_retirement(
             _locked_store=store,
         )
         live_observation = _observation(repository, current)
-        blockers = _observation_delta(grant["observed"], live_observation, authorized_ref=str(grant["ref"]))
+        blockers = _observation_delta(
+            grant["observed"],
+            live_observation,
+            authorized_ref=str(grant["ref"]),
+            canonical_path=repository.canonical_path,
+            integrated_ref=str(grant.get("integrated_ref") or ""),
+        )
         if str(current["controller_state_digest"]) != str(grant["controller_state_digest"]):
             blockers = sorted({*blockers, "PLAN_STATE_DRIFT"})
         if blockers:
@@ -1542,6 +1581,7 @@ def complete_branch_retirement(
             "observed_ref": grant["ref"],
             "observed_at_settle": target_before,
             "executor_name": result["executor"]["name"],
+            "token_sha256": hashlib.sha256(str(grant["token"]).encode("utf-8")).hexdigest(),
         }
         store._atomic_json(receipt_path, receipt)
         _crash_point("retirement_receipt_written")
@@ -1568,21 +1608,27 @@ def _receipt_by_authorization(
 ) -> tuple[dict[str, Any], str, str] | None:
     """Find a settled retirement from its grant id, so replay answers after closure."""
 
+    from .transaction_scope import is_atomic_temp
+
     directory = store.branch_retirement_receipts_dir
     if not directory.is_dir():
         return None
     for receipt_file in sorted(directory.glob("*.json")):
-        try:
-            receipt = dict(store._read_json(receipt_file))
-        except ControllerError:
+        if is_atomic_temp(receipt_file.name):
             continue
+        receipt = dict(store._read_json(receipt_file))
         if receipt.get("authorization_id") == authorization_id:
             return receipt, str(receipt["plan_id"]), str(receipt["operation"])
     return None
 
 
 def _observation_delta(
-    bound: object, live: Mapping[str, Any], *, authorized_ref: str
+    bound: object,
+    live: Mapping[str, Any],
+    *,
+    authorized_ref: str,
+    canonical_path: Path | None = None,
+    integrated_ref: str | None = None,
 ) -> list[str]:
     """Blockers for the live Git facts the authorized deletion must not have touched.
 
@@ -1601,7 +1647,17 @@ def _observation_delta(
     for ref, oid in sorted(bound_refs.items()):
         if ref == authorized_ref:
             continue
-        if live_refs.get(ref) != oid:
+        live_oid = live_refs.get(ref)
+        if live_oid != oid:
+            if (
+                integrated_ref
+                and ref == integrated_ref
+                and canonical_path is not None
+                and isinstance(oid, str)
+                and isinstance(live_oid, str)
+                and is_ancestor(canonical_path, oid, live_oid)
+            ):
+                continue
             blockers.append("OBSERVATION_REF_MOVED")
     if live.get("checked_out_paths"):
         blockers.append("OBSERVATION_CHECKOUT_APPEARED")

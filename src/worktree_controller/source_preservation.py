@@ -457,16 +457,40 @@ def _copy_files(source_chain: tuple, destination_chain: tuple, tree: dict) -> No
 
 
 def _seal(directory: _Directory, chain: tuple) -> None:
-    for name in os.listdir(directory.fd):
-        metadata = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
-        if stat.S_ISDIR(metadata.st_mode):
-            with _open_directory(directory.fd, name, _inode(metadata)) as child:
-                _seal(child, (*chain, child))
-        elif not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o400:
-            raise _fail("SOURCE_DESTINATION_CHANGED")
-    p._check_chain(chain)
-    os.fchmod(directory.fd, 0o500)
-    os.fsync(directory.fd)
+    stack: list[tuple[_Directory, tuple, list[tuple[str, list[int]]] | None]] = [
+        (directory, chain, None)
+    ]
+    opened_by_stack: list[tuple[_Directory, Any]] = []
+    try:
+        while stack:
+            current_dir, current_chain, pending = stack[-1]
+            if pending is None:
+                subdirs: list[tuple[str, list[int]]] = []
+                for name in os.listdir(current_dir.fd):
+                    metadata = os.stat(name, dir_fd=current_dir.fd, follow_symlinks=False)
+                    if stat.S_ISDIR(metadata.st_mode):
+                        subdirs.append((name, _inode(metadata)))
+                    elif not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o400:
+                        raise _fail("SOURCE_DESTINATION_CHANGED")
+                stack[-1] = (current_dir, current_chain, subdirs)
+            else:
+                subdirs = pending
+                if subdirs:
+                    name, expected_inode = subdirs.pop(0)
+                    child_cm = _open_directory(current_dir.fd, name, expected_inode)
+                    child = child_cm.__enter__()
+                    opened_by_stack.append((child, child_cm))
+                    stack.append((child, (*current_chain, child), None))
+                    continue
+                p._check_chain(current_chain)
+                os.fchmod(current_dir.fd, 0o500)
+                os.fsync(current_dir.fd)
+                stack.pop()
+                if opened_by_stack and opened_by_stack[-1][0] is current_dir:
+                    opened_by_stack.pop()[1].__exit__(None, None, None)
+    finally:
+        while opened_by_stack:
+            opened_by_stack.pop()[1].__exit__(None, None, None)
 
 
 def _verify_files(chain: tuple, expected: dict) -> dict:

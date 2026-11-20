@@ -416,7 +416,7 @@ def export_tree(repository: Path, oid: str) -> list[list[str]]:
         rows.append([path, mode, blob])
     required = {"pyproject.toml", "uv.lock", "tool_cli_contract.json", "scripts/controller-activate",
                 "scripts/controller-runtime", "scripts/check-writer-rollout",
-                f"{SKILL_SOURCE}/SKILL.md", f"{SKILL_SOURCE}/agents/openai.yaml"}
+                f"{SKILL_SOURCE}/SKILL.md"}
     if not required <= {row[0] for row in rows} or not any(row[0].startswith("src/worktree_controller/") for row in rows):
         raise Abort("export baseline is missing a required runtime or maintenance payload")
     return sorted(rows)
@@ -868,6 +868,51 @@ def skill_active_pin(oid: str) -> Path:
     return runtime
 
 
+def _prune_old_versions(*, keep: int = 5, protected: set[Path] | None = None) -> None:
+    """Keep active/protected runtimes plus up to ``keep`` newest version directories."""
+    import shutil
+
+    protected_resolved = {path.resolve(strict=False) for path in (protected or ())}
+    if ACTIVE.exists() or ACTIVE.is_symlink():
+        with suppress(OSError):
+            protected_resolved.add(ACTIVE.resolve(strict=True).parent.resolve(strict=False))
+    if not VERSIONS.is_dir():
+        return
+    uid = os.geteuid()
+    candidates: list[tuple[int, Path]] = []
+    for entry in VERSIONS.iterdir():
+        if entry.is_symlink() or not entry.is_dir() or entry.name.startswith("."):
+            continue
+        try:
+            info = entry.lstat()
+        except OSError:
+            continue
+        if info.st_uid != uid:
+            continue
+        candidates.append((info.st_mtime_ns, entry.resolve(strict=False)))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    kept = set(protected_resolved)
+    for _, resolved in candidates:
+        if len(kept) < keep:
+            kept.add(resolved)
+    for _, resolved in candidates:
+        if resolved in kept:
+            continue
+        try:
+            shutil.rmtree(resolved)
+            log(f"pruned superseded controller version: {resolved.name}")
+        except OSError as exc:
+            log(f"retained old controller version {resolved.name}: {exc}")
+
+
+def _safe_skill_relative(relative: str) -> None:
+    parts = Path(relative).parts
+    if not relative or relative.startswith("/") or "\x00" in relative or not parts:
+        raise Abort(f"invalid Skill entry path: {relative}")
+    if any(part in {"", ".", ".."} or part.startswith(".") for part in parts):
+        raise Abort(f"unsupported hidden or traversal Skill path: {relative}")
+
+
 def frozen_skill(oid: str) -> dict[str, bytes]:
     tree = run(
         ["git", "-C", CONTROLLER_REPO, "ls-tree", "-r", "-z", oid, "--", SKILL_SOURCE],
@@ -879,29 +924,35 @@ def frozen_skill(oid: str) -> dict[str, bytes]:
             continue
         identity, name = row.split("\t", 1)
         mode, kind, blob = identity.split()
-        if mode != "100644" or kind != "blob" or not name.startswith(SKILL_SOURCE + "/"):
+        if mode not in {"100644", "100755"} or kind != "blob" or not name.startswith(SKILL_SOURCE + "/"):
             raise Abort("frozen Skill contains an unsupported entry")
         relative = name.removeprefix(SKILL_SOURCE + "/")
-        if relative not in {"SKILL.md", "agents/openai.yaml"}:
-            raise Abort("sync-skill only supports the reviewed Skill and companion paths")
+        _safe_skill_relative(relative)
         entries[relative] = blob
-    if set(entries) != {"SKILL.md", "agents/openai.yaml"}:
-        raise Abort("frozen Skill payload is missing a reviewed path")
+    if "SKILL.md" not in entries:
+        raise Abort("frozen Skill payload is missing SKILL.md")
     return {name: git_bytes("cat-file", "blob", blob, timeout=60) for name, blob in entries.items()}
 
 
-def installed_skill() -> tuple[dict[str, bytes], int]:
+def _installed_skill_entries() -> dict[str, Path]:
     for directory in (SKILL_TARGET.parent.parent, SKILL_TARGET.parent, SKILL_TARGET):
         owned(directory, directory=True)
-    expected = {"SKILL.md", "agents", "agents/openai.yaml"}
-    paths = list(SKILL_TARGET.rglob("*"))
-    if {str(path.relative_to(SKILL_TARGET)) for path in paths} != expected:
-        raise Abort("installed Skill has unknown or missing paths")
-    # Classify the entire installation before reading any file contents.
-    for path in paths:
-        owned(path, directory=path.relative_to(SKILL_TARGET) == Path("agents"))
-    payload = {name: (SKILL_TARGET / name).read_bytes()
-               for name in ("SKILL.md", "agents/openai.yaml")}
+    file_entries: dict[str, Path] = {}
+    for path in sorted(SKILL_TARGET.rglob("*")):
+        relative = str(path.relative_to(SKILL_TARGET))
+        _safe_skill_relative(relative)
+        is_dir = path.is_dir() and not path.is_symlink()
+        owned(path, directory=is_dir)
+        if not is_dir:
+            file_entries[relative] = path
+    if "SKILL.md" not in file_entries:
+        raise Abort("installed Skill is missing SKILL.md")
+    return file_entries
+
+
+def installed_skill() -> tuple[dict[str, bytes], int]:
+    file_entries = _installed_skill_entries()
+    payload = {relative: path.read_bytes() for relative, path in file_entries.items()}
     return payload, owned(SKILL_TARGET / "SKILL.md").st_mode & 0o777
 
 
@@ -954,8 +1005,17 @@ def sync_skill(oid: str, *, dry_run: bool = False, rollback_from: str | None = N
     runtime = skill_active_pin(oid)
     verify_runtime(runtime, oid)
     payload = frozen_skill(oid)
+    entries = _installed_skill_entries()
+    if set(entries) != set(payload):
+        raise Abort("installed Skill companion differs from the active commit")
+    if {k: entries[k].read_bytes() for k in entries if k != "SKILL.md"} != {
+        k: v for k, v in payload.items() if k != "SKILL.md"
+    }:
+        raise Abort("installed Skill companion differs from the active commit")
     before, mode = installed_skill()
-    if before["agents/openai.yaml"] != payload["agents/openai.yaml"]:
+    companion_before = {k: v for k, v in before.items() if k != "SKILL.md"}
+    companion_after = {k: v for k, v in payload.items() if k != "SKILL.md"}
+    if companion_before != companion_after:
         raise Abort("installed Skill companion differs from the active commit")
     origin = (committed_skill_origin(oid, before["SKILL.md"], payload) if rollback_from is None
               else rollback_skill_origin(oid, rollback_from, before, payload))
@@ -967,8 +1027,9 @@ def sync_skill(oid: str, *, dry_run: bool = False, rollback_from: str | None = N
         "installed_source_commit": origin,
         "before_sha256": digest(before["SKILL.md"]),
         "after_sha256": digest(payload["SKILL.md"]),
-        "companion_sha256": digest(payload["agents/openai.yaml"]),
     }
+    if "agents/openai.yaml" in payload:
+        receipt["companion_sha256"] = digest(payload["agents/openai.yaml"])
     if rollback_from is not None:
         receipt["rollback_from_commit"] = rollback_from
     with activation_lock():
@@ -1666,6 +1727,7 @@ def main() -> int:
             post_activation_check(previous_runtime, previous)
             log("rolled back to the previously active runtime")
             return 3
+        _prune_old_versions(keep=5, protected={runtime.parent.resolve(), previous_runtime.parent.resolve()})
         log("activation complete; running commands finished on their own version")
         return 0
     except (Abort, LayoutError, OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError) as failure:

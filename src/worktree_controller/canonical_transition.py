@@ -32,6 +32,7 @@ from .record_updates import updated_record
 from .semantics import managed_record as _managed_record
 from .store import MetadataStore
 from .transaction_scope import conflicts
+from .writer_lease import ProcessPathScan, own_ancestry
 
 
 def _check_frozen(
@@ -172,6 +173,27 @@ def transition_canonical(
         raise ControllerError("INVALID_IDENTITY", "transition identities must be nonempty")
     repository_initial = inventory(repository_path)
     store = MetadataStore(repository_initial.common_dir)
+    with store.lock(exclusive=False):
+        peek_repo = inventory(repository_path)
+        peek_snapshot = store._load_unlocked()
+        peek_item, peek_record = _managed_record(peek_repo, peek_snapshot, target)
+        if peek_record.record_version != expected_record_version:
+            raise ControllerError("CAS_MISMATCH", "canonical record version changed")
+        peek_policy = load_policy(peek_repo.canonical_path)
+        if (
+            not peek_policy.present
+            or not peek_policy.canonical_protected
+            or peek_policy.publication_branch not in {"main", "master"}
+        ):
+            raise ControllerError("INVALID_POLICY", "canonical transition requires governed main or master")
+        validate_branch_name(peek_item.path, peek_policy.publication_branch)
+        peek_remote = peek_policy.publication_remote
+        peek_branch = peek_policy.publication_branch
+    target_oid = fetch_remote_branch(peek_item.path, peek_remote, peek_branch)
+    if target_oid != expected_remote_head:
+        raise ControllerError(
+            "REMOTE_DRIFT", "remote main differs from the exact expected commit"
+        )
     with store.lock(exclusive=True):
         repository = inventory(repository_path)
         snapshot = store._load_unlocked()
@@ -195,6 +217,10 @@ def transition_canonical(
         ):
             raise ControllerError(
                 "INVALID_POLICY", "canonical transition requires governed main or master"
+            )
+        if (policy.publication_remote, policy.publication_branch) != (peek_remote, peek_branch):
+            raise ControllerError(
+                "PUBLICATION_POLICY_DRIFT", "publication policy changed during canonical transition"
             )
         remote = policy.publication_remote
         main_branch = policy.publication_branch
@@ -228,10 +254,19 @@ def transition_canonical(
             raise ControllerError(
                 "INTERRUPTED_TRANSACTION", "canonical transition conflicts with a transaction"
             )
-        target_oid = fetch_remote_branch(item.path, remote, main_branch)
-        if target_oid != expected_remote_head:
+        ancestry = own_ancestry()
+        observed = [
+            entry
+            for entry in ProcessPathScan().referenced_paths_in_use(item.path)
+            if entry[0] not in ancestry
+        ]
+        used = [
+            (pid, [p for p in paths if Path(p) != item.path and not Path(p).is_relative_to(repository.common_dir)])
+            for pid, paths in observed
+        ]
+        if any(paths for _, paths in used):
             raise ControllerError(
-                "REMOTE_DRIFT", "remote main differs from the exact expected commit"
+                "CANONICAL_IN_USE", "canonical checkout has active content process references"
             )
         if (
             not is_ancestor(item.path, source_oid, target_oid)
@@ -244,9 +279,9 @@ def transition_canonical(
         local_main = resolve_commit(item.path, f"refs/heads/{main_branch}")
         if local_main not in {original_main, target_oid}:
             raise ControllerError("MAIN_DRIFT", "local main changed outside transition bounds")
+        _check_target_policy(_published_policy(repository, target_oid, policy), main_branch, remote)
+        main_advanced = False
         if refresh_main:
-            # Validate the immutable target before moving a checked-out publication ref.
-            _check_target_policy(_published_policy(repository, target_oid, policy), main_branch, remote)
             if local_main != target_oid:
                 git_write(
                     item.path, ("merge", "--ff-only", "--no-edit", "--no-overwrite-ignore", target_oid)
@@ -254,8 +289,14 @@ def transition_canonical(
         else:
             if local_main == original_main and original_main != target_oid:
                 update_branch_ref(item.path, main_branch, expected=original_main, new=target_oid)
-            if item.branch == expected_branch:
-                git_write(item.path, ("checkout", "--no-overwrite-ignore", main_branch))
+                main_advanced = True
+            try:
+                if item.branch == expected_branch:
+                    git_write(item.path, ("checkout", "--no-overwrite-ignore", main_branch))
+            except ControllerError:
+                if main_advanced:
+                    update_branch_ref(item.path, main_branch, expected=target_oid, new=original_main)
+                raise
         try:
             after = inventory(item.path)
             current = next(worktree for worktree in after.worktrees if worktree.canonical)
@@ -265,15 +306,22 @@ def transition_canonical(
                 )
             target_policy = load_policy(after.canonical_path)
             _check_target_policy(target_policy, main_branch, remote)
-            if fetch_remote_branch(item.path, remote, main_branch) != target_oid:
-                raise ControllerError(
-                    "REMOTE_DRIFT", "remote main moved during canonical transition"
-                )
         except ControllerError:
-            # An in-place advance stays frozen for exact recovery; never rewind main.
             if not refresh_main and item.branch == expected_branch:
                 git_write(item.path, ("checkout", "--no-overwrite-ignore", expected_branch))
+                if main_advanced:
+                    update_branch_ref(item.path, main_branch, expected=target_oid, new=original_main)
             raise
+    if fetch_remote_branch(item.path, remote, main_branch) != target_oid:
+        raise ControllerError(
+            "REMOTE_DRIFT", "remote main moved during canonical transition"
+        )
+    with store.lock(exclusive=True):
+        repository = inventory(repository_path)
+        snapshot = store._load_unlocked()
+        item, record = _managed_record(repository, snapshot, target)
+        if record.record_version != expected_record_version:
+            raise ControllerError("CAS_MISMATCH", "canonical record version changed before commit")
         updated = updated_record(
             record,
             "CANONICAL_MAIN_REFRESHED" if refresh_main else "CANONICAL_TRANSITIONED",

@@ -1,6 +1,6 @@
 version = 1
 revision = 3
-requires-python = "==3.12.*"
+requires-python = ">=3.12, <3.15"
 
 [[package]]
 name = "colorama"
@@ -110,9 +110,11 @@ wheels = [
 
 [[package]]
 name = "worktree-controller"
-version = "1.35.5"
+version = "1.36.0"
 source = { editable = "." }
-dependencies = [
+
+[package.optional-dependencies]
+native-session = [
     { name = "websockets" },
 ]
 
@@ -123,7 +125,8 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "websockets", specifier = ">=15,<16" }]
+requires-dist = [{ name = "websockets", marker = "extra == 'native-session'", specifier = ">=15,<16" }]
+provides-extras = ["native-session"]
 
 [package.metadata.requires-dev]
 dev = [

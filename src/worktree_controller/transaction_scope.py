@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import UUID
 
 from . import cleanup_evidence as e
+from .git_backend import resolve_gitdir_pointer, run_git
 from .models import ControllerError
 from .store import MetadataStore, record_from_dict
 
@@ -49,14 +50,21 @@ def _files_ref_storage(common_dir: Path) -> bool:
     except (OSError, UnicodeError):
         return False
     section = ""
+    has_include = False
     for line in raw.splitlines():
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             section = stripped[1:-1].split(maxsplit=1)[0].lower().strip('"')
+            if section in {"include", "includeif"}:
+                has_include = True
         elif "=" in stripped and section == "extensions":
             key, _, value = stripped.partition("=")
             if key.strip().lower() == "refstorage" and "reftable" in value.strip().lower():
                 return False
+    if has_include:
+        cfg = run_git(common_dir, "config", "--get", "extensions.refStorage", check=False)
+        if cfg.returncode == 0 and b"reftable" in cfg.stdout.lower():
+            return False
     return True
 
 
@@ -70,13 +78,29 @@ def _branch_ref_state(common_dir: Path, ref: str) -> tuple[str | None, str]:
     """
     if not _files_ref_storage(common_dir):
         return None, "uncertain"
+    if (
+        not ref
+        or ref.startswith("-")
+        or ref.startswith("/")
+        or "\x00" in ref
+        or "//" in ref
+        or not ref.startswith("refs/")
+        or any(part in {"", ".", ".."} for part in ref.split("/"))
+    ):
+        return None, "uncertain"
     loose = common_dir.joinpath(*ref.split("/"))
     try:
-        raw = loose.read_text(encoding="utf-8").strip()
+        descriptor = os.open(loose, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except FileNotFoundError:
         raw = None
-    except (OSError, UnicodeError):
+    except OSError:
         return None, "uncertain"
+    else:
+        try:
+            with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+                raw = stream.read(1024).strip()
+        except (OSError, UnicodeError):
+            return None, "uncertain"
     if raw is not None:
         return (raw, "resolved") if _is_oid(raw) else (None, "uncertain")
     if loose.is_symlink():
@@ -113,13 +137,10 @@ def _worktree_registration(common_dir: Path, target: Path) -> tuple[str | None, 
     except OSError:
         return None, None, "uncertain"
     for entry in entries:
-        try:
-            value = (entry / "gitdir").read_text(encoding="utf-8").strip()
-        except FileNotFoundError:
-            continue
-        except (OSError, UnicodeError):
+        resolved_pointer = resolve_gitdir_pointer(entry)
+        if resolved_pointer is None and (entry / "gitdir").exists():
             return None, None, "uncertain"
-        if value and Path(value).parent == target:
+        if resolved_pointer is not None and resolved_pointer.parent == target:
             if found is not None:
                 return None, None, "uncertain"
             try:
@@ -257,13 +278,8 @@ def _worktree_administratively_registered(common_dir: Path, target: Path) -> boo
     if not records.is_dir():
         return False
     for entry in sorted(records.iterdir()):
-        try:
-            # The administrative gitdir holds the checkout's own .git pointer, so
-            # its parent is the working tree that registered the entry.
-            value = (entry / "gitdir").read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeError):
-            continue
-        if value and Path(value).parent == target:
+        resolved_pointer = resolve_gitdir_pointer(entry)
+        if resolved_pointer is not None and resolved_pointer.parent == target:
             return True
     return False
 
@@ -307,10 +323,12 @@ def release_evidence_terminal(store: MetadataStore, transaction: str) -> bool:
         return False
     matches = 0
     for path in sorted(store.release_receipts_dir.glob("*.json")) if store.release_receipts_dir.is_dir() else ():
+        if is_atomic_temp(path.name):
+            continue
         try:
             receipt = dict(store._read_json(path))
         except ControllerError:
-            continue
+            return False
         if (receipt.get("repository_id"), receipt.get("allocation_id"), receipt.get("target_path"),
                 receipt.get("released_record_version"), receipt.get("result")) == (
                 repository_id, allocation, str(target), record.get("record_version"), "RELEASED"):
@@ -613,10 +631,12 @@ def acquire_evidence_terminal(store: MetadataStore, transaction: str) -> str | N
         if record.get("lifecycle") == "RELEASED":
             matches = []
             for path in sorted(store.release_receipts_dir.glob("*.json")):
+                if is_atomic_temp(path.name):
+                    continue
                 try:
                     receipt = dict(store._read_json(path))
                 except ControllerError:
-                    continue
+                    return None
                 if receipt.get("allocation_id") != allocation:
                     continue
                 released_head = receipt.get("released_head")

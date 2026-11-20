@@ -4,17 +4,22 @@ build-backend = "uv_build"
 
 [project]
 name = "worktree-controller"
-version = "1.35.5"
+version = "1.36.0"
 description = "Govern Git worktree budgets, authority, ownership, and lifecycle"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.15"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-dependencies = ["websockets>=15,<16"]
+dependencies = []
 classifiers = [
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
+
+[project.optional-dependencies]
+native-session = ["websockets>=15,<16"]
 
 [project.urls]
 Homepage = "https://github.com/xuanheng-tech/worktree-controller"

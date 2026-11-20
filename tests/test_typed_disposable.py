@@ -17,7 +17,6 @@ from tests.test_shadow import POLICY, GitRepository, git
 from worktree_controller import disposable, environment, lifecycle
 from worktree_controller.controller import doctor
 from worktree_controller.disposable import (
-    RESOURCE_TYPES,
     _default_output_config,
     classify_resources,
 )
@@ -31,6 +30,18 @@ from worktree_controller.git_backend import inventory
 from worktree_controller.lifecycle import cleanup_typed_disposable, handoff, park, release
 from worktree_controller.models import ControllerError
 from worktree_controller.store import MetadataStore
+
+RESOURCE_TYPES = {
+    "backend/.venv": "python-venv",
+    "frontend/node_modules": "node-modules",
+    "frontend/dist": "frontend-build-output",
+}
+DISPOSABLE_POLICY_BLOCK = (
+    "\n[disposable_resources.paths]\n"
+    '"backend/.venv" = "python-venv"\n'
+    '"frontend/node_modules" = "node-modules"\n'
+    '"frontend/dist" = "frontend-build-output"\n'
+)
 
 
 def empty_runtime_evidence():
@@ -54,7 +65,9 @@ def target(monkeypatch, request):
     )
     monkeypatch.setattr(lifecycle, "editable_references", lambda *args, **kwargs: ())
     retained = getattr(request, "param", None) in {"retained-feature", "retained-audit"}
-    with GitRepository(linked=0, policy_text=POLICY_V5 if retained else POLICY) as repository:
+    with GitRepository(
+        linked=0, policy_text=(POLICY_V5 if retained else POLICY) + DISPOSABLE_POLICY_BLOCK
+    ) as repository:
         root = repository.repo
         (root / "backend").mkdir()
         (root / "frontend").mkdir()

@@ -6,25 +6,26 @@ It checks repository policy before allocating a worktree, grants writing authori
 process, and records handoff, integration, recovery and release evidence. Git remains the source
 of truth for files, branches, commits and registered worktrees.
 
-**Current release: 1.35.5 · Linux · Python 3.12 · Apache-2.0**
+**Current release: 1.36.0 · Linux · Python 3.12–3.14 · Apache-2.0**
 
 ## Install
 
 Use a virtual environment in a new directory:
 
 ```bash
-python3.12 -m venv .venv
+python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install worktree-controller==1.32.18
+python -m pip install worktree-controller==1.36.0
 worktree-controller --version
 worktree-controller capabilities --json
 ```
 
-WC requires Git and readable Linux `/proc`. Other operating systems and Python versions are not
-supported by this release. Its one runtime dependency is `websockets>=15,<16`.
+WC requires Git and readable Linux `/proc` on Python 3.12–3.14. Core commands have zero required
+third-party runtime dependencies; install `worktree-controller[native-session]==1.36.0` only when
+using optional WebSocket-backed native session recovery (`websockets>=15,<16`).
 On Ubuntu, if creating the environment reports that `ensurepip` is unavailable, install the
 distribution's `python3.12-venv` package first (for example, `sudo apt install python3.12-venv`).
-Software version 1.32.18 uses CLI contract **61** and storage layout **5**.
+Software version 1.36.0 uses CLI contract **62** and storage layout **5**.
 
 ## Try it in a disposable repository
 
@@ -33,7 +34,7 @@ With the environment above active:
 ```bash
 git clone https://github.com/xuanheng-tech/worktree-controller.git wc
 cd wc
-git checkout v1.32.18
+git checkout v1.36.0
 python examples/quickstart.py --workspace "$HOME/wc-first-run"
 ```
 

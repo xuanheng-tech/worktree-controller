@@ -29,7 +29,6 @@ no-change checkouts only wait ``grace_minutes``. Nothing here refuses admission.
 from __future__ import annotations
 
 import fcntl
-import hashlib
 import json
 import os
 import subprocess
@@ -443,9 +442,7 @@ def _close(
 
 
 def _pass_lock_path(common_dir: Path) -> Path:
-    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
-    digest = hashlib.sha256(str(common_dir.resolve()).encode("utf-8")).hexdigest()[:24]
-    return state / "worktree-controller" / "convergence" / f"{digest}.lock"
+    return common_dir / "worktree-controller" / "convergence.lock"
 
 
 def _pass_report_path(lock_path: Path) -> Path:
@@ -485,9 +482,11 @@ def last_applied_pass(common_dir: Path) -> dict[str, Any] | None:
     if not isinstance(report, dict):
         return None
     if report.get("state") == "RUNNING":
+        if not lock_path.exists():
+            return {**report, "state": "INTERRUPTED"}
         try:
-            with lock_path.open("a+b") as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with lock_path.open("rb") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
             return report
         except OSError:
@@ -634,7 +633,10 @@ def _converge(
         repository = inventory(repository_path)
 
     now_ts = now_at if now_at is not None else datetime.now(UTC).timestamp()
-    snapshot = MetadataStore(repository.common_dir).load()
+    store = MetadataStore(repository.common_dir)
+    with store.lock(exclusive=False):
+        repository = inventory(repository_path)
+        snapshot = store._load_unlocked()
     published = _published_oid(
         repository.canonical_path, policy.publication_remote, policy.publication_branch
     )
@@ -654,12 +656,14 @@ def _converge(
             busy = f"ACTIVE {record.role} allocation"
         live += busy is not None
         rows.append((item, record, busy))
-    threshold = idle_threshold_hours(settings, registered=len(linked), live=live)
+    initial_threshold = idle_threshold_hours(settings, registered=len(linked), live=live)
+    threshold = initial_threshold
     grace = settings.grace_minutes / 60.0
 
     findings: list[dict[str, Any]] = []
     released = 0
     for item, record, busy in rows:
+        threshold = idle_threshold_hours(settings, registered=len(linked) - released, live=live)
         row: dict[str, Any] = {
             "path": str(item.path),
             "branch": item.branch,
@@ -792,7 +796,26 @@ def _converge(
             )
             continue
         try:
-            current = record
+            with store.lock(exclusive=False):
+                live_repo = inventory(repository_path)
+                live_snap = store._load_unlocked()
+                live_item = next((cand for cand in live_repo.worktrees if cand.key == item.key), None)
+                live_rec = _record_for(live_item, live_snap) if live_item is not None else None
+            if (
+                live_item is None
+                or live_rec is None
+                or live_rec.record_version != record.record_version
+                or _in_use(
+                    live_item,
+                    live_rec,
+                    live_snap,
+                    busy_paths({str(live_item.path)}),
+                )
+                is not None
+            ):
+                row.update(outcome=BLOCKED, reason="allocation became busy or changed before release", code="BLOCK_DRIFT")
+                continue
+            current = live_rec
             if dormant:
                 from .lifecycle import park
 

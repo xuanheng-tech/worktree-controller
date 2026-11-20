@@ -168,8 +168,8 @@ def main():
     work_dir = arguments.work_dir.absolute()
     if work_dir.exists() or work_dir.is_symlink():
         parser.error("--work-dir must not already exist; existing outputs are preserved")
-    if sys.platform != "linux" or sys.version_info[:2] != (3, 12) or os.geteuid() == 0:
-        parser.error("checks require Linux, Python 3.12 and an unprivileged user")
+    if sys.platform != "linux" or not ((3, 12) <= sys.version_info[:2] < (3, 15)) or os.geteuid() == 0:
+        parser.error("checks require Linux, Python 3.12-3.14 and an unprivileged user")
     for path in (arguments.controller, arguments.git_finalizer, arguments.retirement_companion):
         if not path.is_absolute() or not path.is_file():
             parser.error("tool paths must be existing absolute files")

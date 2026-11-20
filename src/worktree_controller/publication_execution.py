@@ -12,6 +12,7 @@ import json
 import os
 import re
 import selectors
+import stat
 import sys
 import time
 import uuid
@@ -61,27 +62,52 @@ class SessionInput:
         self.descriptor = descriptor
         self.pending = bytearray()
 
+    def _next_frame(self) -> bytes | None:
+        newline = self.pending.find(b"\n")
+        if newline != -1:
+            if newline > MAX_FRAME_BYTES:
+                raise ControllerError(
+                    "INVALID_PUBLICATION_REQUEST", "publication frame is too large"
+                )
+            line = bytes(self.pending[:newline])
+            del self.pending[: newline + 1]
+            return line
+        if len(self.pending) > MAX_FRAME_BYTES:
+            raise ControllerError(
+                "INVALID_PUBLICATION_REQUEST", "publication frame is too large"
+            )
+        return None
+
     def read(self) -> dict[str, Any]:
-        deadline = time.monotonic() + IDLE_TIMEOUT_SECONDS
-        with selectors.DefaultSelector() as selector:
-            selector.register(self.descriptor, selectors.EVENT_READ)
-            while b"\n" not in self.pending:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or not selector.select(remaining):
-                    raise ControllerError(
-                        "PUBLICATION_SESSION_TIMEOUT", "publication session timed out"
-                    )
-                chunk = os.read(self.descriptor, min(4096, MAX_FRAME_BYTES + 1 - len(self.pending)))
-                if not chunk:
-                    raise ControllerError("PUBLICATION_SESSION_CLOSED", "consumer disconnected")
-                self.pending.extend(chunk)
-                if len(self.pending) > MAX_FRAME_BYTES:
-                    raise ControllerError(
-                        "INVALID_PUBLICATION_REQUEST", "publication frame is too large"
-                    )
-        line, _, pending = self.pending.partition(b"\n")
-        self.pending = bytearray(pending)
-        value = json.loads(line.decode("utf-8"), object_pairs_hook=_unique_object)
+        regular = stat.S_ISREG(os.fstat(self.descriptor).st_mode)
+        line = self._next_frame()
+        if line is None:
+            if regular:
+                while (line := self._next_frame()) is None:
+                    chunk = os.read(self.descriptor, min(4096, MAX_FRAME_BYTES + 1 - len(self.pending)))
+                    if not chunk:
+                        raise ControllerError("PUBLICATION_SESSION_CLOSED", "consumer disconnected")
+                    self.pending.extend(chunk)
+            else:
+                deadline = time.monotonic() + IDLE_TIMEOUT_SECONDS
+                with selectors.PollSelector() as selector:
+                    selector.register(self.descriptor, selectors.EVENT_READ)
+                    while (line := self._next_frame()) is None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0 or not selector.select(remaining):
+                            raise ControllerError(
+                                "PUBLICATION_SESSION_TIMEOUT", "publication session timed out"
+                            )
+                        chunk = os.read(self.descriptor, min(4096, MAX_FRAME_BYTES + 1 - len(self.pending)))
+                        if not chunk:
+                            raise ControllerError("PUBLICATION_SESSION_CLOSED", "consumer disconnected")
+                        self.pending.extend(chunk)
+        try:
+            value = json.loads(line.decode("utf-8"), object_pairs_hook=_unique_object)
+        except RecursionError as exc:
+            raise ControllerError(
+                "INVALID_PUBLICATION_REQUEST", "publication frame exceeds maximum nesting depth"
+            ) from exc
         if not isinstance(value, dict):
             raise ControllerError(
                 "INVALID_PUBLICATION_REQUEST", "publication frame must be an object"
@@ -123,7 +149,7 @@ class PublicationSession:
         self.store = MetadataStore(initial.common_dir)
         self.identity: dict[str, Any] | None = None
 
-    def _guard(self) -> tuple[dict[str, Any], str]:
+    def _guard(self, *, remote_oid: str | None = None) -> tuple[dict[str, Any], str]:
         if not self.store.flock_held:
             raise ControllerError(
                 "PUBLICATION_SESSION_UNLOCKED", "publication session requires its lock"
@@ -192,8 +218,8 @@ class PublicationSession:
         validate_branch_name(item.path, lease.branch)
         if lease.target_ref != f"refs/heads/{lease.branch}":
             raise ControllerError("LEASE_MISMATCH", "publication target ref differs")
-        fetch = _git(item.path, "remote", "get-url", "--all", lease.remote, check=False)
-        push = _git(item.path, "remote", "get-url", "--push", "--all", lease.remote, check=False)
+        fetch = _git(item.path, "remote", "get-url", "--all", "--", lease.remote, check=False)
+        push = _git(item.path, "remote", "get-url", "--push", "--all", "--", lease.remote, check=False)
         if (
             fetch.returncode
             or push.returncode
@@ -221,7 +247,8 @@ class PublicationSession:
             raise ControllerError(
                 "PUBLICATION_SESSION_DRIFT", "publication identity changed during session"
             )
-        return identity, self._remote_oid(identity)
+        observed = remote_oid if remote_oid is not None else self._remote_oid(identity)
+        return identity, observed
 
     def _remote_oid(self, identity: dict[str, Any]) -> str:
         result = _git(
@@ -229,6 +256,7 @@ class PublicationSession:
             "ls-remote",
             "--exit-code",
             "--refs",
+            "--",
             identity["remote"],
             identity["target_ref"],
             check=False,
@@ -262,8 +290,11 @@ class PublicationSession:
             )
         return "PUSH_CANDIDATE"
 
-    def verify(self) -> dict[str, Any]:
-        identity, observed = self._guard()
+    def _guard_identity(self) -> dict[str, Any]:
+        return self._guard(remote_oid="")[0]
+
+    def verify(self, *, remote_oid: str | None = None) -> dict[str, Any]:
+        identity, observed = self._guard(remote_oid=remote_oid)
         self.identity = identity
         return {
             "identity": identity,
@@ -271,15 +302,15 @@ class PublicationSession:
             "remote_oid": observed,
         }
 
-    def authorize(self) -> dict[str, Any]:
-        identity, observed = self._guard()
+    def authorize(self, *, remote_oid: str | None = None) -> dict[str, Any]:
+        identity, observed = self._guard(remote_oid=remote_oid)
         return {
             "identity": identity,
             "action": self._action(identity, observed),
             "remote_oid": observed,
         }
 
-    def complete(self, result: object) -> dict[str, Any]:
+    def complete(self, result: object, *, remote_oid: str | None = None) -> dict[str, Any]:
         if not isinstance(result, dict) or set(result) != {
             "record_id",
             "executor",
@@ -297,7 +328,7 @@ class PublicationSession:
             raise ControllerError(
                 "INVALID_PUBLICATION_REQUEST", "execution result identity differs"
             )
-        identity, observed = self._guard()
+        identity, observed = self._guard(remote_oid=remote_oid)
         if observed != self.candidate_oid:
             raise ControllerError(
                 "PUBLICATION_NOT_OBSERVED", "remote does not equal the exact leased candidate"
@@ -341,17 +372,30 @@ def run_session(repository: Path, *, candidate_oid: str, lease_id: str, run_id: 
     try:
         session = PublicationSession(repository, candidate_oid, lease_id, run_id)
         channel = SessionInput(sys.stdin.fileno())
-        with session.store.lock(exclusive=True):
-            verified = session.verify()
-            _emit(sys.stdout, "verified", **verified)
-            request = channel.read()
-            _request(request, "authorize", verified["identity"])
-            _emit(sys.stdout, "authorized", **session.authorize())
-            request = channel.read()
-            _request(request, "complete", verified["identity"])
-            _emit(sys.stdout, "completed", **session.complete(request["result"]))
+        with session.store.lock(exclusive=False):
+            identity = session._guard_identity()
+        verified_remote = session._remote_oid(identity)
+        with session.store.lock(exclusive=False):
+            verified = session.verify(remote_oid=verified_remote)
+        _emit(sys.stdout, "verified", **verified)
+        request = channel.read()
+        _request(request, "authorize", verified["identity"])
+        with session.store.lock(exclusive=False):
+            identity = session._guard_identity()
+        auth_remote = session._remote_oid(identity)
+        with session.store.lock(exclusive=False):
+            authorized = session.authorize(remote_oid=auth_remote)
+        _emit(sys.stdout, "authorized", **authorized)
+        request = channel.read()
+        _request(request, "complete", verified["identity"])
+        with session.store.lock(exclusive=False):
+            identity = session._guard_identity()
+        complete_remote = session._remote_oid(identity)
+        with session.store.lock(exclusive=False):
+            completed = session.complete(request["result"], remote_oid=complete_remote)
+        _emit(sys.stdout, "completed", **completed)
         return 0
-    except (ControllerError, OSError, UnicodeError, ValueError) as exc:
+    except (ControllerError, OSError, RecursionError, UnicodeError, ValueError) as exc:
         with suppress(BrokenPipeError):
             _emit(
                 sys.stdout,

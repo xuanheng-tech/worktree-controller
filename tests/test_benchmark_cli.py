@@ -230,7 +230,8 @@ def test_writer_checks_use_real_holder_and_leave_metadata_unchanged(benchmark, c
             assert diagnostic == json.loads((tmp_path / "call.profile.json").read_text())
             assert diagnostic["metadata_snapshot_loads"] >= 1
             assert diagnostic["metadata_snapshot_seconds"] > 0
-            assert diagnostic["metadata_decoders"]["release_receipt_from_dict"] >= 2
+            assert "record_from_dict" in diagnostic["metadata_decoders"]
+            assert diagnostic["metadata_decoders"].get("release_receipt_from_dict", 0) == 0
             assert diagnostic["top_cumulative"]
         else:
             assert "profile" not in result and not (tmp_path / "call.profile.json").exists()

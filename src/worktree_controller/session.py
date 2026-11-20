@@ -438,6 +438,9 @@ def _end_session(
     }
 
 
+end_session = _end_session
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="worktree-session-end",

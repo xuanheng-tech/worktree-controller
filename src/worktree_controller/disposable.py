@@ -22,15 +22,21 @@ from .environment import (
     discover_python_project,
     unsafe_ignored_paths,
 )
-from .git_backend import head_paths, ignored_paths, path_is_ignored, tracked_paths
+from .git_backend import (
+    head_paths,
+    ignored_paths,
+    path_is_ignored,
+    resolve_repository,
+    tracked_paths,
+)
 from .models import ControllerError
+from .policy import load_policy
 
 CONTRACT = "typed-disposable-resource/v1"
-RESOURCE_TYPES = {
-    "backend/.venv": "python-venv",
-    "frontend/node_modules": "node-modules",
-    "frontend/dist": "frontend-build-output",
+DEFAULT_RESOURCE_TYPES = {
+    ".venv": "python-venv",
 }
+RESOURCE_TYPES = DEFAULT_RESOURCE_TYPES
 MAX_IDENTITY_BYTES = 8 * 1_048_576
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -122,36 +128,63 @@ def _fd_inventory(
 
     def visit(parent_fd: int, name: str, relative: str) -> None:
         nonlocal size
-        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        if len(entries) >= MAX_VENV_ENTRIES:
-            raise _blocked("resource inventory exceeded its bound", "RESOURCE_SCAN_LIMIT")
-        digest.update(os.fsencode(relative) + b"\0")
-        digest.update(":".join(map(str, _signature(metadata))).encode())
-        size += metadata.st_size
-        entries[relative] = _TreeEntry(metadata)
-        if stat.S_ISDIR(metadata.st_mode):
-            with _open_directory(parent_fd, name, _inode(metadata)) as directory:
-                names = tuple(sorted(os.listdir(directory.fd)))
-                entries[relative] = _TreeEntry(metadata, names)
-                for child in names:
-                    visit(directory.fd, child, child if relative == "." else f"{relative}/{child}")
-                directory.check()
-                if _signature(os.fstat(directory.fd)) != _signature(metadata):
+    stack: list[list[Any]] = [[directory_fd, ".", ".", None, None, None]]
+    opened_stack: list[_Directory] = []
+    try:
+        while stack:
+            frame = stack[-1]
+            parent_fd, name, relative, metadata, opened_dir, remaining = frame
+            if metadata is None:
+                metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                if len(entries) >= MAX_VENV_ENTRIES:
+                    raise _blocked("resource inventory exceeded its bound", "RESOURCE_SCAN_LIMIT")
+                digest.update(os.fsencode(relative) + b"\0")
+                digest.update(":".join(map(str, _signature(metadata))).encode())
+                size += metadata.st_size
+                entries[relative] = _TreeEntry(metadata)
+                if stat.S_ISDIR(metadata.st_mode):
+                    dir_cm = _open_directory(parent_fd, name, _inode(metadata))
+                    opened = dir_cm.__enter__()
+                    opened_stack.append((opened, dir_cm))
+                    names = tuple(sorted(os.listdir(opened.fd)))
+                    entries[relative] = _TreeEntry(metadata, names)
+                    frame[3] = metadata
+                    frame[4] = opened
+                    frame[5] = list(names)
+                    continue
+                if stat.S_ISLNK(metadata.st_mode):
+                    link = os.readlink(name, dir_fd=parent_fd)
+                    digest.update(os.fsencode(link))
+                    entries[relative] = _TreeEntry(metadata, link=link)
+                elif not (
+                    stat.S_ISREG(metadata.st_mode)
+                    or (preserved_fifo and stat.S_ISFIFO(metadata.st_mode))
+                ):
                     raise _race()
-        elif stat.S_ISLNK(metadata.st_mode):
-            link = os.readlink(name, dir_fd=parent_fd)
-            digest.update(os.fsencode(link))
-            entries[relative] = _TreeEntry(metadata, link=link)
-        elif not (
-            stat.S_ISREG(metadata.st_mode) or (preserved_fifo and stat.S_ISFIFO(metadata.st_mode))
-        ):
-            raise _race()
-        if _signature(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) != _signature(
-            metadata
-        ):
-            raise _race()
-
-    visit(directory_fd, ".", ".")
+                if _signature(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) != _signature(
+                    metadata
+                ):
+                    raise _race()
+                stack.pop()
+            else:
+                if remaining:
+                    child = remaining.pop(0)
+                    child_rel = child if relative == "." else f"{relative}/{child}"
+                    stack.append([opened_dir.fd, child, child_rel, None, None, None])
+                    continue
+                opened_dir.check()
+                if _signature(os.fstat(opened_dir.fd)) != _signature(metadata):
+                    raise _race()
+                if opened_stack and opened_stack[-1][0] is opened_dir:
+                    opened_stack.pop()[1].__exit__(None, None, None)
+                if _signature(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) != _signature(
+                    metadata
+                ):
+                    raise _race()
+                stack.pop()
+    finally:
+        while opened_stack:
+            opened_stack.pop()[1].__exit__(None, None, None)
     return entries, {"tree_sha256": digest.hexdigest(), "entries": len(entries), "bytes": size}
 
 
@@ -225,62 +258,134 @@ def _delete_fd_tree(
             if not stat.S_ISDIR(e.metadata.st_mode)
         }
 
-    def check_chain() -> None:
-        for anchor in chain:
+    def check_chain(active_chain: tuple[_Directory, ...]) -> None:
+        for anchor in active_chain:
             anchor.check()
 
-    expected = entries[relative]
-    check_chain()
-    if tuple(sorted(os.listdir(directory.fd))) != expected.children:
-        raise _race()
-    for name in expected.children:
-        child_path = name if relative == "." else f"{relative}/{name}"
-        child = entries[child_path]
-        metadata = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
-        if _signature(metadata) != _signature(child.metadata):
-            raise _race()
-        if stat.S_ISDIR(metadata.st_mode):
-            with _open_directory(directory.fd, name, _inode(metadata)) as opened:
-                _delete_fd_tree(
-                    opened,
-                    child_path,
-                    entries,
-                    (*chain, opened),
-                    link_state,
-                    external_contents,
-                    external_survivors,
+    stack: list[list[Any]] = [[directory, ".", chain, None]]
+    opened_stack: list[tuple[_Directory, Any]] = []
+    try:
+        while stack:
+            frame = stack[-1]
+            cur_dir, cur_rel, cur_chain, remaining = frame
+            if remaining is None:
+                expected = entries[cur_rel]
+                check_chain(cur_chain)
+                if tuple(sorted(os.listdir(cur_dir.fd))) != expected.children:
+                    raise _race()
+                frame[3] = list(expected.children)
+            elif remaining:
+                name = remaining.pop(0)
+                child_path = name if cur_rel == "." else f"{cur_rel}/{name}"
+                child = entries[child_path]
+                metadata = os.stat(name, dir_fd=cur_dir.fd, follow_symlinks=False)
+                if _signature(metadata) != _signature(child.metadata):
+                    raise _race()
+                if stat.S_ISDIR(metadata.st_mode):
+                    dir_cm = _open_directory(cur_dir.fd, name, _inode(metadata))
+                    opened = dir_cm.__enter__()
+                    opened_stack.append((opened, dir_cm))
+                    stack.append([opened, child_path, (*cur_chain, opened), None])
+                    continue
+                key = (metadata.st_dev, metadata.st_ino)
+                expected_identity = link_state.get(key)
+                if expected_identity is None:
+                    raise _race()
+                external = external_contents.get(child_path)
+                proof = _unlink_leaf(
+                    cur_dir.fd,
+                    name,
+                    expected_identity,
+                    link=child.link,
+                    chain=cur_chain,
+                    external=external,
                 )
-        else:
-            key = (metadata.st_dev, metadata.st_ino)
-            expected_identity = link_state.get(key)
-            if expected_identity is None:
-                raise _race()
-            external = external_contents.get(child_path)
-            proof = _unlink_leaf(
-                directory.fd, name, expected_identity, link=child.link, chain=chain, external=external
-            )
-            link_state[key] = proof["identity"]
-            if external is not None:
-                external_survivors[f"{key[0]}:{key[1]}"] = proof
-        try:
-            os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            raise _race()
-    check_chain()
-    if os.listdir(directory.fd):
-        raise _race()
-    os.rmdir(directory.name, dir_fd=directory.parent_fd)
-    if os.fstat(directory.fd).st_nlink != 0:
-        raise _race()
+                link_state[key] = proof["identity"]
+                if external is not None:
+                    external_survivors[f"{key[0]}:{key[1]}"] = proof
+                try:
+                    os.stat(name, dir_fd=cur_dir.fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise _race()
+            else:
+                check_chain(cur_chain)
+                if os.listdir(cur_dir.fd):
+                    raise _race()
+                os.rmdir(cur_dir.name, dir_fd=cur_dir.parent_fd)
+                if os.fstat(cur_dir.fd).st_nlink != 0:
+                    raise _race()
+                stack.pop()
+                if opened_stack and opened_stack[-1][0] is cur_dir:
+                    opened_stack.pop()[1].__exit__(None, None, None)
+    finally:
+        while opened_stack:
+            opened_stack.pop()[1].__exit__(None, None, None)
     return external_survivors
+
+
+def safe_rmtree_nofollow(root: Path, relative: str) -> None:
+    """Iteratively remove a worktree-local directory tree without following symlinks."""
+    rel_parts = tuple(part for part in Path(relative).parts if part not in {"", "."})
+    if not rel_parts or any(part == ".." for part in rel_parts) or not root.is_absolute():
+        raise _race()
+    with ExitStack() as stack:
+        fs_fd = os.open("/", DIRECTORY_FLAGS)
+        stack.callback(os.close, fs_fd)
+        parent_fd = fs_fd
+        for part in root.parts[1:]:
+            opened = stack.enter_context(
+                _open_directory(parent_fd, part, _inode(os.stat(part, dir_fd=parent_fd, follow_symlinks=False)))
+            )
+            parent_fd = opened.fd
+        for part in rel_parts[:-1]:
+            opened = stack.enter_context(
+                _open_directory(parent_fd, part, _inode(os.stat(part, dir_fd=parent_fd, follow_symlinks=False)))
+            )
+            parent_fd = opened.fd
+        target_name = rel_parts[-1]
+        try:
+            target_stat = os.stat(target_name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISDIR(target_stat.st_mode):
+            raise _race()
+        target_dir = stack.enter_context(_open_directory(parent_fd, target_name, _inode(target_stat)))
+        walk_stack: list[list[Any]] = [[target_dir, None]]
+        opened_dirs: list[tuple[_Directory, Any]] = []
+        try:
+            while walk_stack:
+                frame = walk_stack[-1]
+                cur_dir, names = frame
+                if names is None:
+                    frame[1] = sorted(os.listdir(cur_dir.fd))
+                    continue
+                if frame[1]:
+                    entry = frame[1].pop(0)
+                    meta = os.stat(entry, dir_fd=cur_dir.fd, follow_symlinks=False)
+                    if stat.S_ISDIR(meta.st_mode):
+                        dir_cm = _open_directory(cur_dir.fd, entry, _inode(meta))
+                        opened = dir_cm.__enter__()
+                        opened_dirs.append((opened, dir_cm))
+                        walk_stack.append([opened, None])
+                    else:
+                        os.unlink(entry, dir_fd=cur_dir.fd)
+                    continue
+                cur_dir.check()
+                os.rmdir(cur_dir.name, dir_fd=cur_dir.parent_fd)
+                walk_stack.pop()
+                if opened_dirs and opened_dirs[-1][0] is cur_dir:
+                    opened_dirs.pop()[1].__exit__(None, None, None)
+        finally:
+            while opened_dirs:
+                opened_dirs.pop()[1].__exit__(None, None, None)
 
 
 def delete_typed_resource(root: Path, relative: str, evidence: dict[str, Any]) -> dict[str, Any]:
     """Delete only through verified directory FDs; paths never authorize a destructive call."""
     declaration = evidence.get("build_declaration")
-    if (relative not in RESOURCE_TYPES and declaration is None) or not root.is_absolute():
+    if (relative not in resource_types_for(root) and declaration is None) or not root.is_absolute():
         raise _race()
     if declaration is not None:
         from .build_resources import check_resource
@@ -449,9 +554,15 @@ def _venv_identity(root: Path, resource: Path) -> dict[str, Any]:
     }
 
 
-def _frontend_identity(root: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
-    project = project_identity(root, "frontend/package.json")
-    lock = project_identity(root, "frontend/package-lock.json")
+def _project_relative(project_dir: str, filename: str) -> str:
+    return filename if project_dir in {"", "."} else f"{project_dir}/{filename}"
+
+
+def _frontend_identity(
+    root: Path, project_dir: str = "."
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
+    project = project_identity(root, _project_relative(project_dir, "package.json"))
+    lock = project_identity(root, _project_relative(project_dir, "package-lock.json"))
     package, locked = project_json(project), project_json(lock)
     packages = locked.get("packages")
     if (
@@ -462,10 +573,10 @@ def _frontend_identity(root: Path) -> tuple[dict[str, Any], dict[str, Any], dict
         or not isinstance(packages.get(""), dict)
         or packages[""].get("name") != package["name"]
     ):
-        raise _blocked("frontend requires an npm project and matching non-workspace lock")
+        raise _blocked(f"{project_dir} requires an npm project and matching non-workspace lock")
     for kind in ("dependencies", "devDependencies", "optionalDependencies"):
         if package.get(kind, {}) != packages[""].get(kind, {}):
-            raise _blocked("frontend dependency declarations differ from lock")
+            raise _blocked(f"{project_dir} dependency declarations differ from lock")
     return (
         package,
         packages,
@@ -477,13 +588,19 @@ def _frontend_identity(root: Path) -> tuple[dict[str, Any], dict[str, Any], dict
 
 
 def _node_identity(root: Path, resource: Path) -> dict[str, str]:
-    package, packages, evidence = _frontend_identity(root)
+    rel = resource.relative_to(root).as_posix()
+    project_dir = Path(rel).parent.as_posix()
+    base_dir = root if project_dir == "." else root / project_dir
+    package, packages, evidence = _frontend_identity(root, project_dir)
     installed_bytes = _regular(resource / ".package-lock.json")
     installed = project_json(installed_bytes)
     entries = installed.get("packages")
     if installed.get("name") != package["name"] or not isinstance(entries, dict) or not entries:
         raise _blocked("node_modules lacks its npm installed-tree identity")
-    allowed = {".bin", ".package-lock.json", ".vite-temp"}
+    dependencies = {**package.get("dependencies", {}), **package.get("devDependencies", {})}
+    allowed = {".bin", ".package-lock.json"}
+    if "vite" in dependencies:
+        allowed.add(".vite-temp")
     for relative, entry in entries.items():
         parts = relative.split("/")
         if (
@@ -495,7 +612,7 @@ def _node_identity(root: Path, resource: Path) -> dict[str, str]:
             or entry != packages.get(relative)
         ):
             raise _blocked("installed dependency is not bound to the committed npm lock")
-        manifest = project_json(_regular(root / "frontend" / relative / "package.json"))
+        manifest = project_json(_regular(base_dir / relative / "package.json"))
         if not entry.get("version") or manifest.get("version") != entry["version"]:
             raise _blocked("installed package version differs from lock")
         allowed.add(parts[1])
@@ -544,11 +661,14 @@ def _default_output_config(text: str) -> bool:
 
 
 def _dist_identity(root: Path, resource: Path) -> dict[str, str]:
-    package, _, evidence = _frontend_identity(root)
+    rel = resource.relative_to(root).as_posix()
+    project_dir = Path(rel).parent.as_posix()
+    base_dir = root if project_dir == "." else root / project_dir
+    package, _, evidence = _frontend_identity(root, project_dir)
     dependencies = {**package.get("dependencies", {}), **package.get("devDependencies", {})}
     if package.get("scripts", {}).get("build") != "vite build" or "vite" not in dependencies:
-        raise _blocked("frontend/dist is not a supported declared Vite build output")
-    configs = sorted((root / "frontend").glob("vite.config.*"))
+        raise _blocked(f"{rel} is not a supported declared Vite build output")
+    configs = sorted(base_dir.glob("vite.config.*"))
     if len(configs) > 1:
         raise _blocked("ambiguous Vite configuration")
     if configs:
@@ -564,7 +684,7 @@ def _dist_identity(root: Path, resource: Path) -> dict[str, str]:
         ):
             raise _blocked("Vite output cannot be established without executing config")
         evidence["build_config_sha256"] = hashlib.sha256(config).hexdigest()
-    project_identity(root, "frontend/index.html")
+    project_identity(root, _project_relative(project_dir, "index.html"))
     _regular(resource / "index.html")
     if not (resource / "assets").is_dir():
         raise _blocked("frontend build output lacks assets")
@@ -620,12 +740,35 @@ def _tree_identity(
     return {"tree_sha256": digest.hexdigest(), "entries": count, "bytes": size}
 
 
-def resource_evidence(root: Path, relative: str, *, build_declaration: dict[str, Any] | None = None) -> dict[str, Any]:
+def resource_types_for(
+    root: Path, resource_types: dict[str, str] | None = None
+) -> dict[str, str]:
+    if resource_types is not None:
+        return dict(resource_types)
+    if (root / ".agents" / "worktree-policy.toml").is_file():
+        loaded = load_policy(root)
+        return dict(loaded.disposable_resources) if loaded.disposable_resources_configured else dict(DEFAULT_RESOURCE_TYPES)
+    try:
+        canonical, _ = resolve_repository(root)
+    except ControllerError:
+        return dict(DEFAULT_RESOURCE_TYPES)
+    loaded = load_policy(canonical)
+    return dict(loaded.disposable_resources) if loaded.disposable_resources_configured else dict(DEFAULT_RESOURCE_TYPES)
+
+
+def resource_evidence(
+    root: Path,
+    relative: str,
+    *,
+    build_declaration: dict[str, Any] | None = None,
+    resource_types: dict[str, str] | None = None,
+) -> dict[str, Any]:
     if build_declaration is not None:
         from .build_resources import check_resource
 
         check_resource(root, relative, build_declaration)
-    if relative not in RESOURCE_TYPES and build_declaration is None:
+    configured = resource_types_for(root, resource_types)
+    if relative not in configured and build_declaration is None:
         raise _blocked("resource path is outside the typed contract", "UNKNOWN_IGNORED_RESOURCE")
     resource = root / relative
     if resource.is_symlink() or resource.resolve(strict=True) != resource or not resource.is_dir():
@@ -634,12 +777,14 @@ def resource_evidence(root: Path, relative: str, *, build_declaration: dict[str,
         raise _blocked("resource contains tracked or staged content", "TRACKED_RESOURCE")
     if not path_is_ignored(root, relative):
         raise _blocked("resource is not Git-ignored", "RESOURCE_NOT_IGNORED")
-    tree = _tree_identity(resource) if build_declaration or RESOURCE_TYPES[relative] != "python-venv" else None
+    kind = configured.get(relative)
+    tree = _tree_identity(resource) if build_declaration or kind != "python-venv" else None
     identity = {"build_declaration": build_declaration} if build_declaration else {
         "python-venv": _venv_identity,
         "node-modules": _node_identity,
         "frontend-build-output": _dist_identity,
-    }[RESOURCE_TYPES[relative]](root, resource)
+        "build-output": _dist_identity,
+    }[str(kind)](root, resource)
     tree = tree or _tree_identity(
         resource,
         interpreter_links=tuple(identity.get("external_interpreter_links", ())),
@@ -655,11 +800,17 @@ def resource_evidence(root: Path, relative: str, *, build_declaration: dict[str,
     return {**tree, **identity, "path_identities": path_identities}
 
 
-def classify_resources(root: Path, *, build_resources: dict[str, dict[str, Any]] | None = None) -> tuple[dict[str, Any], ...]:
+def classify_resources(
+    root: Path,
+    *,
+    build_resources: dict[str, dict[str, Any]] | None = None,
+    resource_types: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], ...]:
     """Read-only inventory; legacy release caches receive no typed cleanup action."""
     ignored = ignored_paths(root)
     build_resources = build_resources or {}
-    known = RESOURCE_TYPES.keys() | build_resources.keys()
+    configured = resource_types_for(root, resource_types)
+    known = configured.keys() | build_resources.keys()
     paths = {path.rstrip("/") for path in ignored}
     paths.update(relative for relative in known if os.path.lexists(root / relative))
     rows = []
@@ -667,7 +818,7 @@ def classify_resources(root: Path, *, build_resources: dict[str, dict[str, Any]]
         if any(relative.startswith(candidate + "/") for candidate in known):
             continue
         row: dict[str, Any] = {
-            "resource_type": "registered-build-output" if relative in build_resources else RESOURCE_TYPES.get(relative, "unknown"),
+            "resource_type": "registered-build-output" if relative in build_resources else configured.get(relative, "unknown"),
             "path": relative,
             "classification": "blocked",
             "cleanup_action": "none",
@@ -675,7 +826,12 @@ def classify_resources(root: Path, *, build_resources: dict[str, dict[str, Any]]
         }
         if relative in known:
             try:
-                row["evidence"] = resource_evidence(root, relative, build_declaration=build_resources.get(relative))
+                row["evidence"] = resource_evidence(
+                    root,
+                    relative,
+                    build_declaration=build_resources.get(relative),
+                    resource_types=configured,
+                )
                 row.update(classification="disposable", cleanup_action="remove-tree")
             except ControllerError as exc:
                 row.update(blocker=exc.code, reason=str(exc))

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from .disposable import DIRECTORY_FLAGS, _Directory, _inode, _open_directory
-from .git_backend import head_paths, inventory, path_is_ignored, tracked_paths
+from .git_backend import head_paths, inventory, path_is_ignored, resolve_repository, tracked_paths
 from .models import ControllerError
 from .store import MetadataStore
 
@@ -146,7 +146,7 @@ def _regular_fd(parent: int, name: str, expected: list[int]) -> Iterator[int]:
         metadata = os.fstat(pin)
         if not stat.S_ISREG(metadata.st_mode) or _identity(metadata) != expected:
             raise _fail("PRESERVATION_SOURCE_CHANGED", "regular file identity changed")
-        fd = os.open(f"/proc/self/fd/{pin}", os.O_RDONLY | os.O_CLOEXEC | os.O_NOATIME)
+        fd = os.open(f"/proc/self/fd/{pin}", os.O_RDONLY | os.O_CLOEXEC)
         try:
             if _identity(os.fstat(fd)) != expected:
                 raise _fail("PRESERVATION_SOURCE_CHANGED", "opened file identity changed")
@@ -203,8 +203,15 @@ class Tree:
             raise _fail("PRESERVATION_SCAN_BLOCKED", "source/destination scan is incomplete")
 
 
-def scan_tree(directory: _Directory, chain: tuple[_Directory, ...]) -> Tree:
+def scan_tree(
+    directory: _Directory,
+    chain: tuple[_Directory, ...],
+    *,
+    hash_single_link: bool = True,
+    hash_inodes: Any = (),
+) -> Tree:
     """Hash every regular file; never follow links or open FIFO endpoints."""
+    hash_inode_set = frozenset(hash_inodes)
     manifest: list[dict[str, Any]] = []
     identities: dict[str, list[int]] = {}
     counts = dict(
@@ -218,74 +225,105 @@ def scan_tree(directory: _Directory, chain: tuple[_Directory, ...]) -> Tree:
         unreadable_regular_files=0,
     )
     errors: list[dict[str, Any]] = []
-
-    def visit(parent: int, name: str, relative: str, anchors: tuple[_Directory, ...]) -> None:
-        if len(identities) >= MAX_ENTRIES:
-            raise _fail("PRESERVATION_SCAN_LIMIT", "tree exceeds the preservation entry bound")
-        _check_chain(anchors)
-        try:
-            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
-        except OSError as exc:
-            counts["metadata_errors"] += 1
-            errors.append({"path": relative, "code": "METADATA_UNREADABLE", "errno": exc.errno})
-            return
-        identity = _identity(metadata)
-        identities[relative] = identity
-        row: dict[str, Any] = {
-            "path": relative,
-            "mode": stat.S_IMODE(metadata.st_mode),
-            "ownership": {"uid": metadata.st_uid, "gid": metadata.st_gid},
-        }
-        manifest.append(row)
-        mode = metadata.st_mode
-        try:
-            if stat.S_ISDIR(mode):
-                row["type"] = "directory"
-                counts["directories"] += 1
-                with _open_directory(parent, name, _inode(metadata)) as opened:
-                    names = sorted(os.listdir(opened.fd))
-                    for child in names:
-                        visit(
-                            opened.fd,
-                            child,
-                            child if relative == "." else f"{relative}/{child}",
-                            (*anchors, opened),
-                        )
-                    opened.check()
-                    if sorted(os.listdir(opened.fd)) != names:
-                        raise _fail("PRESERVATION_SOURCE_CHANGED", "directory entries changed")
-            elif stat.S_ISREG(mode):
-                row.update(type="regular", size=metadata.st_size)
-                counts["regular_files"] += 1
-                counts["total_regular_file_bytes"] += metadata.st_size
+    # Explicit post-order frame: (parent_fd, name, relative, anchors, opened_dir, expected_names, children)
+    stack: list[list[Any]] = [
+        [directory.parent_fd, directory.name, ".", chain, None, None, None]
+    ]
+    opened_stack: list[tuple[_Directory, Any]] = []
+    try:
+        while stack:
+            frame = stack[-1]
+            parent_fd, name, relative, anchors, opened_dir, expected_names, children = frame
+            if opened_dir is None:
+                if len(identities) >= MAX_ENTRIES:
+                    raise _fail("PRESERVATION_SCAN_LIMIT", "tree exceeds the preservation entry bound")
+                _check_chain(anchors)
                 try:
-                    with _regular_fd(parent, name, identity) as fd:
-                        size, digest = _transfer(fd)
-                    if size != metadata.st_size:
-                        raise _fail("PRESERVATION_SOURCE_CHANGED", "file size changed")
-                    row["content_sha256"] = digest
+                    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
                 except OSError as exc:
-                    counts["unreadable_regular_files"] += 1
-                    errors.append(
-                        {"path": relative, "code": "REGULAR_FILE_UNREADABLE", "errno": exc.errno}
-                    )
-            elif stat.S_ISLNK(mode):
-                row.update(type="symlink", target=os.readlink(name, dir_fd=parent))
-                counts["symlinks"] += 1
-            elif stat.S_ISFIFO(mode):
-                row["type"] = "fifo"
-                counts["fifos"] += 1
+                    counts["metadata_errors"] += 1
+                    errors.append({"path": relative, "code": "METADATA_UNREADABLE", "errno": exc.errno})
+                    stack.pop()
+                    continue
+                identity = _identity(metadata)
+                identities[relative] = identity
+                row: dict[str, Any] = {
+                    "path": relative,
+                    "mode": stat.S_IMODE(metadata.st_mode),
+                    "ownership": {"uid": metadata.st_uid, "gid": metadata.st_gid},
+                }
+                manifest.append(row)
+                mode = metadata.st_mode
+                try:
+                    if stat.S_ISDIR(mode):
+                        row["type"] = "directory"
+                        counts["directories"] += 1
+                        dir_cm = _open_directory(parent_fd, name, _inode(metadata))
+                        opened = dir_cm.__enter__()
+                        opened_stack.append((opened, dir_cm))
+                        names = sorted(os.listdir(opened.fd))
+                        frame[4] = opened
+                        frame[5] = names
+                        frame[6] = list(names)
+                        continue
+                    if stat.S_ISREG(mode):
+                        row.update(type="regular", size=metadata.st_size)
+                        counts["regular_files"] += 1
+                        counts["total_regular_file_bytes"] += metadata.st_size
+                        if (
+                            hash_single_link
+                            or metadata.st_nlink > 1
+                            or (metadata.st_dev, metadata.st_ino) in hash_inode_set
+                        ):
+                            try:
+                                with _regular_fd(parent_fd, name, identity) as fd:
+                                    size, digest = _transfer(fd)
+                                if size != metadata.st_size:
+                                    raise _fail("PRESERVATION_SOURCE_CHANGED", "file size changed")
+                                row["content_sha256"] = digest
+                            except OSError as exc:
+                                counts["unreadable_regular_files"] += 1
+                                errors.append(
+                                    {"path": relative, "code": "REGULAR_FILE_UNREADABLE", "errno": exc.errno}
+                                )
+                    elif stat.S_ISLNK(mode):
+                        row.update(type="symlink", target=os.readlink(name, dir_fd=parent_fd))
+                        counts["symlinks"] += 1
+                    elif stat.S_ISFIFO(mode):
+                        row["type"] = "fifo"
+                        counts["fifos"] += 1
+                    else:
+                        row.update(type="unsupported", file_type=stat.S_IFMT(mode))
+                        counts["other_special_nodes"] += 1
+                        errors.append({"path": relative, "code": "UNSUPPORTED_SPECIAL_NODE"})
+                    _check_entry(parent_fd, name, identity)
+                    _check_chain(anchors)
+                except OSError as exc:
+                    counts["metadata_errors"] += 1
+                    errors.append({"path": relative, "code": "METADATA_UNREADABLE", "errno": exc.errno})
+                stack.pop()
             else:
-                row.update(type="unsupported", file_type=stat.S_IFMT(mode))
-                counts["other_special_nodes"] += 1
-                errors.append({"path": relative, "code": "UNSUPPORTED_SPECIAL_NODE"})
-            _check_entry(parent, name, identity)
-            _check_chain(anchors)
-        except OSError as exc:
-            counts["metadata_errors"] += 1
-            errors.append({"path": relative, "code": "METADATA_UNREADABLE", "errno": exc.errno})
-
-    visit(directory.parent_fd, directory.name, ".", chain)
+                if children:
+                    child = children.pop(0)
+                    child_rel = child if relative == "." else f"{relative}/{child}"
+                    stack.append([opened_dir.fd, child, child_rel, (*anchors, opened_dir), None, None, None])
+                    continue
+                opened_dir.check()
+                if sorted(os.listdir(opened_dir.fd)) != expected_names:
+                    raise _fail("PRESERVATION_SOURCE_CHANGED", "directory entries changed")
+                if opened_stack and opened_stack[-1][0] is opened_dir:
+                    opened_stack.pop()[1].__exit__(None, None, None)
+                identity = identities[relative]
+                try:
+                    _check_entry(parent_fd, name, identity)
+                    _check_chain(anchors)
+                except OSError as exc:
+                    counts["metadata_errors"] += 1
+                    errors.append({"path": relative, "code": "METADATA_UNREADABLE", "errno": exc.errno})
+                stack.pop()
+    finally:
+        while opened_stack:
+            opened_stack.pop()[1].__exit__(None, None, None)
     return Tree(manifest, identities, counts, errors)
 
 
@@ -311,8 +349,20 @@ def local_environment_roots(target: Path) -> tuple[Path, ...]:
     Resolving a selected symlink must never exclude an outside environment whose
     editable mapping still refers to the source allocation.
     """
+    from .policy import load_policy
+
+    venv_names = [".venv"]
+    try:
+        canonical, _ = resolve_repository(target)
+        policy = load_policy(canonical)
+    except ControllerError:
+        policy = None
+    if policy is not None:
+        for rel_path, kind in policy.disposable_resources:
+            if kind == "python-venv" and rel_path not in venv_names:
+                venv_names.append(rel_path)
     roots = []
-    for relative in (".venv", "backend/.venv"):
+    for relative in venv_names:
         candidate = target / relative
         if not candidate.is_symlink() and candidate.is_dir() and candidate.resolve(strict=True) == candidate:
             roots.append(candidate)
@@ -476,7 +526,20 @@ def plan_preservation(
     recovery: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if source_relative is None:
-        source_relative = "backend/.venv" if (target / "backend/.venv").exists() and not (target / SOURCE).exists() else SOURCE
+        from .policy import load_policy
+
+        source_relative = SOURCE
+        if not (target / SOURCE).exists():
+            try:
+                configured = [
+                    rel for rel, kind in load_policy(repo).disposable_resources if kind == "python-venv"
+                ]
+            except ControllerError:
+                configured = []
+            for candidate in configured:
+                if (target / candidate).exists():
+                    source_relative = candidate
+                    break
     options = {"recovery": recovery} if recovery is not None else {}
     authority = _authority(repo, target, allocation, owner, version, source_relative=source_relative, **options)
     root = state_root or evidence_root()
@@ -586,91 +649,110 @@ def _copy_node(
             parent, _, name = path.rpartition("/")
             children[parent or "."].append(name)
 
-    def visit(
-        src: _Directory,
-        dst: _Directory,
-        relative: str,
-        schain: tuple[_Directory, ...],
-        dchain: tuple[_Directory, ...],
-    ) -> None:
-        _check_chain(schain)
-        _check_chain(dchain)
-        _check_entry(src.parent_fd, src.name, tree["source_identities"][relative])
-        if sorted(os.listdir(src.fd)) != children[relative]:
-            raise _fail("PRESERVATION_SOURCE_CHANGED", "source entries changed before copying")
-        for name in children[relative]:
-            path = name if relative == "." else f"{relative}/{name}"
-            row = rows[path]
-            expected = tree["source_identities"][path]
-            _check_chain(schain)
-            _check_chain(dchain)
-            _check_entry(src.fd, name, expected)
-            if row["type"] == "directory":
-                with _open_directory(
-                    src.fd, name, _inode(os.stat(name, dir_fd=src.fd, follow_symlinks=False))
-                ) as child:
+    stack: list[list[Any]] = [
+        [source, destination, ".", source_chain, destination_chain, None, None]
+    ]
+    opened_src: list[_Directory] = []
+    opened_dst: list[_Directory] = []
+    try:
+        while stack:
+            frame = stack[-1]
+            src, dst, relative, schain, dchain, pending, initiated = frame
+            if initiated is None:
+                _check_chain(schain)
+                _check_chain(dchain)
+                _check_entry(src.parent_fd, src.name, tree["source_identities"][relative])
+                if sorted(os.listdir(src.fd)) != children[relative]:
+                    raise _fail("PRESERVATION_SOURCE_CHANGED", "source entries changed before copying")
+                frame[5] = list(children[relative])
+                frame[6] = True
+                continue
+            if pending:
+                name = pending.pop(0)
+                path = name if relative == "." else f"{relative}/{name}"
+                row = rows[path]
+                expected = tree["source_identities"][path]
+                _check_chain(schain)
+                _check_chain(dchain)
+                _check_entry(src.fd, name, expected)
+                if row["type"] == "directory":
+                    src_cm = _open_directory(
+                        src.fd, name, _inode(os.stat(name, dir_fd=src.fd, follow_symlinks=False))
+                    )
+                    child = src_cm.__enter__()
+                    opened_src.append((child, src_cm))
                     os.mkdir(name, 0o700, dir_fd=dst.fd)
                     metadata = os.stat(name, dir_fd=dst.fd, follow_symlinks=False)
-                    with _open_directory(dst.fd, name, _inode(metadata)) as copied:
-                        visit(child, copied, path, (*schain, child), (*dchain, copied))
-            elif row["type"] == "regular":
-                with _regular_fd(src.fd, name, expected) as reader:
-                    writer = os.open(
-                        name,
-                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                        0o600,
-                        dir_fd=dst.fd,
+                    dst_cm = _open_directory(dst.fd, name, _inode(metadata))
+                    copied = dst_cm.__enter__()
+                    opened_dst.append((copied, dst_cm))
+                    stack.append([child, copied, path, (*schain, child), (*dchain, copied), None, None])
+                    continue
+                if row["type"] == "regular":
+                    with _regular_fd(src.fd, name, expected) as reader:
+                        writer = os.open(
+                            name,
+                            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                            0o600,
+                            dir_fd=dst.fd,
+                        )
+                        try:
+                            created = _inode(os.fstat(writer))
+                            size, digest = _transfer(reader, writer)
+                            if size != row["size"] or digest != row["content_sha256"]:
+                                raise _fail(
+                                    "PRESERVATION_SOURCE_CHANGED",
+                                    "copied bytes differ from source plan",
+                                )
+                            os.fchmod(writer, row["mode"])
+                            os.fsync(writer)
+                            created_identities[path] = _identity(os.fstat(writer))
+                            if _inode(os.stat(name, dir_fd=dst.fd, follow_symlinks=False)) != created:
+                                raise _fail(
+                                    "PRESERVATION_DESTINATION_CHANGED", "destination file replaced"
+                                )
+                        finally:
+                            os.close(writer)
+                elif row["type"] == "symlink":
+                    if os.readlink(name, dir_fd=src.fd) != row["target"]:
+                        raise _fail("PRESERVATION_SOURCE_CHANGED", "link literal changed")
+                    os.symlink(row["target"], name, dir_fd=dst.fd)
+                    created_identities[path] = _identity(
+                        os.stat(name, dir_fd=dst.fd, follow_symlinks=False)
                     )
+                elif row["type"] == "fifo":
+                    previous_umask = os.umask(0)
                     try:
-                        created = _inode(os.fstat(writer))
-                        size, digest = _transfer(reader, writer)
-                        if size != row["size"] or digest != row["content_sha256"]:
-                            raise _fail(
-                                "PRESERVATION_SOURCE_CHANGED",
-                                "copied bytes differ from source plan",
-                            )
-                        os.fchmod(writer, row["mode"])
-                        os.fsync(writer)
-                        created_identities[path] = _identity(os.fstat(writer))
-                        if _inode(os.stat(name, dir_fd=dst.fd, follow_symlinks=False)) != created:
-                            raise _fail(
-                                "PRESERVATION_DESTINATION_CHANGED", "destination file replaced"
-                            )
+                        os.mkfifo(name, row["mode"], dir_fd=dst.fd)
                     finally:
-                        os.close(writer)
-            elif row["type"] == "symlink":
-                if os.readlink(name, dir_fd=src.fd) != row["target"]:
-                    raise _fail("PRESERVATION_SOURCE_CHANGED", "link literal changed")
-                os.symlink(row["target"], name, dir_fd=dst.fd)
-                created_identities[path] = _identity(
-                    os.stat(name, dir_fd=dst.fd, follow_symlinks=False)
-                )
-            elif row["type"] == "fifo":
-                # No open/read, payload, waiting, chown, or regular-file fallback.
-                # The command is single-threaded; restore the process umask immediately.
-                previous_umask = os.umask(0)
-                try:
-                    os.mkfifo(name, row["mode"], dir_fd=dst.fd)
-                finally:
-                    os.umask(previous_umask)
-                copied = os.stat(name, dir_fd=dst.fd, follow_symlinks=False)
-                if not stat.S_ISFIFO(copied.st_mode) or stat.S_IMODE(copied.st_mode) != row["mode"]:
-                    raise _fail("PRESERVATION_VERIFY_FAILED", "created FIFO type/mode differs")
-                created_identities[path] = _identity(copied)
-            else:
-                raise _fail("UNSUPPORTED_SPECIAL_NODE", "node is outside the preservation contract")
-            _check_entry(src.fd, name, expected)
-            _check_entry(dst.fd, name, created_identities[path])
-            _check_chain(schain)
+                        os.umask(previous_umask)
+                    copied_stat = os.stat(name, dir_fd=dst.fd, follow_symlinks=False)
+                    if not stat.S_ISFIFO(copied_stat.st_mode) or stat.S_IMODE(copied_stat.st_mode) != row["mode"]:
+                        raise _fail("PRESERVATION_VERIFY_FAILED", "created FIFO type/mode differs")
+                    created_identities[path] = _identity(copied_stat)
+                else:
+                    raise _fail("UNSUPPORTED_SPECIAL_NODE", "node is outside the preservation contract")
+                _check_entry(src.fd, name, expected)
+                _check_entry(dst.fd, name, created_identities[path])
+                _check_chain(schain)
+                _check_chain(dchain)
+                continue
+            _check_entry(src.parent_fd, src.name, tree["source_identities"][relative])
             _check_chain(dchain)
-        _check_entry(src.parent_fd, src.name, tree["source_identities"][relative])
-        _check_chain(dchain)
-        os.fchmod(dst.fd, rows[relative]["mode"])
-        os.fsync(dst.fd)
-        created_identities[relative] = _identity(os.fstat(dst.fd))
-        dst.check()
-
-    visit(source, destination, ".", source_chain, destination_chain)
+            os.fchmod(dst.fd, rows[relative]["mode"])
+            os.fsync(dst.fd)
+            created_identities[relative] = _identity(os.fstat(dst.fd))
+            dst.check()
+            if src is not source and opened_src and opened_src[-1][0] is src:
+                opened_src.pop()[1].__exit__(None, None, None)
+            if dst is not destination and opened_dst and opened_dst[-1][0] is dst:
+                opened_dst.pop()[1].__exit__(None, None, None)
+            stack.pop()
+    finally:
+        while opened_dst:
+            opened_dst.pop()[1].__exit__(None, None, None)
+        while opened_src:
+            opened_src.pop()[1].__exit__(None, None, None)
     return created_identities
 
 

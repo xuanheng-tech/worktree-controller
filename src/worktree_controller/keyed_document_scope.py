@@ -1,7 +1,7 @@
-"""Prove independent Nexus records from frozen Git objects, never working files.
+"""Prove independent keyed-document records from frozen Git objects, never working files.
 
-This refines only the known keyed-document overlap. It does not choose merge results,
-change declared ownership, or replace candidate validation and main publication CAS.
+Rules are declared per repository in ``.agents/worktree-policy.toml`` under
+``[keyed_documents]`` (disabled by default, preserving the ordinary file fence).
 """
 
 from __future__ import annotations
@@ -11,19 +11,9 @@ import re
 from pathlib import Path
 
 from .git_backend import _git
-from .models import ControllerError
+from .models import ControllerError, KeyedDocumentRule
+from .policy import load_policy
 
-PROGRESS_PATH = "docs/nexus/business-progress.json"
-PROGRESS_PROFILES = {
-    PROGRESS_PATH: "qp-nexus-progress",
-    "docs/handbook/business-progress.json": "qp-handbook-progress",
-}
-_COLLECTIONS = {
-    "tasks": "authority_key",
-    "development_lines": "id",
-    "modules": "id",
-    "decisions": "id",
-}
 _MAX_BYTES = 2 * 1024 * 1024
 _OID = re.compile(r"[0-9a-f]{40}")
 
@@ -41,15 +31,23 @@ def _reject_constant(value: str) -> None:
     raise ValueError(f"non-JSON constant: {value}")
 
 
-def _document(raw: bytes) -> dict[str, object]:
+def _document(raw: bytes, rule: KeyedDocumentRule) -> dict[str, object]:
     value = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_reject_constant)
-    if (
-        not isinstance(value, dict)
-        or type(value.get("schema_version")) is not int
-        or value.get("schema_version") != 2
-        or value.get("repo_id") != "quant-platform"
-        or set(value) - {*_COLLECTIONS, "schema_version", "repo_id", "note"}
-    ):
+    collections = dict(rule.collections)
+    allowed = {*collections, *rule.extra_fields, "note"}
+    if rule.schema_version is not None:
+        allowed.add("schema_version")
+        if type(value.get("schema_version")) is not int or value.get("schema_version") != rule.schema_version:
+            raise ValueError("unsupported keyed document")
+    else:
+        allowed.add("schema_version")
+    if rule.repo_id is not None:
+        allowed.add("repo_id")
+        if value.get("repo_id") != rule.repo_id:
+            raise ValueError("unsupported keyed document")
+    else:
+        allowed.add("repo_id")
+    if not isinstance(value, dict) or set(value) - allowed:
         raise ValueError("unsupported keyed document")
     return value
 
@@ -68,14 +66,15 @@ def _rows(value: object, identity_key: str) -> dict[str, object]:
     return rows
 
 
-def _changed_keys(before: bytes, after: bytes) -> set[tuple[str, str]]:
-    old, new = _document(before), _document(after)
+def _changed_keys(before: bytes, after: bytes, rule: KeyedDocumentRule) -> set[tuple[str, str]]:
+    old, new = _document(before, rule), _document(after, rule)
+    collections = dict(rule.collections)
     if json.dumps(
-        {k: v for k, v in old.items() if k not in _COLLECTIONS}, sort_keys=True
-    ) != json.dumps({k: v for k, v in new.items() if k not in _COLLECTIONS}, sort_keys=True):
+        {k: v for k, v in old.items() if k not in collections}, sort_keys=True
+    ) != json.dumps({k: v for k, v in new.items() if k not in collections}, sort_keys=True):
         raise ValueError("document metadata changed")
     touched: set[tuple[str, str]] = set()
-    for collection, identity_key in _COLLECTIONS.items():
+    for collection, identity_key in collections.items():
         left = _rows(old.get(collection, []), identity_key)
         right = _rows(new.get(collection, []), identity_key)
         if [key for key in left if key in right] != [key for key in right if key in left]:
@@ -108,11 +107,11 @@ def _blob(repo: Path, commit: str, path: str, *, limit: int = _MAX_BYTES) -> byt
     return raw
 
 
-def _progress(repo: Path, commit: str, path: str) -> tuple[str, bytes]:
+def _progress(repo: Path, commit: str, rule: KeyedDocumentRule) -> tuple[str, bytes]:
     attributes = _blob(repo, commit, ".gitattributes", limit=64 * 1024).decode("utf-8")
-    if f"{path} merge={PROGRESS_PROFILES[path]}" not in attributes.splitlines():
+    if f"{rule.path} merge={rule.merge_driver}" not in attributes.splitlines():
         raise ValueError("keyed merge protocol is not declared")
-    return attributes, _blob(repo, commit, path)
+    return attributes, _blob(repo, commit, rule.path)
 
 
 def independent_progress_scopes(
@@ -121,13 +120,18 @@ def independent_progress_scopes(
     right_paths: tuple[str, ...],
     left_sources: tuple[str, ...],
     right_sources: tuple[str, ...],
+    *,
+    rules: tuple[KeyedDocumentRule, ...] | None = None,
 ) -> bool:
     """Unknown, broad or conflicting evidence retains the ordinary file fence.
 
     The immutable source commits already belong to the existing integration intents.
     Unique merge bases prove what each side actually changes, including source ancestry.
-    Old queued intents can use this proof without replacing their frozen evidence.
     """
+    active_rules = load_policy(repo).keyed_documents if rules is None else rules
+    if not active_rules:
+        return False
+    rule_by_path = {rule.path: rule for rule in active_rules}
     if not left_paths or not right_paths or not left_sources or not right_sources:
         return False
     overlaps = {
@@ -139,8 +143,9 @@ def independent_progress_scopes(
     if len(overlaps) != 1:
         return False
     path, other = next(iter(overlaps))
-    if path != other or path not in PROGRESS_PROFILES:
+    if path != other or path not in rule_by_path:
         return False
+    rule = rule_by_path[path]
     if len(left_sources) > 8 or len(right_sources) > 8:
         return False
     if any(not _OID.fullmatch(source) for source in (*left_sources, *right_sources)):
@@ -154,13 +159,13 @@ def independent_progress_scopes(
                 base = bases[0].decode("ascii")
                 if not _OID.fullmatch(base) or base in (left, right):
                     return False
-                attributes, original = _progress(repo, base, path)
-                left_attributes, left_document = _progress(repo, left, path)
-                right_attributes, right_document = _progress(repo, right, path)
+                attributes, original = _progress(repo, base, rule)
+                left_attributes, left_document = _progress(repo, left, rule)
+                right_attributes, right_document = _progress(repo, right, rule)
                 if attributes != left_attributes or attributes != right_attributes:
                     return False
-                left_keys = _changed_keys(original, left_document)
-                right_keys = _changed_keys(original, right_document)
+                left_keys = _changed_keys(original, left_document, rule)
+                right_keys = _changed_keys(original, right_document, rule)
                 if left_keys & right_keys:
                     return False
         return True

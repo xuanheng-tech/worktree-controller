@@ -491,13 +491,14 @@ def test_fault_injection_between_receipt_and_grant_close_replays(
             **os.environ,
             "PYTHONPATH": str(SOURCE),
             "PYTHONDONTWRITEBYTECODE": "1",
-            "WORKTREE_CONTROLLER_TEST_CRASH_AT": "retirement_receipt_written",
         }
         crashed = subprocess.run(
             [
                 sys.executable,
-                "-m",
-                "worktree_controller.cli",
+                "-c",
+                "import os, sys, worktree_controller.lifecycle as lc, worktree_controller.cli as cli; "
+                "lc._crash_point = lambda stage: os._exit(97) if stage == 'retirement_receipt_written' else None; "
+                "raise SystemExit(cli.main(sys.argv[1:]))",
                 "branch-retirement-complete",
                 "--repo",
                 str(repository.repo),

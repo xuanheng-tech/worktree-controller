@@ -435,6 +435,7 @@ def _publication(repository: RepositoryInventory) -> dict[str, str]:
         repository.canonical_path,
         "ls-remote",
         "--exit-code",
+        "--",
         policy.publication_remote,
         ref,
         check=False,
@@ -829,6 +830,15 @@ def close_delivered(
                         "PRESERVATION_FLOW_REQUIRED",
                         "verified archived source must use its existing preservation release flow",
                     )
+            from .transaction_scope import conflicts
+
+            if conflicts(
+                store, allocation=record.allocation_id, target=item.path, assume_serialized=True
+            ):
+                raise ControllerError(
+                    "INTERRUPTED_TRANSACTION",
+                    "closeout requires resolved allocation transactions",
+                )
             publication = _eligible(
                 repository,
                 snapshot,
@@ -873,6 +883,7 @@ def close_delivered(
                     )
                 updated = record_from_dict(receipt["after_record"])
                 verify_receipt(store, item, updated, snapshot.repository_id)
+                write_receipt = False
             else:
                 receipt = {
                     "contract": CONTRACT,
@@ -889,7 +900,7 @@ def close_delivered(
                 }
                 updated = replace(updated, history=(*updated.history[:-1], event))
                 receipt["after_record"] = record_to_dict(updated)
-                store.write_completion_receipt(receipt_id, receipt)
+                write_receipt = True
             # Git may be changed by a process outside the Controller's repository lock.
             current, latest = _managed_record(
                 inventory(repository_path), store._load_unlocked(), target
@@ -898,6 +909,8 @@ def close_delivered(
                 raise ControllerError(
                     "CLOSEOUT_PLAN_DRIFT", "checkout changed before metadata transition"
                 )
+            if write_receipt:
+                store.write_completion_receipt(receipt_id, receipt)
             store.replace_record(updated)
             code = "CHECKOUT_CLOSED"
     result = envelope("close-delivered")
@@ -1011,6 +1024,7 @@ def archive_retained(
                     raise ControllerError("ARCHIVE_PLAN_DRIFT", "existing archive evidence differs")
                 updated = record_from_dict(receipt["after_record"])
                 verify_archive_receipt(store, item, updated, snapshot.repository_id)
+                write_receipt = False
             else:
                 receipt = {
                     "contract": ARCHIVE_CONTRACT,
@@ -1027,7 +1041,7 @@ def archive_retained(
                 }
                 updated = replace(updated, history=(*updated.history[:-1], event))
                 receipt["after_record"] = record_to_dict(updated)
-                store.write_completion_receipt(receipt_id, receipt)
+                write_receipt = True
             current, latest = _managed_record(
                 inventory(repository_path), store._load_unlocked(), target
             )
@@ -1035,6 +1049,8 @@ def archive_retained(
                 raise ControllerError(
                     "ARCHIVE_PLAN_DRIFT", "checkout changed before metadata transition"
                 )
+            if write_receipt:
+                store.write_completion_receipt(receipt_id, receipt)
             store.replace_record(updated)
             code = "ARCHIVED"
     result = envelope("archive-retained")

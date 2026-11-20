@@ -22,6 +22,7 @@ from .controller import status
 from .git_backend import inventory
 from .lifecycle import _cancel_release_intents
 from .models import (
+    TERMINAL_INTEGRATION_STATES,
     ControllerError,
     MetadataRecord,
     MetadataSnapshot,
@@ -62,10 +63,11 @@ def _recovery_pending(record: MetadataRecord) -> bool:
 
 
 def _integration_bound(snapshot: MetadataSnapshot, allocation_id: str) -> bool:
-    for intent in snapshot.integration_intents.values():
-        if intent.allocation_id == allocation_id:
-            return True
-    return False
+    return any(
+        intent.state not in TERMINAL_INTEGRATION_STATES
+        and (intent.allocation_id == allocation_id or allocation_id in intent.source_allocations)
+        for intent in snapshot.integration_intents.values()
+    )
 
 
 def classify(
@@ -175,7 +177,7 @@ def reconcile_writers(
     converged = 0
     adopted = 0
 
-    with store.lock(exclusive=True):
+    with store.lock(exclusive=not dry_run):
         repository = inventory(repository_path)
         snapshot = store._load_unlocked()
         policy = load_policy(repository.canonical_path)
@@ -330,6 +332,8 @@ def reconcile_writers(
         "reason": (
             f"{converged} writer slot(s) {'reclaimed' if not dry_run else 'would be reclaimed'}"
             if converged
+            else f"{stranded} stranded entitlement(s) {'cleared' if not dry_run else 'would be cleared'}"
+            if stranded
             else "no allocation had a provably inactive writer"
         ),
         "actor": actor,

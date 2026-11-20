@@ -172,10 +172,16 @@ def test_direct_check_of_another_holder_is_refused(direct):
 def test_frozen_holder_writes_into_another_checkout_it_holds(direct):
     repository, path, _, identity = direct
     held, held_allocation = _changed_task(repository, task="held", files=())
-    _lease(repository, held, "held-session")
+    _lease(repository, held, identity["session_id"])
     granted = writer_session.check(path, **identity, access="write", target=held / "new.txt")
     assert granted["admission"] == "CONTINUATION_GRANTED"
     assert granted["target_allocation_id"] == held_allocation
+    other_session, _ = _changed_task(repository, task="other-session-wt", files=())
+    _lease(repository, other_session, "other-session")
+    cross_session_refused = writer_session.check(
+        path, **identity, access="write", target=other_session / "new.txt"
+    )
+    assert cross_session_refused["admission"] == "REFUSED"
     unheld, _ = _changed_task(repository, task="unheld", files=())
     refused = writer_session.check(path, **identity, access="write", target=unheld / "new.txt")
     assert refused["admission"] == "REFUSED"

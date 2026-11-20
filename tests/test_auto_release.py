@@ -1110,7 +1110,10 @@ def test_automatic_release_uses_typed_cleanup_and_preserves_unknown_content(scen
     monkeypatch.setattr(lifecycle, "runtime_authority_evidence", lambda *args, **kwargs: empty_runtime_evidence())
     monkeypatch.setattr(lifecycle, "runtime_references", lambda *args, **kwargs: ())
     monkeypatch.setattr(lifecycle, "editable_references", lambda *args, **kwargs: ())
-    with GitRepository(linked=0, policy_text=POLICY_MANUAL) as repository:
+    with GitRepository(
+        linked=0,
+        policy_text=POLICY_MANUAL + '\n[disposable_resources.paths]\n"frontend/dist" = "frontend-build-output"\n',
+    ) as repository:
         frontend = repository.repo / "frontend"
         frontend.mkdir()
         package = {"name": "fixture", "scripts": {"build": "vite build"},
@@ -1133,7 +1136,9 @@ def test_automatic_release_uses_typed_cleanup_and_preserves_unknown_content(scen
         if scenario == "unknown":
             (source / "unknown").mkdir()
             (source / "unknown/persistent.txt").write_text("preserve this")
-        (repository.repo / ".agents/worktree-policy.toml").write_text(POLICY_AUTO)
+        (repository.repo / ".agents/worktree-policy.toml").write_text(
+            POLICY_AUTO + '\n[disposable_resources.paths]\n"frontend/dist" = "frontend-build-output"\n'
+        )
         if scenario == "no-action":
             original_write = MetadataStore.write_transaction
             def interrupted_write(self, transaction, value):

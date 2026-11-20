@@ -429,7 +429,45 @@ class AdmissionLedger:
                 raise ControllerError("INVALID_RESOURCE_LEDGER", "resource request identity changed")
         return value
 
+    MAX_RETAINED_TERMINAL_REQUESTS = 200
+
     def _save(self, state: dict[str, Any]) -> None:
+        requests = state.get("requests", {})
+        terminal = [
+            (key, row)
+            for key, row in requests.items()
+            if isinstance(row, dict) and row.get("state") in {"RELEASED", "CANCELLED"}
+        ]
+        if len(terminal) > self.MAX_RETAINED_TERMINAL_REQUESTS:
+            terminal.sort(
+                key=lambda item: (
+                    int(item[1].get("updated_at_ns") or item[1].get("created_at_ns") or 0),
+                    item[0],
+                )
+            )
+            overflow = terminal[: len(terminal) - self.MAX_RETAINED_TERMINAL_REQUESTS]
+            if overflow:
+                archive_path = self.root / "archive-requests.jsonl"
+                payload = "".join(
+                    json.dumps({"request_id": key, **row}, sort_keys=True, separators=(",", ":")) + "\n"
+                    for key, row in overflow
+                ).encode("utf-8")
+                self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                descriptor = os.open(
+                    archive_path,
+                    os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    0o600,
+                )
+                try:
+                    view = memoryview(payload)
+                    written = 0
+                    while written < len(payload):
+                        written += os.write(descriptor, view[written:])
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                for key, _ in overflow:
+                    requests.pop(key, None)
         self.backend._atomic_json(self.path, state, compact=True)
 
     def cancel_execution(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -1764,3 +1802,47 @@ def host_execution(action: str, *, target: Path | None = None, request_id: str |
     payload = envelope("host-execution")
     payload["decision"] = decision
     return payload
+
+
+def settle_own_host_execution(request_id: str, *, holder_pid: int) -> dict[str, Any]:
+    """Settle this process's own host execution on exit when no descendants survive."""
+    from .writer_lease import boot_id, holder_is_live, live_descendant_exists, start_ticks
+
+    ledger = AdmissionLedger()
+    if not ledger.path.exists():
+        return {"code": "HOST_EXECUTION_CLEARED", "request_ids": [request_id], "changed": False}
+    current_boot = boot_id()
+    current_ticks = start_ticks(holder_pid)
+    with ledger.locked():
+        state = ledger.read()
+        row = state["requests"].get(request_id)
+        if (
+            row is None
+            or row["request"].get("kind") != "execution"
+            or row["request"].get("allocation_id") is not None
+            or row["request"].get("owner") != os.getuid()
+        ):
+            raise ControllerError("ADMISSION_RECOVERY_REQUIRED", "host execution identity is unavailable")
+        if row["state"] == "RELEASED":
+            return {"code": "HOST_EXECUTION_CLEARED", "request_ids": [request_id], "changed": False}
+        if row["state"] != "ALLOCATED":
+            raise ControllerError("ADMISSION_RECOVERY_REQUIRED", "host execution has not been bound")
+        holders = _host_runtime_holders(row)
+        primary = holders[0]
+        if (
+            primary.pid != holder_pid
+            or primary.boot_id != current_boot
+            or primary.start_ticks != current_ticks
+        ):
+            raise ControllerError("ADMISSION_RECOVERY_REQUIRED", "host execution holder identity changed")
+        for extra in holders[1:]:
+            if holder_is_live(extra):
+                raise ControllerError("RUNTIME_OCCUPIED", "background host runtime holder is still alive")
+        if live_descendant_exists(holder_pid):
+            raise ControllerError("RUNTIME_OCCUPIED", "child or background runtime process is still alive")
+        now_ns = time.time_ns()
+        row["state"] = "RELEASED"
+        row["history"].append({"state": "RELEASED", "at_ns": now_ns})
+        row["updated_at_ns"] = now_ns
+        ledger._save(state)
+    return {"code": "HOST_EXECUTION_CLEARED", "request_ids": [request_id], "changed": True}

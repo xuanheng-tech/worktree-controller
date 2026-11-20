@@ -169,7 +169,7 @@ def test_canonical_transition_restores_frozen_checkout_on_bad_target_policy(
             transition(repository, facts)
         assert failure.value.code == "INVALID_POLICY"
         assert git(repository.repo, "symbolic-ref", "--short", "HEAD") == "docs/frozen"
-        assert git(repository.repo, "rev-parse", main_branch) == facts["published"]
+        assert git(repository.repo, "rev-parse", main_branch) == facts["initial_main"]
         assert status(repository.repo)["worktrees"][0]["lifecycle"] == "HANDOFF_READY"
 
 

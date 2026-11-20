@@ -10,7 +10,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .git_backend import commit_tree_oid, git_state_fingerprint, inventory, resolve_commit
+from .git_backend import (
+    commit_tree_oid,
+    index_and_status,
+    inventory,
+    resolve_commit,
+)
 from .lifecycle_observation import observe_repository_orphans, observe_worktree
 from .models import (
     ACTIVE_AUTHORITY_STATES,
@@ -772,7 +777,7 @@ def _resolve_target(
         try:
             registered = item.path.resolve(strict=True)
         except FileNotFoundError:
-            # A sibling may be released after inventory was read, before the lock.
+            # A sibling may be released or prunable after inventory was read.
             # The requested target itself was validated above.
             continue
         if registered == resolved:
@@ -850,7 +855,11 @@ def _plan_from_snapshot(
     }
     if any(warning["code"] in capacity_drift for warning in warnings):
         return decide("BLOCK_DRIFT", "role-specific capacity already exceeds policy")
-    target_item = _resolve_target(repository, target)
+    target_item = None
+    if target is not None:
+        expanded = target.expanduser()
+        if expanded.exists() or expanded.is_symlink():
+            target_item = _resolve_target(repository, target)
     if target_item and target_item.canonical and role not in CANONICAL_ROLES:
         return decide("BLOCK_CANONICAL", "canonical is protected from ordinary feature work")
 
@@ -940,7 +949,7 @@ def guard_write(
     repository = state if state is not None else inventory(repository_path)
     store = MetadataStore(repository.common_dir)
     if snapshot is None:
-        snapshot = store.load()
+        snapshot = store.load(include_history=False, include_intents=(operation == "integration-write"))
     item = _resolve_target(repository, target)
     requested = {
         "path": str(target.expanduser()),
@@ -1158,14 +1167,21 @@ def adopt(
     normalized_scopes = normalize_scope_paths(scope_paths)
     base_oid = resolve_commit(target_item.path, base_commit) if base_commit else None
     task_oid = resolve_commit(target_item.path, task_commit) if task_commit else None
-    before = git_state_fingerprint(repository_before)
+
+    def _target_adoption_state(item: WorktreeGitState) -> tuple[Any, ...]:
+        index_bytes, worktree_status = index_and_status(item.path) if item.path.exists() else (b"", b"")
+        return (item.key, item.head, item.branch, index_bytes, worktree_status)
+
+    before = _target_adoption_state(target_item)
     store = MetadataStore(repository_before.common_dir)
     created = False
+    locked_key = target_item.key
     with store.lock(exclusive=True, create=True):
         repository_locked = inventory(repository_path)
         locked_item = _resolve_target(repository_locked, target)
         if locked_item is None or locked_item.key != target_item.key:
             raise ControllerError("BLOCK_DRIFT", "worktree identity changed during adoption")
+        locked_key = locked_item.key
         snapshot = store._load_unlocked()
         allocation_id = snapshot.bindings.get(locked_item.key)
         if allocation_id is not None:
@@ -1223,10 +1239,10 @@ def adopt(
             )
             created = True
     repository_after = inventory(repository_path)
-    after = git_state_fingerprint(repository_after)
-    if before != after:
+    after_item = next((item for item in repository_after.worktrees if item.key == locked_key), None)
+    if after_item is None or before != _target_adoption_state(after_item):
         raise ControllerError(
-            "GIT_STATE_CHANGED", "Git refs, index, worktrees, or status changed during adoption"
+            "GIT_STATE_CHANGED", "target Git branch, index, or status changed during adoption"
         )
     policy = load_policy(repository_after.canonical_path)
     snapshot_after = store.load()
@@ -1923,6 +1939,8 @@ def _doctor_snapshot(
             )
         )
     failure_codes = {
+        "ORDINARY_POOL_VIOLATION",
+        "BINDING_IDENTITY_DRIFT",
         "ORPHAN_BINDING",
         "ORPHAN_RECORD",
         "MISSING_RECORD",

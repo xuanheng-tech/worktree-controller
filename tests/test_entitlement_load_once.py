@@ -40,7 +40,7 @@ def test_direct_continuation_write_into_held_checkout_reuses_the_snapshot(direct
 
     repository, path, _, identity = direct
     held, _ = _changed_task(repository, task="held", files=())
-    _lease(repository, held, "held-session")
+    _lease(repository, held, identity["session_id"])
     loads.clear()
     assert writer_session.check(path, **identity, access="read")["admission"] == "CONTINUATION_GRANTED"
     baseline = len(loads)

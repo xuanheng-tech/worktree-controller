@@ -75,7 +75,10 @@ def test_public_contract_matches_package_and_commands(tmp_path: Path) -> None:
     with (ROOT / "pyproject.toml").open("rb") as stream:
         project = tomllib.load(stream)["project"]
     assert contract["schema_version"] == SCHEMA_VERSION == 1
-    assert contract["contract_version"] == 61
+    assert contract["contract_version"] == 62
+    assert contract["sandbox_mode_version"] == 1
+    assert contract["conflict_check_version"] == 1
+    assert contract["hook_adapter_version"] == 1
     assert contract["aborted_integration_preserved_cleanup_version"] == 2
     assert (
         contract["aborted_integration_preserved_cleanup_contract"]["contract"]
@@ -165,7 +168,7 @@ def test_public_contract_matches_package_and_commands(tmp_path: Path) -> None:
         "release",
     ]
     assert contract["metadata_schema_version"] == 4
-    assert contract["tool_version"] == project["version"] == __version__ == "1.35.5"
+    assert contract["tool_version"] == project["version"] == __version__ == "1.36.0"
     assert contract["aborted_integration_branch_retirement_version"] == 1
     assert contract["drifted_handoff_reopen_version"] == 1
     assert (
@@ -263,6 +266,8 @@ def test_public_contract_matches_package_and_commands(tmp_path: Path) -> None:
         "binding-add",
         "binding-remove",
         "reconcile",
+        "conflict-check",
+        "hook-adapter",
     }
     assert contract["json_envelope"] == [
         "tool_version",
@@ -321,7 +326,7 @@ def test_release_versions_are_independently_declared_and_advertised(capsys) -> N
         == 1
     )
 
-    assert payload["tool_version"] == contract["tool_version"] == "1.35.5"
+    assert payload["tool_version"] == contract["tool_version"] == "1.36.0"
     assert advertised["writer_lease_schema_version"] == contract["writer_lease_schema_version"] == 3
     assert advertised["holder_resolver_version"] == contract["holder_resolver_version"] == 2
     assert (
@@ -351,7 +356,10 @@ def test_release_versions_are_independently_declared_and_advertised(capsys) -> N
         "skipped",
         "reconciliation",
     ]
-    assert advertised["contract_version"] == contract["contract_version"] == 61
+    assert advertised["contract_version"] == contract["contract_version"] == 62
+    assert advertised["sandbox_mode_version"] == contract["sandbox_mode_version"] == 1
+    assert advertised["conflict_check_version"] == contract["conflict_check_version"] == 1
+    assert advertised["hook_adapter_version"] == contract["hook_adapter_version"] == 1
     assert (
         advertised["aborted_integration_preserved_cleanup_version"]
         == contract["aborted_integration_preserved_cleanup_version"]

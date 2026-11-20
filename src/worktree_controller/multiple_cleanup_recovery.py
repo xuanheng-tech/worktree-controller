@@ -76,14 +76,19 @@ def _action_files(store: MetadataStore, transaction: str, count: int) -> None:
         raise _blocked("pending or unbound actions have evidence, or completed action files are incomplete")
 
 
-def _generation_metadata(bound: dict[str, Any]) -> list[dict[str, Any]]:
+def _generation_metadata(
+    bound: dict[str, Any], *, generation_names: tuple[str, ...] | None = None
+) -> list[dict[str, Any]]:
     """Freeze completed official generations without reading unreferenced payloads."""
     for key in ("repository_id", "allocation_id"):
         _uuid(bound[key])
     allocation = p.evidence_root() / bound["repository_id"] / bound["allocation_id"]
+    selected = set(generation_names) if generation_names is not None else None
     result = []
     with p._absolute_directory(allocation) as chain:
         for name in sorted(os.listdir(chain[-1].fd)):
+            if selected is not None and name not in selected:
+                continue
             _uuid(name)
             with p._absolute_directory(allocation / name) as generation:
                 directory = generation[-1]

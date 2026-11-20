@@ -8,7 +8,14 @@ from typing import Any
 
 from .canonical_transition import _check_target_policy, _published_policy
 from .controller import envelope
-from .git_backend import fetch_remote_branch, git_read, git_write, inventory, is_ancestor
+from .git_backend import (
+    fetch_remote_branch,
+    fetch_remote_branch_readonly,
+    git_read,
+    git_write,
+    inventory,
+    is_ancestor,
+)
 from .models import ControllerError
 from .policy import load_policy
 from .semantics import record_for as _record_for
@@ -149,80 +156,126 @@ def refresh_canonical(repository_path: Path, *, dry_run: bool = False,
 
     repository_initial = inventory(repository_path)
     store = MetadataStore(repository_initial.common_dir)
-    with store.lock(exclusive=True):
-        repository = inventory(repository_path)
-        snapshot = store._load_unlocked()
-        policy = load_policy(repository.canonical_path)
-        if not policy.present or not policy.canonical_protected or policy.policy_schema_version < 2:
-            raise ControllerError("INVALID_POLICY", "canonical refresh requires a governed publication branch")
-        item = next((worktree for worktree in repository.worktrees if worktree.canonical), None)
-        record = _record_for(item, snapshot) if item is not None else None
-        if item is None or record is None:
-            raise ControllerError("UNMANAGED_CANONICAL", "canonical checkout has no Controller record")
-        if record.lifecycle != "ACTIVE":
-            raise ControllerError(
-                "CANONICAL_NOT_ACTIVE",
-                f"canonical lifecycle {record.lifecycle}; a frozen canonical uses canonical-transition",
-            )
-        if item.detached or item.branch != policy.publication_branch:
-            raise ControllerError("CANONICAL_BRANCH", "canonical is not on the publication branch")
-        if (not item.clean and not reconcile_published_paths) or item.locked or item.prunable:
-            raise ControllerError("CANONICAL_DIRTY", "canonical checkout is not clean")
-        if record.allocation_id in snapshot.writer_leases or record.external_bindings:
-            raise ControllerError("CANONICAL_IN_USE", "canonical holds a writer lease or binding")
-        if conflicts(store, allocation=record.allocation_id, target=item.path, assume_serialized=True):
-            raise ControllerError("INTERRUPTED_TRANSACTION", "canonical refresh conflicts with a transaction")
-        ancestry = own_ancestry()
-        observed = [entry for entry in ProcessPathScan().referenced_paths_in_use(item.path)
-                    if entry[0] not in ancestry]
-        used = []
-        for pid, paths in observed:
-            content_paths = [path for path in paths if Path(path) != item.path
-                             and not Path(path).is_relative_to(repository.common_dir)]
-            if content_paths:
-                used.append((pid, content_paths))
-        if used:
-            raise CanonicalProcessOccupancyError(item.path, used)
-        before = item.head
-        target_oid = fetch_remote_branch(item.path, policy.publication_remote, policy.publication_branch)
-        if reconcile_published_paths and expected_target != target_oid:
-            raise ControllerError("PUBLISHED_TARGET_CHANGED", "published path reconciliation requires the exact fetched target")
-        if not is_ancestor(item.path, before, target_oid):
-            raise ControllerError("NON_FAST_FORWARD", "canonical main is not an ancestor of published main")
-        proofs, baseline = (_published_paths(item.path, before, target_oid, reconcile_published_paths)
-                            if reconcile_published_paths else ([], target_oid))
-        decision: dict[str, Any] = {
-            "path": str(item.path),
-            "branch": item.branch,
-            "before": before,
-            "target": target_oid,
-            "dry_run": dry_run,
-            "reconciled_published_paths": proofs,
-            "reconciliation_baseline": baseline,
-            "non_content_process_count": len(observed) - len(used),
-        }
-        if before == target_oid:
-            decision.update(code="CANONICAL_CURRENT", reason="canonical already equals published main")
-        elif dry_run:
-            decision.update(code="CANONICAL_REFRESH_READY", reason="canonical can fast-forward")
-        else:
-            # A published main that this Controller could not govern is refused first.
+    for _attempt in range(2):
+        with store.lock(exclusive=False):
+            repository = inventory(repository_path)
+            snapshot = store._load_unlocked()
+            policy = load_policy(repository.canonical_path)
+            if not policy.present or not policy.canonical_protected or policy.policy_schema_version < 2:
+                raise ControllerError("INVALID_POLICY", "canonical refresh requires a governed publication branch")
+            item = next((worktree for worktree in repository.worktrees if worktree.canonical), None)
+            record = _record_for(item, snapshot) if item is not None else None
+            if item is None or record is None:
+                raise ControllerError("UNMANAGED_CANONICAL", "canonical checkout has no Controller record")
+            if record.lifecycle != "ACTIVE":
+                raise ControllerError(
+                    "CANONICAL_NOT_ACTIVE",
+                    f"canonical lifecycle {record.lifecycle}; a frozen canonical uses canonical-transition",
+                )
+            if item.detached or item.branch != policy.publication_branch:
+                raise ControllerError("CANONICAL_BRANCH", "canonical is not on the publication branch")
+            if (not item.clean and not reconcile_published_paths) or item.locked or item.prunable:
+                raise ControllerError("CANONICAL_DIRTY", "canonical checkout is not clean")
+            if record.allocation_id in snapshot.writer_leases or record.external_bindings:
+                raise ControllerError("CANONICAL_IN_USE", "canonical holds a writer lease or binding")
+            if conflicts(store, allocation=record.allocation_id, target=item.path, assume_serialized=True):
+                raise ControllerError("INTERRUPTED_TRANSACTION", "canonical refresh conflicts with a transaction")
+            ancestry = own_ancestry()
+            observed = [entry for entry in ProcessPathScan().referenced_paths_in_use(item.path)
+                        if entry[0] not in ancestry]
+            used = []
+            for pid, paths in observed:
+                content_paths = [path for path in paths if Path(path) != item.path
+                                 and not Path(path).is_relative_to(repository.common_dir)]
+                if content_paths:
+                    used.append((pid, content_paths))
+            if used:
+                raise CanonicalProcessOccupancyError(item.path, used)
+            peek_remote = (policy.publication_remote, policy.publication_branch)
+            peek_item_path = item.path
+        target_oid = (
+            fetch_remote_branch_readonly(peek_item_path, *peek_remote)
+            if dry_run
+            else fetch_remote_branch(peek_item_path, *peek_remote)
+        )
+        with store.lock(exclusive=not dry_run):
+            repository = inventory(repository_path)
+            snapshot = store._load_unlocked()
+            policy = load_policy(repository.canonical_path)
+            if (policy.publication_remote, policy.publication_branch) != peek_remote:
+                if _attempt == 0:
+                    continue
+                raise ControllerError("PUBLICATION_POLICY_DRIFT", "publication policy changed during refresh")
+            if not policy.present or not policy.canonical_protected or policy.policy_schema_version < 2:
+                raise ControllerError("INVALID_POLICY", "canonical refresh requires a governed publication branch")
+            item = next((worktree for worktree in repository.worktrees if worktree.canonical), None)
+            record = _record_for(item, snapshot) if item is not None else None
+            if item is None or record is None:
+                raise ControllerError("UNMANAGED_CANONICAL", "canonical checkout has no Controller record")
+            if record.lifecycle != "ACTIVE":
+                raise ControllerError(
+                    "CANONICAL_NOT_ACTIVE",
+                    f"canonical lifecycle {record.lifecycle}; a frozen canonical uses canonical-transition",
+                )
+            if item.detached or item.branch != policy.publication_branch:
+                raise ControllerError("CANONICAL_BRANCH", "canonical is not on the publication branch")
+            if (not item.clean and not reconcile_published_paths) or item.locked or item.prunable:
+                raise ControllerError("CANONICAL_DIRTY", "canonical checkout is not clean")
+            if record.allocation_id in snapshot.writer_leases or record.external_bindings:
+                raise ControllerError("CANONICAL_IN_USE", "canonical holds a writer lease or binding")
+            if conflicts(store, allocation=record.allocation_id, target=item.path, assume_serialized=True):
+                raise ControllerError("INTERRUPTED_TRANSACTION", "canonical refresh conflicts with a transaction")
+            ancestry = own_ancestry()
+            observed = [entry for entry in ProcessPathScan().referenced_paths_in_use(item.path)
+                        if entry[0] not in ancestry]
+            used = []
+            for pid, paths in observed:
+                content_paths = [path for path in paths if Path(path) != item.path
+                                 and not Path(path).is_relative_to(repository.common_dir)]
+                if content_paths:
+                    used.append((pid, content_paths))
+            if used:
+                raise CanonicalProcessOccupancyError(item.path, used)
+            before = item.head
+            if reconcile_published_paths and expected_target != target_oid:
+                raise ControllerError("PUBLISHED_TARGET_CHANGED", "published path reconciliation requires the exact fetched target")
+            if not is_ancestor(item.path, before, target_oid):
+                raise ControllerError("NON_FAST_FORWARD", "canonical main is not an ancestor of published main")
+            # A published main that this Controller could not govern is refused even on dry-run.
             _check_target_policy(_published_policy(repository, target_oid, policy),
                                  policy.publication_branch, policy.publication_remote)
-            if proofs:
-                git_write(item.path, ("add", "--", *reconcile_published_paths))
-                for proof in proofs:
-                    if git_read(item.path, ("ls-files", "--stage", "-z", "--", proof["path"])).stdout != (
-                        f"{proof['mode']} {proof['blob']} 0\t{proof['path']}\0".encode()
-                    ):
-                        raise ControllerError("CANONICAL_DIRTY", "staged bytes differ; preserved index requires inspection")
-                if baseline != target_oid and baseline != before:
-                    git_write(item.path, ("merge", "--ff-only", "--no-edit", "--no-overwrite-ignore", baseline))
-            git_write(item.path, ("merge", "--ff-only", "--no-edit", "--no-overwrite-ignore", target_oid))
-            after = next(worktree for worktree in inventory(item.path).worktrees if worktree.canonical)
-            if after.head != target_oid or not after.clean or after.branch != policy.publication_branch:
-                raise ControllerError("REFRESH_INCOMPLETE", "canonical did not reach exact published main")
-            decision.update(code="CANONICAL_REFRESHED", reason="canonical fast-forwarded to published main")
+            proofs, baseline = (_published_paths(item.path, before, target_oid, reconcile_published_paths)
+                                if reconcile_published_paths else ([], target_oid))
+            decision: dict[str, Any] = {
+                "path": str(item.path),
+                "branch": item.branch,
+                "before": before,
+                "target": target_oid,
+                "dry_run": dry_run,
+                "reconciled_published_paths": proofs,
+                "reconciliation_baseline": baseline,
+                "non_content_process_count": len(observed) - len(used),
+            }
+            if before == target_oid:
+                decision.update(code="CANONICAL_CURRENT", reason="canonical already equals published main")
+            elif dry_run:
+                decision.update(code="CANONICAL_REFRESH_READY", reason="canonical can fast-forward")
+            else:
+                if proofs:
+                    git_write(item.path, ("add", "--", *reconcile_published_paths))
+                    for proof in proofs:
+                        if git_read(item.path, ("ls-files", "--stage", "-z", "--", proof["path"])).stdout != (
+                            f"{proof['mode']} {proof['blob']} 0\t{proof['path']}\0".encode()
+                        ):
+                            raise ControllerError("CANONICAL_DIRTY", "staged bytes differ; preserved index requires inspection")
+                    if baseline != target_oid and baseline != before:
+                        git_write(item.path, ("merge", "--ff-only", "--no-edit", "--no-overwrite-ignore", baseline))
+                git_write(item.path, ("merge", "--ff-only", "--no-edit", "--no-overwrite-ignore", target_oid))
+                after = next(worktree for worktree in inventory(item.path).worktrees if worktree.canonical)
+                if after.head != target_oid or not after.clean or after.branch != policy.publication_branch:
+                    raise ControllerError("REFRESH_INCOMPLETE", "canonical did not reach exact published main")
+                decision.update(code="CANONICAL_REFRESHED", reason="canonical fast-forwarded to published main")
+            break
     payload = envelope("canonical-refresh")
     payload["decision"] = decision
     return payload

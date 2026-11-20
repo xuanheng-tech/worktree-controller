@@ -105,7 +105,7 @@ def test_unknown_contract_is_refused_before_repository_operations(tmp_path, monk
     main = runpy.run_path(str(SCRIPT))["main"]
     workspace = tmp_path / "example"
     monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--workspace", str(workspace)])
-    capabilities = {"contract_version": 61, "storage_layout_version": 5,
+    capabilities = {"contract_version": 62, "storage_layout_version": 5,
                     "task_workflow_version": 1, "task_checkpoint_park_version": 1,
                     "session_closeout_expectations_version": 1, "session_closeout_report_version": 1}
     capabilities[dimension] = 999

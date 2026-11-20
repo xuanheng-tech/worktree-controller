@@ -186,6 +186,16 @@ class ConvergencePolicy:
 
 
 @dataclass(frozen=True)
+class KeyedDocumentRule:
+    path: str
+    merge_driver: str
+    collections: tuple[tuple[str, str], ...]
+    schema_version: int | None = None
+    repo_id: str | None = None
+    extra_fields: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class WorktreePolicy:
     path: Path
     present: bool
@@ -219,6 +229,9 @@ class WorktreePolicy:
     checkout_growth_bytes: int = 2 * 1024**3
     checkout_growth_inodes: int = 100_000
     convergence: ConvergencePolicy | None = None
+    keyed_documents: tuple[KeyedDocumentRule, ...] = ()
+    disposable_resources: tuple[tuple[str, str], ...] = ()
+    disposable_resources_configured: bool = False
 
 
 @dataclass(frozen=True)

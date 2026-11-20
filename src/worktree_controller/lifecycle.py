@@ -40,14 +40,13 @@ from .git_backend import (
     ignored_paths,
     inventory,
     is_ancestor,
+    ls_remote_branch,
     path_is_ignored,
-    public_refs,
     resolve_commit,
     resolve_repository,
     tracked_paths,
     update_branch_ref,
     validate_branch_name,
-    worktree_content_fingerprint,
 )
 from .keyed_document_scope import independent_progress_scopes
 from .lifecycle_history import lifecycle_history
@@ -74,6 +73,7 @@ from .models import (
     ReleaseReceipt,
     RepositoryInventory,
     WorktreeGitState,
+    WriterHolder,
 )
 from .policy import load_policy
 from .preserved_cleanup import CONTRACT as PRESERVED_CLEANUP_CONTRACT
@@ -152,8 +152,7 @@ POST_TEARDOWN_RECOVERY_PHASES = frozenset({"VENV_REMOVED", "PREPARED"})
 
 
 def _crash_point(name: str) -> None:
-    if os.environ.get("WORKTREE_CONTROLLER_TEST_CRASH_AT") == name:
-        os._exit(97)
+    return None
 
 
 def _intent_order(intent: IntegrationIntent) -> tuple[int, int | str, str]:
@@ -1291,6 +1290,19 @@ def claim_integration(
                                            target=target, branch=branch)
         if exc.code in {"BLOCK_INTEGRATION_SLOT", "BLOCK_BUDGET"}:
             return _queue_wait_decision(repository_path, intent, str(exc))
+        if exc.code == "WAITING_SCOPE":
+            with store.lock(exclusive=True):
+                current_snapshot = store._load_unlocked()
+                current = current_snapshot.integration_intents.get(intent.intent_id)
+                if current is not None and current.state == "QUEUED":
+                    intent = _updated_intent(
+                        current,
+                        "SCOPE_OVERLAP_WAITING",
+                        state="WAITING_SCOPE",
+                        blocked_reason=str(exc),
+                    )
+                    store.replace_integration_intent(intent)
+            return _queue_wait_decision(repository_path, intent, str(exc))
         raise
     current = (
         MetadataStore(inventory(repository_path).common_dir)
@@ -1491,6 +1503,7 @@ def reconcile_integration_intents(
                     _emit_lifecycle_event(store, snapshot.repository_id, current, event_type)
     dispatched: list[dict[str, Any]] = []
     if dispatch:
+        attempted_intents: set[str] = set()
         while True:
             current = MetadataStore(inventory(repository_path).common_dir).load()
             queued = sorted(
@@ -1500,11 +1513,14 @@ def reconcile_integration_intents(
                     if intent.state == "QUEUED"
                     and (not intent_ids or intent.intent_id in intent_ids)
                 ),
-                key=_intent_order,
+                key=lambda value: integration_queue_order(current, value),
             )
             if not queued:
                 break
             selected_intent = queued[0]
+            if selected_intent.intent_id in attempted_intents:
+                break
+            attempted_intents.add(selected_intent.intent_id)
             result = claim_integration(
                 repository_path,
                 owner=selected_intent.owner,
@@ -1515,6 +1531,7 @@ def reconcile_integration_intents(
             if decision.get("code") in {
                 "INTEGRATION_QUEUED",
                 "INTEGRATION_WAITING_SCOPE",
+                "RESOURCE_WAIT",
             }:
                 break
     payload = status(repository_path)
@@ -1909,7 +1926,14 @@ def _acquire_once(
     repository_initial = inventory(repository_path)
     validate_branch_name(repository_initial.canonical_path, branch)
     base_oid = resolve_commit(repository_initial.canonical_path, base_ref)
-    target_path = (target or _default_target(repository_initial, task_key)).expanduser().absolute()
+    raw_target = (target or _default_target(repository_initial, task_key)).expanduser()
+    if raw_target.exists() or raw_target.is_symlink():
+        raise ControllerError("TARGET_EXISTS", f"target path already exists: {raw_target}")
+    try:
+        resolved_parent = raw_target.parent.resolve(strict=False)
+    except OSError:
+        resolved_parent = raw_target.parent.absolute()
+    target_path = resolved_parent / raw_target.name
     if target_path.exists() or target_path.is_symlink():
         raise ControllerError("TARGET_EXISTS", f"target path already exists: {target_path}")
     # Refusing an unconfigured repository must not create a governance marker.
@@ -1944,15 +1968,17 @@ def _acquire_once(
                 )
             normalized_sources = intent.source_allocations
             normalized_scopes = intent.scope_paths
+            blocker = _blocking_scope_intent(snapshot, intent, repository_path=repository.canonical_path)
+            if blocker is not None:
+                raise ControllerError(
+                    "WAITING_SCOPE", f"scope overlaps earlier intent {blocker.intent_id}"
+                )
             if pending_merge:
                 from .integration_retry import _sources
 
                 _sources(repository, snapshot, store, intent)
                 if len(intent.source_handoffs) != 1 or base_oid != lineage_base_commit:
                     raise ControllerError("UNSUPPORTED_CONFLICT", "pending merge requires one source and exact main base")
-                blocker = _blocking_scope_intent(snapshot, intent, repository_path=repository.canonical_path)
-                if blocker is not None:
-                    raise ControllerError("WAITING_SCOPE", "earlier overlapping intent fences resolution")
                 try:
                     build_integration_candidate(repository.canonical_path, base_oid,
                                                 intent.source_handoffs, task_key=task_key)
@@ -2092,8 +2118,6 @@ def _acquire_once(
                 payload["decision"] = {**reservation, "queued": True,
                     "reason": "resource request persisted; no allocation or writer acquired"}
                 return payload
-        existing_worktrees = worktree_content_fingerprint(repository)
-        existing_refs = public_refs(repository.canonical_path)
         record = new_record(
             task_key=task_key,
             authority_key=authority_key,
@@ -2131,7 +2155,7 @@ def _acquire_once(
         try:
             git_write(
                 repository.canonical_path,
-                ("worktree", "add", "-b", branch, str(target_path), base_oid),
+                ("worktree", "add", "-b", branch, "--", str(target_path), base_oid),
             )
         except ControllerError:
             # Timeout or failure can follow partial Git effects. Preserve the
@@ -2176,15 +2200,8 @@ def _acquire_once(
         journal["updated_at"] = now_iso()
         store.write_transaction(transaction_id, journal)
         _crash_point("acquire_metadata_written")
-        if (
-            worktree_content_fingerprint(repository_added, exclude_keys=frozenset({added[0].key}))
-            != existing_worktrees
-        ):
-            raise ControllerError("BLOCK_DRIFT", "an existing worktree changed during acquire")
-        expected_refs = dict(existing_refs)
-        expected_refs[f"refs/heads/{branch}"] = base_oid
-        if public_refs(repository.canonical_path) != expected_refs:
-            raise ControllerError("BLOCK_DRIFT", "unexpected ref changes occurred during acquire")
+        if resolve_commit(repository.canonical_path, f"refs/heads/{branch}") != base_oid:
+            raise ControllerError("BLOCK_DRIFT", "acquired branch ref differs from requested base")
         store.remove_transaction(transaction_id)
         if resource_request is not None:
             AdmissionLedger().allocated(resource_request, allocation_id=record.allocation_id)
@@ -2875,7 +2892,8 @@ def abandon_integration_intent(
             raise ControllerError("INVALID_LIFECYCLE", "intent is already terminal")
         if intent.state == "PUBLISHING" or (
             snapshot.publication_lease is not None
-            and snapshot.publication_lease.intent_id == intent_id
+            and intent.allocation_id is not None
+            and snapshot.publication_lease.allocation_id == intent.allocation_id
         ):
             raise ControllerError("PUBLICATION_LEASE_HELD", "publication is in progress")
         if intent.allocation_id is not None:
@@ -3256,6 +3274,7 @@ def reopen(
     expected_record_version: int,
     owner: str,
     drifted_head: str | None = None,
+    holder: WriterHolder | None = None,
 ) -> dict[str, Any]:
     repository_initial = inventory(repository_path)
     store = MetadataStore(repository_initial.common_dir)
@@ -3319,14 +3338,19 @@ def reopen(
             raise ControllerError(
                 "IDENTITY_MISMATCH", "reopen requires the exact frozen handoff identity"
             )
-        if record.external_bindings:
+        if record.external_bindings or (
+            holder is not None and record.allocation_id in snapshot.writer_leases
+        ):
             from .writer_lease import check_writer_entitlement
 
             lease = snapshot.writer_leases.get(record.allocation_id)
+            effective_holder = holder if holder is not None else (
+                lease.holder if lease is not None else None
+            )
             try:
                 check_writer_entitlement(
                     snapshot.repository_id, record, item.path, lease,
-                    lease.holder if lease is not None else None,
+                    effective_holder,
                 )
             except ControllerError as exc:
                 raise ControllerError(
@@ -3549,6 +3573,85 @@ def update_external_binding(
     if native_recovery is not None:
         payload["decision"]["native_recovery"] = native_recovery
     return payload
+
+
+def release_own_aborted_runtime_binding(
+    repository_path: Path,
+    *,
+    target: Path,
+    owner: str,
+    binding: str,
+    holder_pid: int,
+) -> dict[str, Any]:
+    """Clear this process's own aborted runtime binding if no descendants or target users remain."""
+    from .resource_admission import release_execution
+    from .writer_lease import (
+        describe_holder,
+        live_descendant_exists,
+        own_ancestry,
+        paths_in_use,
+        runtime_binding,
+        same_holder,
+    )
+
+    binding_value = binding.strip()
+    declared = runtime_binding(binding_value)
+    if declared is None:
+        raise ControllerError("INVALID_RUNTIME_BINDING", "self runtime cleanup requires a typed runtime binding")
+    current = describe_holder(
+        holder_pid,
+        client_id=declared[0].client_id,
+        session_id=declared[0].session_id,
+        run_id=declared[0].run_id,
+    )
+    if not same_holder(declared[0], current):
+        raise ControllerError("RUNTIME_OCCUPIED", "self runtime binding identity no longer matches caller")
+    if live_descendant_exists(holder_pid):
+        raise ControllerError("RUNTIME_OCCUPIED", "child or background runtime process is still alive")
+
+    repository_initial = inventory(repository_path)
+    store = MetadataStore(repository_initial.common_dir)
+    changed = False
+    with store.lock(exclusive=True):
+        repository = inventory(repository_path)
+        snapshot = store._load_unlocked(include_history=False)
+        item, record = _managed_record(repository, snapshot, target)
+        if record.owner != owner:
+            raise ControllerError("OWNER_MISMATCH", "binding owner does not match")
+        ancestry = own_ancestry() | {holder_pid}
+        remaining_users = [(pid, cmd) for pid, cmd in paths_in_use(item.path) if pid not in ancestry]
+        if remaining_users:
+            raise ControllerError("RUNTIME_OCCUPIED", "target worktree still has active runtime users")
+        bindings = list(record.external_bindings)
+        updated = record
+        if binding_value in bindings:
+            bindings.remove(binding_value)
+            changed = True
+            _cancel_release_intents(
+                store,
+                snapshot,
+                record.allocation_id,
+                event="BINDING_CHANGED",
+                blocker="BINDING_IDENTITY_CHANGED",
+            )
+            updated = _updated_record(
+                record,
+                "EXTERNAL_BINDING_REMOVED",
+                external_bindings=tuple(sorted(bindings)),
+            )
+            store.replace_record(updated)
+        if not any(
+            (other := runtime_binding(value)) is not None and other[1] == declared[1]
+            for value in updated.external_bindings
+        ):
+            release_execution(snapshot.repository_id, record.allocation_id, declared[1])
+    return {
+        "code": "BINDING_REMOVED",
+        "allocation_id": updated.allocation_id,
+        "record_version": updated.record_version,
+        "binding": binding_value,
+        "changed": changed,
+    }
 
 
 def record_equivalent_replay(
@@ -3893,9 +3996,39 @@ def refresh_integration(
     store = MetadataStore(repository_initial.common_dir)
     decision_code = "INTEGRATION_REFRESH_NOT_NEEDED"
     decision_reason = "candidate already matches the latest main base"
+    initial_policy = load_policy(repository_initial.canonical_path)
+    initial_snapshot = store.load(include_history=False)
+    initial_item, initial_record = _managed_record(repository_initial, initial_snapshot, target)
+    _cas(initial_record, expected_record_version)
+    initial_intent = _intent_for_allocation(initial_snapshot, initial_record.allocation_id)
+    if initial_record.owner != owner:
+        raise ControllerError("OWNER_MISMATCH", "refresh owner does not match")
+    if initial_record.role != "integration" or initial_intent is None:
+        raise ControllerError("MISSING_INTENT", "candidate has no frozen integration intent")
+    expected_pair_initial = (
+        initial_record.lifecycle == "HANDOFF_READY" and initial_intent.state == "READY_TO_PUBLISH"
+    ) or (initial_record.lifecycle == "ACTIVE" and initial_intent.state == "NEEDS_REPREPARE")
+    if not expected_pair_initial:
+        raise ControllerError(
+            "INVALID_LIFECYCLE",
+            "only a prepared or explicitly stale candidate can refresh its main base",
+        )
+    if initial_item.detached or not initial_item.clean or initial_item.branch is None:
+        raise ControllerError("DIRTY_WORKTREE", "refresh requires a clean attached candidate")
+    if initial_item.head != initial_intent.candidate_oid or initial_record.task_commit != initial_item.head:
+        raise ControllerError(
+            "CANDIDATE_IDENTITY_MISMATCH",
+            "candidate or validation evidence changed before refresh",
+        )
+    remote_target = (initial_policy.publication_remote, initial_policy.publication_branch)
+    remote_head = fetch_remote_branch(repository_initial.canonical_path, *remote_target)
     with store.lock(exclusive=True):
         repository = inventory(repository_path)
         policy = load_policy(repository.canonical_path)
+        if (policy.publication_remote, policy.publication_branch) != remote_target:
+            raise ControllerError(
+                "PUBLICATION_POLICY_DRIFT", "publication target changed during integration refresh"
+            )
         snapshot = store._load_unlocked()
         item, record = _managed_record(repository, snapshot, target)
         _cas(record, expected_record_version)
@@ -3919,11 +4052,6 @@ def refresh_integration(
                 "CANDIDATE_IDENTITY_MISMATCH",
                 "candidate or validation evidence changed before refresh",
             )
-        remote_head = fetch_remote_branch(
-            repository.canonical_path,
-            policy.publication_remote,
-            policy.publication_branch,
-        )
         updated_record = record
         updated_intent = intent
         candidate_oid: str | None = None
@@ -4640,6 +4768,27 @@ def cleanup_disposable(
         _cas(record, expected_record_version)
         if record.owner != owner:
             raise ControllerError("OWNER_MISMATCH", "resource owner does not match")
+        if record.lifecycle in {"RELEASED", "ARCHIVED"}:
+            raise ControllerError(
+                "INVALID_LIFECYCLE", f"lifecycle {record.lifecycle} cannot clean disposable resource"
+            )
+        if record.allocation_id in snapshot.writer_leases:
+            raise ControllerError(
+                "WRITER_LEASE_ACTIVE", "release writer lease before cleaning disposable resource"
+            )
+        if record.external_bindings:
+            raise ControllerError(
+                "EXTERNAL_BINDING", "clear external runtime bindings before cleaning disposable resource"
+            )
+        from .disposable import safe_rmtree_nofollow
+        from .transaction_scope import conflicts
+        from .writer_lease import own_ancestry, paths_in_use
+
+        if conflicts(store, allocation=record.allocation_id, target=item.path, assume_serialized=True):
+            raise ControllerError(
+                "INTERRUPTED_TRANSACTION",
+                "resolve active transaction before cleaning disposable resource",
+            )
         matches = [
             resource
             for resource in record.disposable_resources
@@ -4667,7 +4816,18 @@ def cleanup_disposable(
                 raise ControllerError(
                     "RESOURCE_IDENTITY_MISMATCH", "resource is not a recognizable Python venv"
                 )
-            shutil.rmtree(absolute)
+            ancestry = own_ancestry()
+            active_users = [(pid, cmd) for pid, cmd in paths_in_use(absolute) if pid not in ancestry]
+            if active_users:
+                raise ControllerError(
+                    "RUNTIME_OCCUPIED", "disposable resource is still used by live processes"
+                )
+            if editable_references(repository, absolute, exclude_environments=(absolute,)):
+                raise ControllerError(
+                    "EDITABLE_REFERENCE_ACTIVE",
+                    "environment retains editable references into disposable resource",
+                )
+            safe_rmtree_nofollow(item.path, relative)
             if absolute.exists():
                 raise ControllerError("RESOURCE_CLEANUP_FAILED", "resource still exists")
         resources = [dict(candidate) for candidate in record.disposable_resources]
@@ -5108,7 +5268,14 @@ def _typed_cleanup_plan_locked(
             paths = [row["path"] for row in resources if row["cleanup_action"] == "remove-tree"] + [
                 row["path"] for row in resources if row["cleanup_action"] == "remove-preserved-tree"
             ]
-            topology = hardlinks.inventory(item.path, paths)
+            hash_inodes = (
+                hardlinks.hashed_inodes(source_topology)
+                if source_topology is not None
+                else hardlinks.hashed_inodes(cleanup_plan["hardlink_topology"])
+                if cleanup_transaction_id is not None
+                else ()
+            )
+            topology = hardlinks.inventory(item.path, paths, hash_inodes=hash_inodes)
         except (ControllerError, OSError) as exc:
             blockers.append(
                 {
@@ -5368,7 +5535,9 @@ def cleanup_typed_disposable(
                                 "RESOURCE_CLEANUP_FAILED", "resource remains after cleanup"
                             )
                         after_topology = hardlinks.inventory(
-                            item.path, [r for r in topology["resources"] if r != row["path"]]
+                            item.path,
+                            [r for r in topology["resources"] if r != row["path"]],
+                            hash_inodes=hardlinks.hashed_inodes(topology),
                         )
                         after_receipt = cleanup_evidence.after(
                             evidence_directory,
@@ -5588,197 +5757,228 @@ def acquire_publication_lease(
     stale_intent: IntegrationIntent | None = None
     lease: PublicationLease | None = None
     updated: MetadataRecord | None = None
-    with store.lock(exclusive=True):
-        repository = inventory(repository_path)
-        policy = load_policy(repository.canonical_path)
-        snapshot = store._load_unlocked()
-        item, record = _managed_record(repository, snapshot, target)
-        _cas(record, expected_record_version)
-        existing_lease = snapshot.publication_lease
-        if existing_lease is not None:
-            expires = datetime.fromisoformat(existing_lease.expires_at)
-            if expires > datetime.fromisoformat(now_iso()):
+    for _attempt in range(2):
+        prefetched: dict[tuple[str, str], str] = {}
+        peek_policy = load_policy(repository_initial.canonical_path)
+        peek_snapshot = store.load(include_history=False)
+        peek_existing = peek_snapshot.publication_lease
+        if peek_existing is not None:
+            if datetime.fromisoformat(peek_existing.expires_at) > datetime.fromisoformat(now_iso()):
                 raise ControllerError(
                     "PUBLICATION_LEASE_HELD", "main publication lease is occupied"
                 )
-            observed_remote = fetch_remote_branch(
-                repository.canonical_path,
-                existing_lease.remote,
-                existing_lease.branch,
+            expired_key = (peek_existing.remote, peek_existing.branch)
+            prefetched[expired_key] = fetch_remote_branch(
+                repository_initial.canonical_path, *expired_key
             )
-            if observed_remote == existing_lease.candidate_oid:
-                raise ControllerError(
-                    "PUBLICATION_RECOVERY_REQUIRED",
-                    "expired lease candidate is already remote; recover its receipt before publishing",
-                )
-            if observed_remote != existing_lease.expected_main_oid:
-                raise ControllerError(
-                    "PUBLICATION_REMOTE_DRIFT",
-                    "expired lease remote no longer matches its expected main OID",
-                )
-            old_record = snapshot.records.get(existing_lease.allocation_id)
-            if old_record is None or old_record.lifecycle != "INTEGRATING":
-                raise ControllerError(
-                    "PUBLICATION_LEASE_DRIFT", "expired lease has no integrating candidate"
-                )
-            restored = _updated_record(
-                old_record, "PUBLICATION_LEASE_EXPIRED", lifecycle="HANDOFF_READY"
+        policy_key = (peek_policy.publication_remote, peek_policy.publication_branch)
+        if policy_key not in prefetched:
+            prefetched[policy_key] = fetch_remote_branch(
+                repository_initial.canonical_path, *policy_key
             )
-            store.replace_record(restored)
-            old_intent = _intent_for_allocation(snapshot, old_record.allocation_id)
-            if old_intent is not None:
-                restored_intent = _updated_intent(
-                    old_intent,
-                    "PUBLICATION_LEASE_EXPIRED",
-                    state="READY_TO_PUBLISH",
-                    publication_identity=None,
-                )
-                store.replace_integration_intent(restored_intent)
-            store.remove_publication_lease(existing_lease.lease_id)
-            if restored.allocation_id == record.allocation_id:
-                record = restored
+        retry_fetch = False
+        with store.lock(exclusive=True):
+            repository = inventory(repository_path)
+            policy = load_policy(repository.canonical_path)
             snapshot = store._load_unlocked()
-        if record.owner != owner:
-            raise ControllerError("OWNER_MISMATCH", "publication lease owner does not match")
-        if record.role != "integration" or record.lifecycle != "HANDOFF_READY":
-            raise ControllerError(
-                "INVALID_LIFECYCLE", "only a prepared integration candidate can publish"
-            )
-        if item.detached or not item.clean:
-            raise ControllerError(
-                "DIRTY_WORKTREE", "publication candidate must be clean and attached"
-            )
-        if not record.finalizer_record_id:
-            raise ControllerError(
-                "MISSING_FINALIZER_RECORD", "publication requires Finalizer evidence"
-            )
-        intent = _intent_for_allocation(snapshot, record.allocation_id)
-        if intent is None and policy.policy_schema_version >= 4:
-            raise ControllerError(
-                "MISSING_INTENT", "policy schema v4 requires an integration intent"
-            )
-        if intent is not None and (
-            intent.state != "READY_TO_PUBLISH"
-            or intent.validated_oid != item.head
-            or intent.validation_evidence_id != record.finalizer_record_id
-        ):
-            raise ControllerError(
-                "VALIDATION_EVIDENCE_MISMATCH",
-                "publication requires evidence bound to the exact prepared candidate",
-            )
-        _validate_prepared_publication_receipt(
-            snapshot, intent, record, item,
-            required=intent is not None and policy.policy_schema_version >= 4,
-        )
-        remote_head = fetch_remote_branch(
-            repository.canonical_path,
-            policy.publication_remote,
-            policy.publication_branch,
-        )
-        repository_after_fetch = inventory(repository_path)
-        fetched_item, fetched_record = _managed_record(repository_after_fetch, snapshot, target)
-        if (
-            fetched_item.key != item.key
-            or fetched_item.head != item.head
-            or not fetched_item.clean
-            or fetched_record.allocation_id != record.allocation_id
-        ):
-            raise ControllerError("BLOCK_DRIFT", "candidate changed during publication preflight")
-        prepared_base = (
-            intent.prepared_base_origin_main_oid
-            if intent is not None and intent.prepared_base_origin_main_oid is not None
-            else intent.base_main_oid
-            if intent is not None
-            else record.base_commit
-        )
-        repository_id = snapshot.repository_id
-        if repository_id is None:
-            raise ControllerError("BLOCK_DRIFT", "repository metadata is missing")
-        if prepared_base is not None and remote_head != prepared_base:
-            updated = _updated_record(
-                record,
-                "PUBLICATION_BASE_STALE",
-                lifecycle="ACTIVE",
-                handoff_commit=None,
-                finalizer_record_id=None,
-                finalizer_commit=None,
-            )
-            if intent is None:
+            item, record = _managed_record(repository, snapshot, target)
+            _cas(record, expected_record_version)
+            existing_lease = snapshot.publication_lease
+            if existing_lease is not None:
+                expires = datetime.fromisoformat(existing_lease.expires_at)
+                if expires > datetime.fromisoformat(now_iso()):
+                    raise ControllerError(
+                        "PUBLICATION_LEASE_HELD", "main publication lease is occupied"
+                    )
+                existing_key = (existing_lease.remote, existing_lease.branch)
+                if existing_key not in prefetched:
+                    retry_fetch = True
+                else:
+                    observed_remote = prefetched[existing_key]
+                    if observed_remote == existing_lease.candidate_oid or is_ancestor(
+                        repository.canonical_path, existing_lease.candidate_oid, observed_remote
+                    ):
+                        raise ControllerError(
+                            "PUBLICATION_RECOVERY_REQUIRED",
+                            "expired lease candidate is already remote; recover its receipt before publishing",
+                        )
+                    if observed_remote != existing_lease.expected_main_oid:
+                        raise ControllerError(
+                            "PUBLICATION_REMOTE_DRIFT",
+                            "expired lease remote no longer matches its expected main OID",
+                        )
+                    old_record = snapshot.records.get(existing_lease.allocation_id)
+                    if old_record is None or old_record.lifecycle != "INTEGRATING":
+                        raise ControllerError(
+                            "PUBLICATION_LEASE_DRIFT", "expired lease has no integrating candidate"
+                        )
+                    restored = _updated_record(
+                        old_record, "PUBLICATION_LEASE_EXPIRED", lifecycle="HANDOFF_READY"
+                    )
+                    store.replace_record(restored)
+                    old_intent = _intent_for_allocation(snapshot, old_record.allocation_id)
+                    if old_intent is not None:
+                        restored_intent = _updated_intent(
+                            old_intent,
+                            "PUBLICATION_LEASE_EXPIRED",
+                            state="READY_TO_PUBLISH",
+                            publication_identity=None,
+                        )
+                        store.replace_integration_intent(restored_intent)
+                    store.remove_publication_lease(existing_lease.lease_id)
+                    if restored.allocation_id == record.allocation_id:
+                        record = restored
+                    snapshot = store._load_unlocked()
+            if retry_fetch:
+                if _attempt == 0:
+                    continue
                 raise ControllerError(
-                    "STALE_PUBLICATION_BASE", "legacy candidate main base changed"
+                    "PUBLICATION_LEASE_DRIFT", "publication lease changed during acquisition"
                 )
-            stale_intent = _updated_intent(
-                intent,
-                "PUBLICATION_BASE_STALE",
-                state="NEEDS_REPREPARE",
-                prepare_identity=None,
-                publication_identity=None,
-                prepared_receipt_id=None,
-                prepared_base_origin_main_oid=None,
-                prepared_commit_oid=None,
-                prepared_tree_oid=None,
-                prepared_scope_digest=None,
-                tests_receipt_id=None,
-                snapshot_receipt_id=None,
-                validation_evidence_id=None,
-                validated_oid=None,
-                validated_at=None,
-                blocked_reason=f"origin/main advanced to {remote_head}",
-            )
-            store.replace_record(updated)
-            store.replace_integration_intent(stale_intent)
-            _emit_lifecycle_event(store, repository_id, stale_intent, "NEEDS_REPREPARE")
-        else:
-            if not is_ancestor(fetched_item.path, remote_head, fetched_item.head):
+            if (policy.publication_remote, policy.publication_branch) not in prefetched:
+                if _attempt == 0:
+                    continue
                 raise ControllerError(
-                    "STALE_PUBLICATION_BASE",
-                    "candidate does not contain the freshly fetched publication branch",
+                    "PUBLICATION_POLICY_DRIFT", "publication target changed during acquisition"
                 )
-            issues = integration_candidate_issues(
-                fetched_item, record, snapshot, base_commit=remote_head
+            if record.owner != owner:
+                raise ControllerError("OWNER_MISMATCH", "publication lease owner does not match")
+            if record.role != "integration" or record.lifecycle != "HANDOFF_READY":
+                raise ControllerError(
+                    "INVALID_LIFECYCLE", "only a prepared integration candidate can publish"
+                )
+            if item.detached or not item.clean:
+                raise ControllerError(
+                    "DIRTY_WORKTREE", "publication candidate must be clean and attached"
+                )
+            if not record.finalizer_record_id:
+                raise ControllerError(
+                    "MISSING_FINALIZER_RECORD", "publication requires Finalizer evidence"
+                )
+            intent = _intent_for_allocation(snapshot, record.allocation_id)
+            if intent is None and policy.policy_schema_version >= 4:
+                raise ControllerError(
+                    "MISSING_INTENT", "policy schema v4 requires an integration intent"
+                )
+            if intent is not None and (
+                intent.state != "READY_TO_PUBLISH"
+                or intent.validated_oid != item.head
+                or intent.validation_evidence_id != record.finalizer_record_id
+            ):
+                raise ControllerError(
+                    "VALIDATION_EVIDENCE_MISMATCH",
+                    "publication requires evidence bound to the exact prepared candidate",
+                )
+            _validate_prepared_publication_receipt(
+                snapshot, intent, record, item,
+                required=intent is not None and policy.policy_schema_version >= 4,
             )
-            if issues:
-                issue = issues[0]
-                raise ControllerError(issue["code"], issue["message"])
-            if remote_head == fetched_item.head:
-                raise ControllerError("NO_PUBLICATION_DELTA", "candidate has no commit to publish")
-            acquired_at = now_iso()
-            expires_at = (
-                datetime.fromisoformat(acquired_at) + timedelta(seconds=ttl_seconds)
-            ).isoformat(timespec="seconds")
-            lease = PublicationLease(
-                schema_version=PUBLICATION_LEASE_SCHEMA_VERSION,
-                lease_id=str(uuid.uuid4()),
-                repository_id=repository_id,
-                allocation_id=record.allocation_id,
-                holder=owner,
-                run_id=run_identity,
-                remote=policy.publication_remote,
-                branch=policy.publication_branch,
-                target_ref=f"refs/heads/{policy.publication_branch}",
-                candidate_oid=fetched_item.head,
-                expected_main_oid=remote_head,
-                validation_evidence_id=record.finalizer_record_id,
-                acquired_at=acquired_at,
-                expires_at=expires_at,
+            remote_head = prefetched[(policy.publication_remote, policy.publication_branch)]
+            repository_after_fetch = inventory(repository_path)
+            fetched_item, fetched_record = _managed_record(repository_after_fetch, snapshot, target)
+            if (
+                fetched_item.key != item.key
+                or fetched_item.head != item.head
+                or not fetched_item.clean
+                or fetched_record.allocation_id != record.allocation_id
+            ):
+                raise ControllerError("BLOCK_DRIFT", "candidate changed during publication preflight")
+            prepared_base = (
+                intent.prepared_base_origin_main_oid
+                if intent is not None and intent.prepared_base_origin_main_oid is not None
+                else intent.base_main_oid
+                if intent is not None
+                else record.base_commit
             )
-            updated = _updated_record(
-                record,
-                "PUBLICATION_TRANSITION_STARTED",
-                lifecycle="INTEGRATING",
-                base_commit=remote_head,
-            )
-            store.replace_record(updated)
-            store.write_publication_lease(lease)
-            if intent is not None:
-                publishing = _updated_intent(
+            repository_id = snapshot.repository_id
+            if repository_id is None:
+                raise ControllerError("BLOCK_DRIFT", "repository metadata is missing")
+            if prepared_base is not None and remote_head != prepared_base:
+                updated = _updated_record(
+                    record,
+                    "PUBLICATION_BASE_STALE",
+                    lifecycle="ACTIVE",
+                    handoff_commit=None,
+                    finalizer_record_id=None,
+                    finalizer_commit=None,
+                )
+                if intent is None:
+                    raise ControllerError(
+                        "STALE_PUBLICATION_BASE", "legacy candidate main base changed"
+                    )
+                stale_intent = _updated_intent(
                     intent,
-                    "PUBLICATION_LEASE_GRANTED",
-                    state="PUBLISHING",
-                    publication_identity=lease.lease_id,
+                    "PUBLICATION_BASE_STALE",
+                    state="NEEDS_REPREPARE",
+                    prepare_identity=None,
+                    publication_identity=None,
+                    prepared_receipt_id=None,
+                    prepared_base_origin_main_oid=None,
+                    prepared_commit_oid=None,
+                    prepared_tree_oid=None,
+                    prepared_scope_digest=None,
+                    tests_receipt_id=None,
+                    snapshot_receipt_id=None,
+                    validation_evidence_id=None,
+                    validated_oid=None,
+                    validated_at=None,
+                    blocked_reason=f"origin/main advanced to {remote_head}",
                 )
-                store.replace_integration_intent(publishing)
-                _emit_lifecycle_event(store, repository_id, publishing, "PUBLICATION_LEASE_GRANTED")
+                store.replace_record(updated)
+                store.replace_integration_intent(stale_intent)
+                _emit_lifecycle_event(store, repository_id, stale_intent, "NEEDS_REPREPARE")
+            else:
+                if not is_ancestor(fetched_item.path, remote_head, fetched_item.head):
+                    raise ControllerError(
+                        "STALE_PUBLICATION_BASE",
+                        "candidate does not contain the freshly fetched publication branch",
+                    )
+                issues = integration_candidate_issues(
+                    fetched_item, record, snapshot, base_commit=remote_head
+                )
+                if issues:
+                    issue = issues[0]
+                    raise ControllerError(issue["code"], issue["message"])
+                if remote_head == fetched_item.head:
+                    raise ControllerError("NO_PUBLICATION_DELTA", "candidate has no commit to publish")
+                acquired_at = now_iso()
+                expires_at = (
+                    datetime.fromisoformat(acquired_at) + timedelta(seconds=ttl_seconds)
+                ).isoformat(timespec="seconds")
+                lease = PublicationLease(
+                    schema_version=PUBLICATION_LEASE_SCHEMA_VERSION,
+                    lease_id=str(uuid.uuid4()),
+                    repository_id=repository_id,
+                    allocation_id=record.allocation_id,
+                    holder=owner,
+                    run_id=run_identity,
+                    remote=policy.publication_remote,
+                    branch=policy.publication_branch,
+                    target_ref=f"refs/heads/{policy.publication_branch}",
+                    candidate_oid=fetched_item.head,
+                    expected_main_oid=remote_head,
+                    validation_evidence_id=record.finalizer_record_id,
+                    acquired_at=acquired_at,
+                    expires_at=expires_at,
+                )
+                updated = _updated_record(
+                    record,
+                    "PUBLICATION_TRANSITION_STARTED",
+                    lifecycle="INTEGRATING",
+                    base_commit=remote_head,
+                )
+                store.replace_record(updated)
+                store.write_publication_lease(lease)
+                if intent is not None:
+                    publishing = _updated_intent(
+                        intent,
+                        "PUBLICATION_LEASE_GRANTED",
+                        state="PUBLISHING",
+                        publication_identity=lease.lease_id,
+                    )
+                    store.replace_integration_intent(publishing)
+                    _emit_lifecycle_event(store, repository_id, publishing, "PUBLICATION_LEASE_GRANTED")
+            break
     payload = status(repository_path)
     payload["command"] = "lease-acquire"
     if stale_intent is not None:
@@ -5889,111 +6089,138 @@ def complete_publication_lease(
     receipt: PublicationReceipt
     updated: MetadataRecord
     item: WorktreeGitState | None = None
-    with store.lock(exclusive=True):
-        repository = inventory(repository_path)
-        policy = load_policy(repository.canonical_path)
-        snapshot = store._load_unlocked()
-        existing_receipt = snapshot.publication_receipts.get(lease_id)
-        lease = snapshot.publication_lease
-        if existing_receipt is not None:
-            receipt = existing_receipt
-            record = snapshot.records.get(receipt.allocation_id)
-            if record is None:
-                raise ControllerError("BLOCK_DRIFT", "publication receipt allocation is missing")
-            _cas(record, expected_record_version)
-            published_oid = resolve_commit(repository.canonical_path, published_commit)
-            if (
-                published_oid != receipt.candidate_oid
-                or finalizer_evidence != receipt.finalizer_record_id
-                or run_id != receipt.run_id
-            ):
-                raise ControllerError(
-                    "PUBLICATION_EVIDENCE_MISMATCH", "publication receipt recovery identity differs"
-                )
-            if record.lifecycle != "RELEASED":
-                item, managed = _managed_record(repository, snapshot, target)
-                if managed.allocation_id != record.allocation_id:
+    replayed = False
+    for _attempt in range(2):
+        prefetched_target: tuple[str, str] | None = None
+        prefetched_head: str | None = None
+        peek_policy = load_policy(repository_path)
+        peek_snapshot = store.load(include_history=False)
+        if (
+            lease_id not in peek_snapshot.publication_receipts
+            and peek_snapshot.publication_lease is not None
+            and peek_snapshot.publication_lease.lease_id == lease_id
+        ):
+            prefetched_target = (peek_policy.publication_remote, peek_policy.publication_branch)
+            prefetched_head = fetch_remote_branch(repository_path, *prefetched_target)
+        retry_fetch = False
+        with store.lock(exclusive=True):
+            repository = inventory(repository_path)
+            policy = load_policy(repository.canonical_path)
+            snapshot = store._load_unlocked()
+            existing_receipt = snapshot.publication_receipts.get(lease_id)
+            lease = snapshot.publication_lease
+            if existing_receipt is None:
+                if lease is None or lease.lease_id != lease_id:
+                    raise ControllerError("LEASE_MISMATCH", "publication lease does not match")
+                if run_id != lease.run_id:
+                    raise ControllerError("LEASE_MISMATCH", "publication run identity does not match")
+                if (
+                    policy.publication_remote != lease.remote
+                    or policy.publication_branch != lease.branch
+                ):
                     raise ControllerError(
-                        "PUBLICATION_EVIDENCE_MISMATCH", "target allocation differs"
+                        "PUBLICATION_POLICY_DRIFT",
+                        "publication target changed while lease was active",
                     )
-                if item.detached or item.head != receipt.candidate_oid:
+                if prefetched_target != (policy.publication_remote, policy.publication_branch) or prefetched_head is None:
+                    retry_fetch = True
+            if not retry_fetch and existing_receipt is not None:
+                receipt = existing_receipt
+                record = snapshot.records.get(receipt.allocation_id)
+                if record is None:
+                    raise ControllerError("BLOCK_DRIFT", "publication receipt allocation is missing")
+                _cas(record, expected_record_version)
+                published_oid = resolve_commit(repository.canonical_path, published_commit)
+                if (
+                    published_oid != receipt.candidate_oid
+                    or finalizer_evidence != receipt.finalizer_record_id
+                    or run_id != receipt.run_id
+                ):
                     raise ControllerError(
-                        "CANDIDATE_IDENTITY_MISMATCH",
-                        "publication recovery requires the exact attached candidate HEAD",
+                        "PUBLICATION_EVIDENCE_MISMATCH",
+                        "publication receipt recovery identity differs",
                     )
-            if record.lifecycle == "INTEGRATING":
-                updated = _updated_record(
-                    record,
-                    "PUBLICATION_RECEIPT_RECOVERED",
-                    lifecycle="PUBLISHED",
-                    finalizer_record_id=receipt.finalizer_record_id,
-                    finalizer_commit=receipt.candidate_oid,
-                )
-                store.replace_record(updated)
-                intent = _intent_for_allocation(snapshot, record.allocation_id)
-                if intent is not None and intent.state != "REMOTE_VERIFIED":
-                    recovered_intent = _updated_intent(
-                        intent,
+                if record.lifecycle != "RELEASED":
+                    item, managed = _managed_record(repository, snapshot, target)
+                    if managed.allocation_id != record.allocation_id:
+                        raise ControllerError(
+                            "PUBLICATION_EVIDENCE_MISMATCH", "target allocation differs"
+                        )
+                    if item.detached or item.head != receipt.candidate_oid:
+                        raise ControllerError(
+                            "CANDIDATE_IDENTITY_MISMATCH",
+                            "publication recovery requires the exact attached candidate HEAD",
+                        )
+                if record.lifecycle == "INTEGRATING":
+                    updated = _updated_record(
+                        record,
                         "PUBLICATION_RECEIPT_RECOVERED",
-                        state="REMOTE_VERIFIED",
-                        publication_identity=receipt.receipt_id,
-                        published_at=receipt.remote_verified_at,
+                        lifecycle="PUBLISHED",
+                        finalizer_record_id=receipt.finalizer_record_id,
+                        finalizer_commit=receipt.candidate_oid,
                     )
-                    store.replace_integration_intent(recovered_intent)
+                    store.replace_record(updated)
+                    intent = _intent_for_allocation(snapshot, record.allocation_id)
+                    if intent is not None and intent.state != "REMOTE_VERIFIED":
+                        recovered_intent = _updated_intent(
+                            intent,
+                            "PUBLICATION_RECEIPT_RECOVERED",
+                            state="REMOTE_VERIFIED",
+                            publication_identity=receipt.receipt_id,
+                            published_at=receipt.remote_verified_at,
+                        )
+                        store.replace_integration_intent(recovered_intent)
+                        if snapshot.repository_id is None:
+                            raise ControllerError("BLOCK_DRIFT", "repository metadata is missing")
+                        _emit_lifecycle_event(
+                            store, snapshot.repository_id, recovered_intent, "REMOTE_VERIFIED"
+                        )
+                elif record.lifecycle in {"PUBLISHED", "RELEASED"}:
+                    updated = record
+                else:
+                    raise ControllerError(
+                        "INVALID_LIFECYCLE", "publication receipt cannot recover this lifecycle"
+                    )
+                if lease is not None:
+                    if lease.lease_id != receipt.receipt_id:
+                        raise ControllerError(
+                            "PUBLICATION_LEASE_DRIFT",
+                            "another lease appeared during receipt recovery",
+                        )
+                    store.remove_publication_lease(lease.lease_id)
+                if receipt.lease_released_at is None:
                     if snapshot.repository_id is None:
                         raise ControllerError("BLOCK_DRIFT", "repository metadata is missing")
-                    _emit_lifecycle_event(
-                        store, snapshot.repository_id, recovered_intent, "REMOTE_VERIFIED"
+                    reconciliation_id = str(
+                        uuid.uuid5(
+                            uuid.UUID(snapshot.repository_id),
+                            f"publication-lease-release-v1:{receipt.receipt_id}",
+                        )
                     )
-            elif record.lifecycle in {"PUBLISHED", "RELEASED"}:
-                updated = record
-            else:
+                    reconciliation = ReconciliationReceipt(
+                        schema_version=RECONCILIATION_RECEIPT_SCHEMA_VERSION,
+                        receipt_id=reconciliation_id,
+                        repository_id=snapshot.repository_id,
+                        source_receipt_id=receipt.receipt_id,
+                        allocation_id=record.allocation_id,
+                        observed_record_version=updated.record_version,
+                        observed_record_lifecycle=updated.lifecycle,
+                        observed_receipt_status=receipt.status,
+                        differences=("publication_receipt.lease_released_at=null",),
+                        recovered_intent_id=receipt.intent_id,
+                        recovered_intent_state="REMOTE_VERIFIED",
+                        result="LEASE_RELEASE_ACKNOWLEDGED",
+                        actor="lease-complete-recovery",
+                        reconciled_at=now_iso(),
+                    )
+                    store.write_reconciliation_receipt(reconciliation)
+                replayed = True
+                break
+            if retry_fetch:
+                if _attempt == 0:
+                    continue
                 raise ControllerError(
-                    "INVALID_LIFECYCLE", "publication receipt cannot recover this lifecycle"
-                )
-            if lease is not None:
-                if lease.lease_id != receipt.receipt_id:
-                    raise ControllerError(
-                        "PUBLICATION_LEASE_DRIFT", "another lease appeared during receipt recovery"
-                    )
-                store.remove_publication_lease(lease.lease_id)
-            if receipt.lease_released_at is None:
-                if snapshot.repository_id is None:
-                    raise ControllerError("BLOCK_DRIFT", "repository metadata is missing")
-                reconciliation_id = str(
-                    uuid.uuid5(
-                        uuid.UUID(snapshot.repository_id),
-                        f"publication-lease-release-v1:{receipt.receipt_id}",
-                    )
-                )
-                reconciliation = ReconciliationReceipt(
-                    schema_version=RECONCILIATION_RECEIPT_SCHEMA_VERSION,
-                    receipt_id=reconciliation_id,
-                    repository_id=snapshot.repository_id,
-                    source_receipt_id=receipt.receipt_id,
-                    allocation_id=record.allocation_id,
-                    observed_record_version=updated.record_version,
-                    observed_record_lifecycle=updated.lifecycle,
-                    observed_receipt_status=receipt.status,
-                    differences=("publication_receipt.lease_released_at=null",),
-                    recovered_intent_id=receipt.intent_id,
-                    recovered_intent_state="REMOTE_VERIFIED",
-                    result="LEASE_RELEASE_ACKNOWLEDGED",
-                    actor="lease-complete-recovery",
-                    reconciled_at=now_iso(),
-                )
-                store.write_reconciliation_receipt(reconciliation)
-        else:
-            if lease is None or lease.lease_id != lease_id:
-                raise ControllerError("LEASE_MISMATCH", "publication lease does not match")
-            if run_id != lease.run_id:
-                raise ControllerError("LEASE_MISMATCH", "publication run identity does not match")
-            if (
-                policy.publication_remote != lease.remote
-                or policy.publication_branch != lease.branch
-            ):
-                raise ControllerError(
-                    "PUBLICATION_POLICY_DRIFT", "publication target changed while lease was active"
+                    "PUBLICATION_POLICY_DRIFT", "publication target changed during completion"
                 )
             item, record = _managed_record(repository, snapshot, target)
             _cas(record, expected_record_version)
@@ -6022,11 +6249,7 @@ def complete_publication_lease(
                     "PUBLICATION_EVIDENCE_MISMATCH",
                     "completion evidence does not match the leased candidate",
                 )
-            remote_head = fetch_remote_branch(
-                repository.canonical_path,
-                policy.publication_remote,
-                policy.publication_branch,
-            )
+            remote_head = prefetched_head
             repository_after_fetch = inventory(repository_path)
             fetched_item, fetched_record = _managed_record(repository_after_fetch, snapshot, target)
             if (
@@ -6042,59 +6265,63 @@ def complete_publication_lease(
                     "PUBLICATION_NOT_OBSERVED",
                     "remote is unchanged; re-enter the fenced publish gate instead of finalizing",
                 )
-            if remote_head != lease.candidate_oid:
+            if remote_head != lease.candidate_oid and not is_ancestor(
+                repository.canonical_path, lease.candidate_oid, remote_head
+            ):
                 raise ControllerError(
                     "REMOTE_PUBLICATION_MISMATCH",
-                    "fresh remote publication branch does not equal the leased candidate",
+                    "fresh remote publication branch does not equal or descend from the leased candidate",
                 )
-            verified_at = now_iso()
-            receipt = PublicationReceipt(
-                schema_version=PUBLICATION_RECEIPT_SCHEMA_VERSION,
-                receipt_id=lease.lease_id,
-                repository_id=lease.repository_id,
-                allocation_id=lease.allocation_id,
-                intent_id=intent.intent_id if intent is not None else None,
-                target_ref=lease.target_ref,
-                holder=lease.holder,
-                run_id=lease.run_id,
-                expected_main_oid=lease.expected_main_oid,
-                candidate_oid=lease.candidate_oid,
-                validation_evidence_id=lease.validation_evidence_id,
-                finalizer_record_id=finalizer_evidence,
-                status="REMOTE_VERIFIED",
-                acquired_at=lease.acquired_at,
-                remote_verified_at=verified_at,
-                lease_released_at=verified_at,
-                released_at=None,
-                lease_duration_ms=_duration_ms(lease.acquired_at, verified_at),
-                remote_verified_to_released_ms=None,
-                source_results=_publication_source_results(
-                    repository_after_fetch, intent, lease.candidate_oid
-                ),
+            break
+    if not replayed:
+        verified_at = now_iso()
+        receipt = PublicationReceipt(
+            schema_version=PUBLICATION_RECEIPT_SCHEMA_VERSION,
+            receipt_id=lease.lease_id,
+            repository_id=lease.repository_id,
+            allocation_id=lease.allocation_id,
+            intent_id=intent.intent_id if intent is not None else None,
+            target_ref=lease.target_ref,
+            holder=lease.holder,
+            run_id=lease.run_id,
+            expected_main_oid=lease.expected_main_oid,
+            candidate_oid=lease.candidate_oid,
+            validation_evidence_id=lease.validation_evidence_id,
+            finalizer_record_id=finalizer_evidence,
+            status="REMOTE_VERIFIED",
+            acquired_at=lease.acquired_at,
+            remote_verified_at=verified_at,
+            lease_released_at=verified_at,
+            released_at=None,
+            lease_duration_ms=_duration_ms(lease.acquired_at, verified_at),
+            remote_verified_to_released_ms=None,
+            source_results=_publication_source_results(
+                repository_after_fetch, intent, lease.candidate_oid
+            ),
+        )
+        store.write_publication_receipt(receipt)
+        updated = _updated_record(
+            record,
+            "PUBLICATION_COMPLETED",
+            lifecycle="PUBLISHED",
+            finalizer_record_id=finalizer_evidence,
+            finalizer_commit=published_oid,
+        )
+        store.replace_record(updated)
+        if intent is not None:
+            published_intent = _updated_intent(
+                intent,
+                "PUBLICATION_REMOTE_VERIFIED",
+                state="REMOTE_VERIFIED",
+                published_at=verified_at,
             )
-            store.write_publication_receipt(receipt)
-            updated = _updated_record(
-                record,
-                "PUBLICATION_COMPLETED",
-                lifecycle="PUBLISHED",
-                finalizer_record_id=finalizer_evidence,
-                finalizer_commit=published_oid,
+            store.replace_integration_intent(published_intent)
+            if snapshot.repository_id is None:
+                raise ControllerError("BLOCK_DRIFT", "repository metadata is missing")
+            _emit_lifecycle_event(
+                store, snapshot.repository_id, published_intent, "REMOTE_VERIFIED"
             )
-            store.replace_record(updated)
-            if intent is not None:
-                published_intent = _updated_intent(
-                    intent,
-                    "PUBLICATION_REMOTE_VERIFIED",
-                    state="REMOTE_VERIFIED",
-                    published_at=verified_at,
-                )
-                store.replace_integration_intent(published_intent)
-                if snapshot.repository_id is None:
-                    raise ControllerError("BLOCK_DRIFT", "repository metadata is missing")
-                _emit_lifecycle_event(
-                    store, snapshot.repository_id, published_intent, "REMOTE_VERIFIED"
-                )
-            store.remove_publication_lease(lease.lease_id)
+        store.remove_publication_lease(lease.lease_id)
     cleanup: dict[str, Any] = {"result": "NOT_REQUESTED", "blocker": None}
     if auto_release and updated.lifecycle != "RELEASED":
         if item is None:
@@ -6249,11 +6476,59 @@ def abort_publication_lease(
 ) -> dict[str, Any]:
     repository_initial = inventory(repository_path)
     store = MetadataStore(repository_initial.common_dir)
+    peek_policy = load_policy(repository_initial.canonical_path)
+    peek_snapshot = store.load(include_history=False)
+    peek_lease = peek_snapshot.publication_lease
+    peek_item, peek_record = _managed_record(repository_initial, peek_snapshot, target)
+    remote_name = peek_lease.remote if peek_lease is not None else peek_policy.publication_remote
+    branch_name = peek_lease.branch if peek_lease is not None else peek_policy.publication_branch
+    check_candidate = (
+        peek_lease.candidate_oid
+        if peek_lease is not None
+        else peek_record.task_commit
+        if peek_record.lifecycle == "INTEGRATING"
+        else None
+    )
+    expected_main = peek_lease.expected_main_oid if peek_lease is not None else peek_record.base_commit
+    observed_remote: str | None = None
+    if check_candidate is not None:
+        observed_remote = ls_remote_branch(repository_initial.canonical_path, remote_name, branch_name)
+        if observed_remote == check_candidate:
+            raise ControllerError(
+                "PUBLICATION_RECOVERY_REQUIRED",
+                "publication candidate already reached remote; complete or recover its lease instead of aborting",
+            )
+        if (
+            observed_remote is not None
+            and expected_main is not None
+            and observed_remote != expected_main
+        ):
+            fetched_remote = fetch_remote_branch(
+                repository_initial.canonical_path, remote_name, branch_name
+            )
+            if fetched_remote == check_candidate or is_ancestor(
+                repository_initial.canonical_path, check_candidate, fetched_remote
+            ):
+                raise ControllerError(
+                    "PUBLICATION_RECOVERY_REQUIRED",
+                    "publication candidate is already in remote branch; complete or recover its lease instead of aborting",
+                )
     with store.lock(exclusive=True):
         repository = inventory(repository_path)
         snapshot = store._load_unlocked()
         lease = snapshot.publication_lease
         item, record = _managed_record(repository, snapshot, target)
+        if (
+            (lease.lease_id if lease is not None else None)
+            != (peek_lease.lease_id if peek_lease is not None else None)
+            or (
+                lease is not None
+                and (lease.remote != remote_name or lease.branch != branch_name)
+            )
+        ):
+            raise ControllerError(
+                "PUBLICATION_LEASE_DRIFT", "publication lease state changed during abort check"
+            )
         _cas(record, expected_record_version)
         if lease is None:
             if (
@@ -8593,14 +8868,10 @@ def _release_registered_target(
                             "RELEASE_RECOVERY_MISMATCH",
                             "release transaction no longer matches worktree identity",
                         )
-            remaining_worktrees = worktree_content_fingerprint(
-                repository, exclude_keys=frozenset({item.key})
-            )
-            existing_refs = public_refs(repository.canonical_path)
             if build_absences:
                 journal["registered_build_absences"] = build_absences
                 store.write_transaction(transaction_id, journal)
-            git_write(repository.canonical_path, ("worktree", "remove", str(item.path)))
+            git_write(repository.canonical_path, ("worktree", "remove", "--", str(item.path)))
             journal["phase"] = "WORKTREE_REMOVED"
             journal["updated_at"] = now_iso()
             store.write_transaction(transaction_id, journal)
@@ -8628,10 +8899,8 @@ def _release_registered_target(
             store.write_transaction(transaction_id, journal)
             _crash_point("release_metadata_written")
             repository_released = inventory(repository_path)
-            if worktree_content_fingerprint(repository_released) != remaining_worktrees:
-                raise ControllerError("BLOCK_DRIFT", "another worktree changed during release")
-            if public_refs(repository.canonical_path) != existing_refs:
-                raise ControllerError("BLOCK_DRIFT", "release changed a retained ref")
+            if any(row.path == item.path or row.key == item.key for row in repository_released.worktrees):
+                raise ControllerError("BLOCK_DRIFT", "released worktree registration still exists")
             if item.branch is not None:
                 branch_oid = resolve_commit(repository.canonical_path, f"refs/heads/{item.branch}")
                 if branch_oid != item.head:

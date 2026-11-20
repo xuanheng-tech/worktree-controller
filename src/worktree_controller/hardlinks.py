@@ -50,7 +50,26 @@ def _effects(group: dict[str, Any], resources: list[str]) -> dict[str, Any]:
     return {"classification": classification, "expected_steps": steps}
 
 
-def inventory(root: Path, resources: list[str]) -> dict[str, Any]:
+def hashed_inodes(graph: dict[str, Any]) -> tuple[tuple[int, int], ...]:
+    """Return `(st_dev, st_ino)` pairs that already carry content hashes in ``graph``."""
+    return tuple(
+        sorted(
+            {
+                (int(group["identity"][0]), int(group["identity"][1]))
+                for group in graph.get("groups", {}).values()
+                if "content_sha256" in group.get("content", {})
+            }
+        )
+    )
+
+
+def inventory(
+    root: Path,
+    resources: list[str],
+    *,
+    hash_inodes: tuple[tuple[int, int], ...] = (),
+    hash_single_link: bool = True,
+) -> dict[str, Any]:
     """Record every non-directory inode and all its in-scope names; hash opaque bytes.
 
     Names outside the exact cleanup resources are never searched or authorized.
@@ -68,7 +87,9 @@ def inventory(root: Path, resources: list[str]) -> dict[str, Any]:
     anchors = {}
     for resource in resources:
         with p._absolute_source(root / resource) as chain:
-            tree = p.scan_tree(chain[-1], chain)
+            tree = p.scan_tree(
+                chain[-1], chain, hash_single_link=hash_single_link, hash_inodes=hash_inodes
+            )
             tree.require_complete()
             anchors[resource] = {
                 "worktree": chain[-len(Path(resource).parts) - 1].identity,
@@ -132,7 +153,7 @@ def validate(graph: dict[str, Any]) -> None:
 def verify(root: Path, expected: dict[str, Any]) -> None:
     validate(expected)
     try:
-        actual = inventory(root, expected["resources"])
+        actual = inventory(root, expected["resources"], hash_inodes=hashed_inodes(expected))
     except OSError as exc:
         if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.ESTALE}:
             raise ControllerError(
@@ -243,7 +264,7 @@ def pinned_content(pin: int, expected: list[int]) -> dict[str, Any]:
     if p._identity(os.fstat(pin)) != expected:
         raise _blocked("pinned inode changed before content verification")
     if stat.S_ISREG(expected[2]):
-        fd = os.open(f"/proc/self/fd/{pin}", os.O_RDONLY | os.O_CLOEXEC | os.O_NOATIME)
+        fd = os.open(f"/proc/self/fd/{pin}", os.O_RDONLY | os.O_CLOEXEC)
         try:
             if p._identity(os.fstat(fd)) != expected:
                 raise _blocked("pinned content identity changed")

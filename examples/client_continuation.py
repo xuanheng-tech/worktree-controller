@@ -32,8 +32,8 @@ def main():
         parser.error("workspace must not be a symlink")
     if not args.resume and (workspace.exists() or not workspace.parent.is_dir()):
         parser.error("workspace must be a new path under an existing directory")
-    if sys.platform != "linux" or sys.version_info[:2] != (3, 12):
-        parser.error("the example requires Linux and Python 3.12")
+    if sys.platform != "linux" or not ((3, 12) <= sys.version_info[:2] < (3, 15)):
+        parser.error("the example requires Linux and Python 3.12-3.14")
     controller = Path(sys.executable).with_name("worktree-controller")
     if not controller.is_file():
         found = shutil.which("worktree-controller")
@@ -114,7 +114,7 @@ def main():
         return result
 
     capabilities = wc("capabilities")["decision"]
-    require(capabilities.get("contract_version") == 61
+    require(capabilities.get("contract_version") == 62
             and capabilities.get("storage_layout_version") == 5,
             "unsupported CLI or storage contract; no repository operation was started")
     for capability in ("task_workflow_version", "session_closeout_expectations_version",

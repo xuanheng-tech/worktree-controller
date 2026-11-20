@@ -181,12 +181,16 @@ def gc_plan(
             "reason": "advisory inventory; each release requires an exact target preflight",
         }
         return result
-    selected = target.expanduser().resolve(strict=False)
-    row = next((candidate for candidate in candidates if Path(candidate["path"]) == selected), None)
+    expanded = target.expanduser()
+    selected = expanded.parent.resolve(strict=False) / expanded.name
+    row = next(
+        (candidate for candidate in candidates if Path(candidate["path"]).resolve(strict=False) == selected),
+        None,
+    )
     if row is None:
         raise ControllerError("UNREGISTERED_WORKTREE", f"GC target is not registered: {selected}")
     result["candidate"] = row
-    item = next(item for item in repository.worktrees if item.path == selected)
+    item = next(item for item in repository.worktrees if item.path.resolve(strict=False) == selected)
     if item.prunable:
         if release_intent_id is not None:
             result["decision"] = {"code": "GC_BLOCKED", "blockers": ["INVALID_RELEASE_INTENT"]}
@@ -278,11 +282,12 @@ def _replay_reviewed_release(
 
     repository = inventory(repository_path)
     snapshot = MetadataStore(repository.common_dir).load()
-    selected = target.expanduser().resolve(strict=False)
+    expanded = target.expanduser()
+    selected = expanded.parent.resolve(strict=False) / expanded.name
     completed = [
         (receipt, snapshot.release_plans.get(receipt.plan_id))
         for receipt in snapshot.release_receipts.values()
-        if receipt.result == "RELEASED" and Path(receipt.target_path) == selected
+        if receipt.result == "RELEASED" and Path(receipt.target_path).resolve(strict=False) == selected
     ]
     matches = [
         (receipt, plan)

@@ -60,7 +60,16 @@ REDUNDANT = "redundant"
 DESTINATION_ONLY = "destination-only"
 REWRITE = "rewrite"
 MUTABLE_AFTER_SWITCH = frozenset(
-    {"records", "bindings", "writer-leases", "integration-intents", "release-intents"}
+    {
+        "records",
+        "bindings",
+        "writer-leases",
+        "integration-intents",
+        "release-intents",
+        "transactions",
+        "registration-prune-receipts",
+        "session-closeouts",
+    }
 )
 
 IDENTITY_FIELDS = (
@@ -1367,6 +1376,8 @@ def verify_namespace(
                 _relative(relative)
             except ControllerError:
                 problems.append("RECEIPT_SHAPE_INVALID")
+                continue
+            if relative.split("/", 1)[0] in MUTABLE_AFTER_SWITCH:
                 continue
             if not (current_root / relative).is_file():
                 problems.append(f"MOVED_DOCUMENT_MISSING:{relative}")

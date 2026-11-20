@@ -11,9 +11,9 @@ def test_busy_paths_optimization() -> None:
 
     # 2. Mock _referenced_paths to return specific candidates
     sample_proc = {
-        1001: ["/home/hsd/worktrees/repo/wt1/file.txt", "/usr/lib/libc.so"],
-        1002: ["/home/hsd/worktrees/repo/wt1-other/test.py", "/dev/null"],
-        1003: ["/home/hsd/worktrees/repo/wt2", "/lib/x86_64-linux-gnu/ld.so"],
+        1001: ["/tmp/example-worktrees/repo/wt1/file.txt", "/usr/lib/libc.so"],
+        1002: ["/tmp/example-worktrees/repo/wt1-other/test.py", "/dev/null"],
+        1003: ["/tmp/example-worktrees/repo/wt2", "/lib/x86_64-linux-gnu/ld.so"],
         1004: ["/other/path/unrelated.py"],
     }
 
@@ -21,9 +21,9 @@ def test_busy_paths_optimization() -> None:
         return sample_proc.get(pid, [])
 
     targets = {
-        "/home/hsd/worktrees/repo/wt1",
-        "/home/hsd/worktrees/repo/wt2",
-        "/home/hsd/worktrees/repo/wt3",
+        "/tmp/example-worktrees/repo/wt1",
+        "/tmp/example-worktrees/repo/wt2",
+        "/tmp/example-worktrees/repo/wt3",
     }
 
     with (
@@ -32,8 +32,8 @@ def test_busy_paths_optimization() -> None:
         patch("os.getpid", return_value=9999),
     ):
         result = busy_paths(targets)
-        # wt1 matched via prefix /home/hsd/worktrees/repo/wt1/file.txt
+        # wt1 matched via prefix /tmp/example-worktrees/repo/wt1/file.txt
         # wt1-other does NOT match wt1
-        # wt2 matched directly via /home/hsd/worktrees/repo/wt2
+        # wt2 matched directly via /tmp/example-worktrees/repo/wt2
         # wt3 is not in sample_proc
-        assert result == {"/home/hsd/worktrees/repo/wt1", "/home/hsd/worktrees/repo/wt2"}
+        assert result == {"/tmp/example-worktrees/repo/wt1", "/tmp/example-worktrees/repo/wt2"}

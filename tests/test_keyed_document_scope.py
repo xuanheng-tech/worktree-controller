@@ -19,8 +19,6 @@ from tests.test_integration_pipeline import (
 from tests.test_shadow import GitRepository, git
 from worktree_controller.git_backend import inventory
 from worktree_controller.keyed_document_scope import (
-    PROGRESS_PATH,
-    PROGRESS_PROFILES,
     _changed_keys,
     independent_progress_scopes,
 )
@@ -29,19 +27,53 @@ from worktree_controller.lifecycle import (
     acquire_publication_lease,
     refresh_integration,
 )
+from worktree_controller.models import KeyedDocumentRule
 from worktree_controller.store import MetadataStore
+
+PROGRESS_PATH = "docs/progress/state.json"
+PROGRESS_PROFILES = {
+    "docs/progress/state.json": "progress-merge-a",
+    "docs/progress/alt-state.json": "progress-merge-b",
+}
+
+
+def _rule_for(path: str) -> KeyedDocumentRule:
+    return KeyedDocumentRule(
+        path=path,
+        merge_driver=PROGRESS_PROFILES[path],
+        collections=(
+            ("tasks", "authority_key"),
+            ("development_lines", "id"),
+            ("modules", "id"),
+            ("decisions", "id"),
+        ),
+        schema_version=2,
+        repo_id="generic-repo",
+    )
+
+
+def _policy_for(path: str) -> str:
+    driver = PROGRESS_PROFILES[path]
+    return (
+        POLICY_THREE_CANDIDATES
+        + f'\n[keyed_documents."{path}"]\n'
+        + f'merge_driver = "{driver}"\n'
+        + "schema_version = 2\n"
+        + 'repo_id = "generic-repo"\n'
+        + 'collections = { tasks = "authority_key", development_lines = "id", modules = "id", decisions = "id" }\n'
+    )
 
 
 @pytest.fixture(autouse=True, params=tuple(PROGRESS_PROFILES))
 def progress_profile(request, monkeypatch):
-    """Run actual queue and publication guards against both committed protocols."""
+    """Run actual queue and publication guards against configured keyed-document protocols."""
     monkeypatch.setattr(sys.modules[__name__], "PROGRESS_PATH", request.param)
 
 
 def _document() -> dict:
     return {
         "schema_version": 2,
-        "repo_id": "quant-platform",
+        "repo_id": "generic-repo",
         "note": "synthetic fixture",
         "tasks": [
             {"authority_key": "left", "current_step": "before"},
@@ -88,7 +120,7 @@ def test_diff_uses_whole_records_and_includes_additions_and_deletions() -> None:
     after["tasks"].pop(0)
     after["tasks"].append({"authority_key": "new", "goal": "new goal"})
     after["tasks"][0]["evidence"] = ["doc:synthetic.md"]
-    assert _changed_keys(_raw(before), _raw(after)) == {
+    assert _changed_keys(_raw(before), _raw(after), _rule_for(PROGRESS_PATH)) == {
         ("tasks", "left"),
         ("tasks", "right"),
         ("tasks", "new"),
@@ -99,7 +131,7 @@ def test_json_boolean_and_number_are_distinct_record_changes() -> None:
     before, after = _document(), _document()
     before["tasks"][0]["value"] = True
     after["tasks"][0]["value"] = 1
-    assert _changed_keys(_raw(before), _raw(after)) == {("tasks", "left")}
+    assert _changed_keys(_raw(before), _raw(after), _rule_for(PROGRESS_PATH)) == {("tasks", "left")}
 
 
 def test_json_boolean_and_number_metadata_change_retains_file_fence() -> None:
@@ -107,7 +139,7 @@ def test_json_boolean_and_number_metadata_change_retains_file_fence() -> None:
     before["note"] = {"verified": True}
     after["note"] = {"verified": 1}
     with pytest.raises(ValueError, match="document metadata changed"):
-        _changed_keys(_raw(before), _raw(after))
+        _changed_keys(_raw(before), _raw(after), _rule_for(PROGRESS_PATH))
 
 
 @pytest.mark.parametrize(
@@ -132,11 +164,19 @@ def test_unsupported_or_ambiguous_documents_fail_closed(mutation: str) -> None:
     elif mutation == "nan":
         raw = raw.replace(b'"before"', b"NaN")
     with pytest.raises(ValueError):
-        _changed_keys(_raw(_document()), raw)
+        _changed_keys(_raw(_document()), raw, _rule_for(PROGRESS_PATH))
+
+
+def test_default_policy_without_keyed_documents_keeps_file_fence() -> None:
+    with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES) as repo:
+        (_lp, _left_id, left), (_rp, _right_id, right) = _sources(repo)
+        assert not independent_progress_scopes(
+            repo.repo, (PROGRESS_PATH,), (PROGRESS_PATH,), (left,), (right,)
+        )
 
 
 def test_frozen_objects_prove_disjointness_without_trusting_worktree() -> None:
-    with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES) as repo:
+    with GitRepository(linked=0, policy_text=_policy_for(PROGRESS_PATH)) as repo:
         (left_path, _left_id, left), (_right_path, _right_id, right) = _sources(repo)
         (left_path / PROGRESS_PATH).write_text("invalid mutable contents")
         assert independent_progress_scopes(
@@ -167,7 +207,7 @@ def test_frozen_objects_prove_disjointness_without_trusting_worktree() -> None:
 
 @pytest.mark.parametrize("mutation", ["missing", "symlink", "oversized", "profile"])
 def test_unproved_committed_protocol_keeps_file_fence(mutation: str) -> None:
-    with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES) as repo:
+    with GitRepository(linked=0, policy_text=_policy_for(PROGRESS_PATH)) as repo:
         (left_path, _left_id, _left), (_right_path, _right_id, right) = _sources(repo)
         path = left_path / PROGRESS_PATH
         if mutation in ("missing", "symlink"):
@@ -189,7 +229,7 @@ def test_unproved_committed_protocol_keeps_file_fence(mutation: str) -> None:
 
 
 def test_existing_scope_wait_clears_without_replacing_frozen_evidence(monkeypatch) -> None:
-    with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES) as repo:
+    with GitRepository(linked=0, policy_text=_policy_for(PROGRESS_PATH)) as repo:
         (_lp, left, _lh), (_rp, right, _rh) = _sources(repo)
         _enqueue(repo, task="left-integration", source_allocation=left)
         with monkeypatch.context() as old_runtime:
@@ -212,7 +252,7 @@ def test_existing_scope_wait_clears_without_replacing_frozen_evidence(monkeypatc
 
 
 def test_same_record_still_waits_in_the_actual_queue() -> None:
-    with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES) as repo:
+    with GitRepository(linked=0, policy_text=_policy_for(PROGRESS_PATH)) as repo:
         (_lp, left, _lh), (_rp, right, _rh) = _sources(repo, same_key=True)
         first = _enqueue(repo, task="left-integration", source_allocation=left)
         second = _enqueue(repo, task="right-integration", source_allocation=right)
@@ -225,7 +265,7 @@ def test_same_record_still_waits_in_the_actual_queue() -> None:
 
 
 def test_independent_records_prepare_but_stale_main_still_requires_revalidation() -> None:
-    with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES) as repo:
+    with GitRepository(linked=0, policy_text=_policy_for(PROGRESS_PATH)) as repo:
         (_lp, left, _lh), (_rp, right, _rh) = _sources(repo)
         first = _enqueue(repo, task="left-integration", source_allocation=left)
         second = _enqueue(repo, task="right-integration", source_allocation=right)
