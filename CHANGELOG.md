@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.36.0 - 2026-11-20
+## 1.36.0
 
 - **Critical reliability fixes**:
   - Fix `/proc/<pid>/maps` multi-space and `(deleted)` path parsing (`split(maxsplit=5)` + symlink realpath normalization) in `writer_lease`.
