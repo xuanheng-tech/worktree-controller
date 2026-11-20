@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""Install or check thin Worktree Controller CLI/hook consumer entry points.
+
+Governance stays in Worktree Controller. This installer verifies the installed
+Controller's published capabilities against ``CONTROLLER_REQUIREMENTS`` declared
+in ``scripts/controller-consumer``, preflights every destination before writing
+(refusing symlinks or unrelated user files), and atomically writes the five
+consumer shims with mode 0755.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from collections.abc import Callable, Mapping
+from pathlib import Path
+
+SOURCE_PATH = Path(__file__).resolve().with_name("controller-consumer")
+OWNED_MARKERS = (
+    "Worktree Controller consumer adapter",
+    "Agent Workspace Controller consumer adapter",
+)
+CONSUMER_TARGETS = (
+    ".local/bin/codex-worktree",
+    ".local/bin/codex-worktree-session-end",
+    "bin/codex-worktree-writer-lease",
+    "bin/claude-worktree-hook",
+    "bin/claude-worktree",
+)
+
+
+class ConsumerInstallError(RuntimeError):
+    """Fail-closed installation or preflight refusal."""
+
+
+def consumer_requirements(source: Path = SOURCE_PATH) -> dict[str, int]:
+    """Read CONTROLLER_REQUIREMENTS from source AST without executing the script."""
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "CONTROLLER_REQUIREMENTS"
+        ):
+            value = ast.literal_eval(node.value)
+            if not isinstance(value, dict) or not all(
+                isinstance(key, str) and type(req) is int and req >= 1
+                for key, req in value.items()
+            ):
+                raise ConsumerInstallError("CONTROLLER_REQUIREMENTS is malformed")
+            return value
+    raise ConsumerInstallError("CONTROLLER_REQUIREMENTS is missing")
+
+
+def probe_controller_capabilities(controller: Path) -> Mapping[str, object]:
+    """Query the installed Controller's public capability contract."""
+    try:
+        completed = subprocess.run(
+            [str(controller), "capabilities", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ConsumerInstallError(f"Controller capabilities probe failed: {exc}") from None
+    if completed.returncode != 0:
+        raise ConsumerInstallError(
+            f"Controller capabilities probe exited {completed.returncode}"
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except ValueError:
+        raise ConsumerInstallError("Controller capabilities returned invalid JSON") from None
+    decision = payload.get("decision") if isinstance(payload, dict) else None
+    if not isinstance(decision, dict):
+        raise ConsumerInstallError("Controller capabilities payload missing decision object")
+    return decision
+
+
+def verify_capabilities(
+    required: Mapping[str, int],
+    advertised: Mapping[str, object],
+) -> list[str]:
+    """Return any missing or insufficient Controller capability requirements."""
+    missing: list[str] = []
+    for name, minimum in sorted(required.items()):
+        actual = advertised.get(name)
+        if type(actual) is not int or actual < minimum:
+            missing.append(f"{name}>={minimum} (got {actual!r})")
+    return missing
+
+
+def _is_owned_target(target: Path) -> bool:
+    if target.is_symlink() or not target.is_file():
+        return False
+    header = target.read_text(encoding="utf-8", errors="replace")[:240]
+    return any(marker in header for marker in OWNED_MARKERS)
+
+
+def _preflight_targets(targets: list[Path]) -> None:
+    for target in targets:
+        if target.is_symlink():
+            raise ConsumerInstallError(f"Refusing to overwrite symlink target: {target}")
+        if target.exists() and not _is_owned_target(target):
+            raise ConsumerInstallError(
+                f"Refusing to overwrite unowned target (missing consumer marker): {target}"
+            )
+
+
+def _atomic_install(target: Path, content: bytes) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=target.parent,
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.write(content)
+    try:
+        os.chmod(temporary, 0o755)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def check_consumers(
+    *,
+    home: Path,
+    source: Path = SOURCE_PATH,
+    controller: Path | None = None,
+    capabilities_probe: Callable[[Path], Mapping[str, object]] = probe_controller_capabilities,
+) -> dict[str, object]:
+    """Inspect current consumer installation and Controller capability readiness."""
+    content = source.read_bytes()
+    expected_sha = hashlib.sha256(content).hexdigest()
+    required = consumer_requirements(source)
+    controller_path = controller or (home / ".local/bin/worktree-controller")
+    missing_caps = verify_capabilities(required, capabilities_probe(controller_path))
+    entries = []
+    all_current = True
+    for relative in CONSUMER_TARGETS:
+        target = home / relative
+        if target.is_symlink():
+            state = "refused_symlink"
+            actual_sha = None
+            all_current = False
+        elif not target.exists():
+            state = "missing"
+            actual_sha = None
+            all_current = False
+        elif not _is_owned_target(target):
+            state = "refused_unowned"
+            actual_sha = None
+            all_current = False
+        else:
+            actual_bytes = target.read_bytes()
+            actual_sha = hashlib.sha256(actual_bytes).hexdigest()
+            mode_ok = bool(os.access(target, os.X_OK))
+            if actual_bytes == content and mode_ok:
+                state = "current"
+            else:
+                state = "outdated"
+                all_current = False
+        entries.append({"path": str(target), "state": state, "sha256": actual_sha})
+    return {
+        "ok": all_current and not missing_caps,
+        "source": str(source),
+        "expected_sha256": expected_sha,
+        "missing_capabilities": missing_caps,
+        "targets": entries,
+    }
+
+
+def install_consumers(
+    *,
+    home: Path,
+    source: Path = SOURCE_PATH,
+    controller: Path | None = None,
+    dry_run: bool = False,
+    capabilities_probe: Callable[[Path], Mapping[str, object]] = probe_controller_capabilities,
+) -> dict[str, object]:
+    """Install the five consumer entry points after capability and ownership preflight."""
+    content = source.read_bytes()
+    required = consumer_requirements(source)
+    controller_path = controller or (home / ".local/bin/worktree-controller")
+    missing_caps = verify_capabilities(required, capabilities_probe(controller_path))
+    if missing_caps:
+        raise ConsumerInstallError(
+            "Installed Controller lacks required capabilities: " + ", ".join(missing_caps)
+        )
+    targets = [home / relative for relative in CONSUMER_TARGETS]
+    _preflight_targets(targets)
+    written: list[str] = []
+    unchanged: list[str] = []
+    for target in targets:
+        if target.exists() and target.read_bytes() == content and os.access(target, os.X_OK):
+            unchanged.append(str(target))
+            continue
+        if not dry_run:
+            _atomic_install(target, content)
+        written.append(str(target))
+    return {
+        "dry_run": dry_run,
+        "source": str(source),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "written": written,
+        "unchanged": unchanged,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--home", type=Path, default=Path.home())
+    parser.add_argument("--source", type=Path, default=SOURCE_PATH)
+    parser.add_argument("--controller", type=Path, default=None)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--check", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        if args.check:
+            report = check_consumers(
+                home=args.home, source=args.source, controller=args.controller
+            )
+            print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+            return 0 if report["ok"] else 1
+        report = install_consumers(
+            home=args.home,
+            source=args.source,
+            controller=args.controller,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return 0
+    except (ConsumerInstallError, OSError, SyntaxError, ValueError) as exc:
+        print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

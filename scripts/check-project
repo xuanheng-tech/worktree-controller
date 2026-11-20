@@ -222,6 +222,7 @@ def main():
     run(
         ROOT / ".venv/bin/ruff", "check", "--no-cache", "src", "tests",
         "scripts/controller-activate", "scripts/check-writer-rollout", "scripts/check-project",
+        "scripts/controller-consumer", "scripts/install-controller-consumers",
         "scripts/benchmark-cli",
         "scripts/check-cross-tool",
         "scripts/release-project",

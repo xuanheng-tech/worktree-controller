@@ -62,6 +62,8 @@ Finalizer handoff. These CLI 61 entrypoints retain the existing ownership, lease
 For client developers, the [AI client integration guide](docs/client-integration.md) describes the
 public identity and closeout contract, with an offline example that continues the same unfinished
 task from two independent client processes while preserving its files and checkpoint.
+Thin CLI and Claude Code hook shims are bundled in `scripts/controller-consumer` and installed or
+verified via `scripts/install-controller-consumers` (`--dry-run` / `--check`).
 
 ## Use WC in a real project
 

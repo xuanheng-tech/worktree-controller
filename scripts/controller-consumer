@@ -1,0 +1,341 @@
+#!/usr/bin/env python3
+"""Worktree Controller consumer adapter; governance stays in Controller."""
+
+import json
+import os
+import shlex
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+
+def controller_arguments(arguments):
+    """Translate the published v1 spelling without changing values or commands."""
+    result = []
+    for index, value in enumerate(arguments):
+        if value == "--":
+            return [*result, *arguments[index:]]
+        result.append("--client-id" if value == "--provider" else value)
+    return result
+
+
+# Controller capabilities this adapter's requests rely on. Installation, the
+# deployed capability report and the rollout gate read this literal; it is never
+# executed elsewhere.
+CONTROLLER_REQUIREMENTS = {
+    "host_handoff_continuation_version": 2,
+    "session_closeout_report_version": 1,
+    "task_checkpoint_park_version": 1,
+    "checkout_owner_action_version": 1,
+    "hosted_session_closeout_check_version": 1,
+    "session_closeout_expectations_version": 1,
+}
+
+# Claude tool payloads name their write target here. The adapter only describes the
+# call; Controller decides what a frozen handoff's holder may still do.
+WRITE_TARGETS = {
+    "Edit": "file_path",
+    "MultiEdit": "file_path",
+    "Write": "file_path",
+    "NotebookEdit": "notebook_path",
+}
+READ_TOOLS = frozenset({"Read", "Glob", "Grep", "LS", "NotebookRead"})
+
+
+def access_arguments(event, payload):
+    """Translate one hook payload into a host-check access class and target."""
+    if event != "PreToolUse":
+        return ["--access", "read"]
+    tool = payload.get("tool_name")
+    if tool in WRITE_TARGETS:
+        details = payload.get("tool_input")
+        target = details.get(WRITE_TARGETS[tool]) if isinstance(details, dict) else None
+        if not isinstance(target, str) or not target:
+            raise ValueError("write tool target is missing")
+        return ["--access", "write", "--target", target]
+    return ["--access", "read" if tool in READ_TOOLS else "exec"]
+
+
+def change_directory_target(payload, cwd):
+    """Return the destination of a Bash call that only changes directory.
+
+    Such a call changes nothing in the current directory; it reads its
+    destination. Checking that destination lets a session leave a checkout it
+    does not hold instead of being locked out of every tool.
+    """
+    details = payload.get("tool_input")
+    command = (
+        details.get("command")
+        if payload.get("tool_name") == "Bash" and isinstance(details, dict)
+        else None
+    )
+    if not isinstance(command, str) or any(
+        character in command for character in ";&|<>`$(){}*?[]\n\\"
+    ):
+        return None
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    if len(words) != 2 or words[0] != "cd":
+        return None
+    return str(Path(cwd, os.path.expanduser(words[1])))
+
+
+def hook(event):
+    if event not in {"SessionStart", "PreToolUse", "Stop", "SessionEnd"}:
+        raise ValueError("unsupported hook event")
+    payload = json.load(sys.stdin)
+    if not isinstance(payload, dict) or payload.get("hook_event_name") != event:
+        raise ValueError("hook event identity is missing or mismatched")
+    path, session = payload.get("cwd"), payload.get("session_id")
+    if not isinstance(path, str) or not path or not isinstance(session, str) or not session:
+        raise ValueError("hook path/session identity is missing")
+    hosted = "CONTROLLER_WRITER_MODE" in os.environ or "CONTROLLER_WRITER_CONTEXT" in os.environ
+    if event == "Stop" and not hosted:
+        return end_session(
+            path,
+            session,
+            checking=True,
+            already_continued=payload.get("stop_hook_active") is True,
+        )
+    if event == "SessionEnd" and not hosted:
+        return end_session(path, session)
+    if hosted:
+        arguments = ["host-check", path, *access_arguments(event, payload)]
+    else:
+        destination = change_directory_target(payload, path) if event == "PreToolUse" else None
+        arguments = [
+            "check",
+            "claude",
+            destination or path,
+            "ancestor:claude",
+            "--session-id",
+            session,
+            *(["--access", "read"] if destination else access_arguments(event, payload)),
+        ]
+    result = subprocess.run(
+        [str(Path.home() / ".local/bin/worktree-controller"), "writer-session", *arguments],
+        capture_output=True,
+        text=True,
+        timeout=85,
+    )
+    if result.returncode:
+        # Do not echo hook payloads or issue a permission override.
+        raise ValueError(
+            "Controller entitlement check refused; leave with a Bash call of only "
+            "`cd <directory outside this checkout>`, or use worktree-session for a governed Terminal"
+        )
+    if event == "Stop" and hosted:
+        return end_session(
+            path,
+            session,
+            checking=True,
+            hosted=True,
+            already_continued=payload.get("stop_hook_active") is True,
+        )
+    return 0
+
+
+def end_session(path, session, checking=False, already_continued=False, hosted=False):
+    """Hand this session's own leased checkouts back through Controller; never fail exit.
+
+    Direct ending calls select this live Claude process. Hosted preparation uses
+    its verified host identity and is always read-only. Controller decides each row.
+    """
+    try:
+        client_id, holder_selector, run_id = "claude", "ancestor:claude", None
+        expected_allocations = []
+        if hosted:
+            if not checking:
+                raise ValueError("a hosted child never ends its parent")
+            # hook() already verified this context through Controller host-check.
+            # Use the host's identity, not the provider's unrelated hook session ID.
+            context = json.loads(os.environ["CONTROLLER_WRITER_CONTEXT"])
+            path, client_id, session = (
+                context[key] for key in ("repository_path", "client_id", "session_id")
+            )
+            run_id, pid = context["run_id"], context["holder"]["pid"]
+            if (
+                any(not isinstance(value, str) or not value for value in (path, client_id, session))
+                or type(pid) is not int
+                or pid < 1
+                or (run_id is not None and (not isinstance(run_id, str) or not run_id))
+            ):
+                raise ValueError("host session selector is invalid")
+            holder_selector = str(pid)
+            expected_allocations.append(context["allocation_id"])
+        else:
+            described = subprocess.run(
+                [
+                    str(Path.home() / ".local/bin/worktree-controller"),
+                    "writer-session",
+                    "describe",
+                    path,
+                    "ancestor:claude",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=85,
+            )
+            projection = json.loads(described.stdout)["decision"]
+            if described.returncode or not isinstance(projection, dict):
+                raise ValueError("Controller session projection is unavailable")
+            if projection.get("code") == "OUTSIDE_CONTROLLER_GOVERNANCE":
+                return 0
+            if projection.get("code") != "WRITER_SESSION_DESCRIBED":
+                raise ValueError("Controller session projection is invalid")
+            path = projection["repository_path"]
+            holder = (projection.get("lease") or {}).get("holder") or {}
+            if (
+                projection.get("holder_matches") is True
+                and holder.get("client_id") == client_id
+                and holder.get("session_id") == session
+            ):
+                run_id = holder.get("run_id")
+                expected_allocations.append(projection["allocation_id"])
+        if any(
+            not isinstance(value, str) or str(uuid.UUID(value)) != value
+            for value in expected_allocations
+        ):
+            raise ValueError("known allocation identity is invalid")
+        result = subprocess.run(
+            [
+                str(Path.home() / ".local/bin/worktree-session-end"),
+                "--path",
+                path,
+                "--client-id",
+                client_id,
+                "--session-id",
+                session,
+                "--holder",
+                holder_selector,
+                "--trigger",
+                "task-terminal",
+                *(["--run-id", run_id] if isinstance(run_id, str) and run_id else []),
+                *[
+                    argument
+                    for allocation in expected_allocations
+                    for argument in ("--expected-allocation-id", allocation)
+                ],
+                *(["--check"] if checking else []),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=85 if checking else None,
+        )
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, dict) or any(
+            not isinstance(payload.get(key, []), list)
+            for key in ("allocations", "previous_allocations", "expected_allocations")
+        ):
+            raise ValueError("Controller session result is invalid")
+        summary = payload.get("summary")
+        if not isinstance(summary, dict) or summary.get("contract") != "session-closeout/v1":
+            raise ValueError("Controller session result is unavailable")
+        rows = [
+            *payload.get("allocations", []),
+            *payload.get("previous_allocations", []),
+            *payload.get("expected_allocations", []),
+        ]
+        observed_allocations = {row.get("allocation_id") for row in rows if isinstance(row, dict)}
+        complete = (
+            result.returncode == 0
+            and payload.get("selection_complete") is True
+            and summary.get("terminal_complete") is True
+            and summary.get("selected") == len(rows)
+            and set(expected_allocations).issubset(observed_allocations)
+            and summary.get("pending") == 0
+            and all(
+                isinstance(row, dict)
+                and row.get("terminal_complete") is True
+                and isinstance(row.get("decision"), dict)
+                and isinstance(row["decision"].get("code"), str)
+                and not row["decision"].get("blocker")
+                and row["decision"]["code"] != "NO_TERMINAL_ACTION"
+                for row in rows
+            )
+        )
+        if checking and not complete:
+            reason = (
+                "Preserve this task before stopping: finalize accepted changes through Git Finalizer, "
+                "push and hand off, or save its Task checkpoint and park. Classify local artifacts; "
+                "keep unknown files. Recheck every known allocation with the real session selector "
+                "and --expected-allocation-id; pending recovery_argv remains the recorded owner's work. "
+                + json.dumps(payload, sort_keys=True)
+            )
+            # Stop is a turn boundary, not process exit. Give one preparation
+            # turn without trapping user questions or an unresolved dependency.
+            print(
+                json.dumps(
+                    {"systemMessage": "Closeout remains pending. " + reason}
+                    if already_continued
+                    else {"decision": "block", "reason": reason}
+                )
+            )
+        elif not checking:
+            # SessionEnd is advisory; the caller gets the actual per-tree result.
+            print(json.dumps(payload, sort_keys=True), file=sys.stderr)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        if checking:
+            reason = (
+                "Controller could not verify task preservation; keep the checkout and retry "
+                "the session check."
+            )
+            print(
+                json.dumps(
+                    {"systemMessage": reason}
+                    if already_continued
+                    else {"decision": "block", "reason": reason}
+                )
+            )
+        else:
+            print(
+                "Controller session closeout is unverified; preserve the task and retry with "
+                "its real selector.",
+                file=sys.stderr,
+            )
+    return 0
+
+
+def main(argv):
+    name = Path(argv[0]).name
+    local = Path.home() / ".local/bin"
+    if name == "claude-worktree-hook":
+        return hook(argv[1] if len(argv) == 2 else "")
+    if name == "claude-worktree":
+        arguments = [
+            str(local / "worktree-session"),
+            "--path",
+            str(Path.cwd()),
+            "--client-id",
+            "claude",
+            "--session-id",
+            str(uuid.uuid4()),
+            "--",
+            "claude",
+            *argv[1:],
+        ]
+    elif name == "codex-worktree-writer-lease":
+        arguments = [
+            str(local / "worktree-controller"),
+            "writer-session",
+            *controller_arguments(argv[1:]),
+        ]
+    elif name == "codex-worktree":
+        arguments = [str(local / "worktree-controller"), *controller_arguments(argv[1:])]
+    elif name == "codex-worktree-session-end":
+        arguments = [str(local / "worktree-session-end"), *argv[1:]]
+    else:
+        raise ValueError("unknown Controller consumer entry point")
+    os.execv(arguments[0], arguments)
+    return 127
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv))
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"Controller consumer blocked: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
