@@ -18,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .controller import status
+from .controller import compact_status
 from .git_backend import inventory
 from .lifecycle import _cancel_release_intents
 from .models import (
@@ -325,8 +325,7 @@ def reconcile_writers(
             dry_run=dry_run,
         )
 
-    payload = status(repository_path)
-    payload["command"] = "reconcile-writers"
+    payload = compact_status(repository_path, command="reconcile-writers")
     payload["decision"] = {
         "code": ("WRITERS_RECONCILED" if converged or stranded else "NO_WRITER_ACTION"),
         "reason": (

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.36.1
+
+- **Output slimming & default active filtering**:
+  - `integration-queue` now returns active/non-terminal intents only (`effective_state` not in `RELEASED`/`ABANDONED`) by default, along with compact summary counts (`total_intents`, `active_intents`, `terminal_intents`, `omitted_terminal_intents`, `effective_state_counts`); pass `--all` to include full terminal history.
+  - Routine mutating and queue commands stop embedding the full multi-worktree `status(...)` blob by default, returning a compact repository summary plus only the affected worktree row (or `[]` when no live checkout applies); pass `--full-status` on any command for the full legacy status view.
+  - `status` omits null optional fields and idle `lifecycle_observation` boilerplate by default while adding `repository.summary` counts (`--full-status` / `--all` restores full verbose fields, and `status --all` includes released record summaries).
+  - CLI `--json` output emits compact JSON without indentation whitespace.
+- **Safe terminal cleanup evidence retention & GC**:
+  - Add `reconcile cleanup-evidence [--apply] [--keep-recent N] [--older-than-days D] [--max-bytes B]` to safely plan and prune verified terminal `RELEASED` `cleanup-actions` directories and `completion-receipts` files (strictly excluding active allocations, active leases, non-terminal integration intents, and any transaction/recovery evidence chains).
+  - Write future `completion-receipts` in compact JSON and automatically bound historical `RELEASED` cleanup evidence during `release` and `reconcile retention --apply`.
+  - CLI contract (`62`) and storage layout (`5`) are unchanged.
+
 ## 1.36.0
 
 - **Critical reliability fixes**:

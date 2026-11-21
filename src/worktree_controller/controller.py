@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import stat
-from collections import defaultdict
-from contextlib import ExitStack
+from collections import Counter, defaultdict
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -53,6 +55,142 @@ from .store import TIMEZONE, MetadataStore, new_record
 from .writer_lease import check_writer_entitlement
 
 WRITE_OPERATIONS = frozenset({"feature-write", "integration-write", "recovery", "finalization"})
+TERMINAL_INTENT_EFFECTIVE_STATES = frozenset({"RELEASED", "ABANDONED"})
+_FULL_STATUS_OUTPUT: ContextVar[bool] = ContextVar("wc_full_status_output", default=False)
+_COMPACT_WORKTREE_REQUIRED_KEYS = frozenset(
+    {
+        "kind",
+        "canonical",
+        "path",
+        "branch",
+        "detached",
+        "head",
+        "clean",
+        "dirty",
+        "changes",
+        "locked",
+        "prunable",
+        "metadata_missing",
+        "allocation_id",
+        "task_key",
+        "authority_key",
+        "module",
+        "role",
+        "owner",
+        "lifecycle",
+        "record_version",
+        "base_commit",
+        "task_commit",
+        "handoff_commit",
+        "scope_paths",
+        "source_allocations",
+        "disposable_resources",
+        "external_bindings",
+        "release_eligible",
+        "created_at",
+        "last_reviewed_at",
+    }
+)
+
+
+@contextmanager
+def status_output_mode(*, full_status: bool) -> Iterator[None]:
+    """Select compact vs full status payloads within one CLI invocation."""
+    token = _FULL_STATUS_OUTPUT.set(bool(full_status))
+    try:
+        yield
+    finally:
+        _FULL_STATUS_OUTPUT.reset(token)
+
+
+def _full_status_requested() -> bool:
+    return _FULL_STATUS_OUTPUT.get()
+
+
+def _compact_lifecycle_observation(obs: dict[str, Any]) -> dict[str, Any]:
+    lease = obs.get("lease") if isinstance(obs.get("lease"), dict) else {}
+    session = obs.get("session") if isinstance(obs.get("session"), dict) else {}
+    if (
+        lease.get("present") is True
+        or session.get("source") not in (None, "NONE")
+        or obs.get("runtime_sessions")
+        or obs.get("integrity_facts")
+        or obs.get("orphan_facts")
+    ):
+        return obs
+    compact: dict[str, Any] = {
+        "lease": {"present": False, "status": lease.get("status", "ABSENT")},
+        "session": {"session_id": None, "source": "NONE"},
+        "status": obs.get("status"),
+    }
+    if obs.get("stale_facts"):
+        compact["stale_facts"] = obs["stale_facts"]
+    return compact
+
+
+def _compact_worktree_row(row: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key, value in row.items():
+        if key == "release_note":
+            continue
+        if key == "lifecycle_observation" and isinstance(value, dict):
+            compact[key] = _compact_lifecycle_observation(value)
+        elif key in _COMPACT_WORKTREE_REQUIRED_KEYS or value not in (None, [], {}):
+            compact[key] = value
+    return compact
+
+
+def _repository_summary(
+    repository: RepositoryInventory, snapshot: MetadataSnapshot
+) -> dict[str, Any]:
+    by_lifecycle: Counter[str] = Counter()
+    for item in repository.worktrees:
+        record = _record_for(item, snapshot)
+        by_lifecycle[record.lifecycle if record is not None else "UNMANAGED"] += 1
+    active_intents = 0
+    terminal_intents = 0
+    for intent in snapshot.integration_intents.values():
+        if effective_intent_state(snapshot, intent) in TERMINAL_INTENT_EFFECTIVE_STATES:
+            terminal_intents += 1
+        else:
+            active_intents += 1
+    return {
+        "records_total": len(snapshot.records),
+        "records_released": sum(r.lifecycle == "RELEASED" for r in snapshot.records.values()),
+        "worktrees_by_lifecycle": dict(sorted(by_lifecycle.items())),
+        "active_integration_intents": active_intents,
+        "terminal_integration_intents": terminal_intents,
+    }
+
+
+def _compact_repository_payload(
+    repository: RepositoryInventory,
+    policy: WorktreePolicy,
+    snapshot: MetadataSnapshot,
+) -> dict[str, Any]:
+    full = _repository_payload(repository, policy, snapshot)
+    keys = (
+        "repository_id",
+        "canonical_path",
+        "common_dir",
+        "worktree_count",
+        "admission_strategy",
+        "checkout_limits_enforced",
+        "normal_slots_remaining",
+        "hard_slots_remaining",
+        "writer_leases_recorded",
+        "integration_queue_depth",
+        "oldest_integration_enqueued_at",
+        "publication_remote",
+        "publication_branch",
+        "automatic_feature_audit_release",
+        "automatic_integration_continuation",
+        "publication_lease",
+        "policy_path",
+        "policy_present",
+        "summary",
+    )
+    return {key: full[key] for key in keys if key in full}
 
 
 def envelope(command: str) -> dict[str, Any]:
@@ -462,6 +600,7 @@ def _repository_payload(
         "policy_path": str(policy.path),
         "policy_present": policy.present,
         "metadata_path": str(MetadataStore(repository.common_dir).root),
+        "summary": _repository_summary(repository, snapshot),
     }
 
 
@@ -727,18 +866,34 @@ def _metadata_warnings(
     return warnings
 
 
-def status(repository_path: Path, *, namespace_pid: int | None = None) -> dict[str, Any]:
-    return status_observation(repository_path, namespace_pid=namespace_pid)[0]
+def status(
+    repository_path: Path,
+    *,
+    namespace_pid: int | None = None,
+    include_all: bool = False,
+    full_status: bool | None = None,
+) -> dict[str, Any]:
+    return status_observation(
+        repository_path,
+        namespace_pid=namespace_pid,
+        include_all=include_all,
+        full_status=full_status,
+    )[0]
 
 
 def status_observation(
-    repository_path: Path, *, namespace_pid: int | None = None
+    repository_path: Path,
+    *,
+    namespace_pid: int | None = None,
+    include_all: bool = False,
+    full_status: bool | None = None,
 ) -> tuple[dict[str, Any], MetadataSnapshot]:
     """Return status and its validated metadata for one query.
 
     Callers must not retain this observation across requests or use it to
     authorize a mutation, which must recheck under its own lock.
     """
+    full = _full_status_requested() if full_status is None else full_status
     result = envelope("status")
     repository = inventory(repository_path)
     diagnostics = diagnose_mounts(repository, namespace_pid=namespace_pid)
@@ -752,16 +907,121 @@ def status_observation(
     except ControllerError as exc:
         raise _environment_first(exc, diagnosis) from exc
     result["repository"] = _repository_payload(repository, policy, snapshot)
-    result["worktrees"] = _observed_worktrees(
+    rows = _observed_worktrees(
         repository, policy, snapshot, namespace_healthy=diagnosis["code"] == "HEALTHY"
     )
+    result["worktrees"] = rows if (full or include_all) else [_compact_worktree_row(r) for r in rows]
     result["orphan_observations"] = observe_repository_orphans(repository, snapshot)
     result["warnings"] = (
         _environment_warnings(diagnostics)
         + _metadata_warnings(repository, policy, snapshot)
         + (_lock_warnings(store) if diagnosis["code"] == "HEALTHY" else [])
     )
+    if include_all:
+        released = [
+            {
+                "allocation_id": rec.allocation_id,
+                "task_key": rec.task_key,
+                "authority_key": rec.authority_key,
+                "owner": rec.owner,
+                "role": rec.role,
+                "lifecycle": rec.lifecycle,
+                "record_version": rec.record_version,
+                "last_reviewed_at": rec.last_reviewed_at,
+            }
+            for rec in sorted(
+                (r for r in snapshot.records.values() if r.lifecycle == "RELEASED"),
+                key=lambda r: (r.last_reviewed_at, r.allocation_id),
+            )
+        ]
+        result["decision"] = {
+            "code": "STATUS_ALL",
+            "released_records_count": len(released),
+            "released_records": released,
+        }
     return result, snapshot
+
+
+def compact_status(
+    repository_path: Path,
+    *,
+    command: str,
+    target: Path | None = None,
+    allocation_id: str | None = None,
+    full_status: bool | None = None,
+) -> dict[str, Any]:
+    """Return a slim command envelope (compact repository + optional single affected worktree).
+
+    When ``full_status`` is active (via CLI ``--full-status`` or explicit argument),
+    falls back to the complete ``status(...)`` observation for backwards compatibility.
+    """
+    full = _full_status_requested() if full_status is None else full_status
+    if full:
+        payload = status(repository_path, full_status=True)
+        payload["command"] = command
+        return payload
+    observe_paths = frozenset({target}) if target is not None else frozenset()
+    repository = inventory(repository_path, observe_paths=observe_paths)
+    policy = load_policy(repository.canonical_path)
+    store = MetadataStore(repository.common_dir)
+    snapshot = store.load()
+    matched_item: WorktreeGitState | None = None
+    matched_record: MetadataRecord | None = None
+    if target is not None:
+        resolved_target = target.expanduser().resolve(strict=False)
+        for item in repository.worktrees:
+            if item.path.resolve(strict=False) == resolved_target:
+                matched_item = item
+                matched_record = _record_for(item, snapshot)
+                break
+    elif allocation_id is not None:
+        for item in repository.worktrees:
+            rec = _record_for(item, snapshot)
+            if rec is not None and rec.allocation_id == allocation_id:
+                matched_item = item
+                matched_record = rec
+                break
+        if matched_item is not None and matched_item.path.exists():
+            repository = inventory(repository_path, observe_paths=frozenset({matched_item.path}))
+            for item in repository.worktrees:
+                if item.path.resolve(strict=False) == matched_item.path.resolve(strict=False):
+                    matched_item = item
+                    break
+    payload = envelope(command)
+    payload["repository"] = _compact_repository_payload(repository, policy, snapshot)
+    if matched_item is not None:
+        row = _worktree_payload(matched_item, matched_record, snapshot)
+        row["lifecycle_observation"] = observe_worktree(
+            matched_item, matched_record, snapshot, policy, namespace_healthy=True
+        )
+        payload["worktrees"] = [_compact_worktree_row(row)]
+    else:
+        payload["worktrees"] = []
+    payload["warnings"] = [dict(item) for item in snapshot.warnings]
+    return payload
+
+
+def compact_observation(
+    repository_path: Path,
+    *,
+    command: str,
+    full_status: bool | None = None,
+) -> tuple[dict[str, Any], MetadataSnapshot]:
+    """Return a slim (or full when requested) envelope plus its validated snapshot."""
+    full = _full_status_requested() if full_status is None else full_status
+    if full:
+        payload, snapshot = status_observation(repository_path, full_status=True)
+        payload["command"] = command
+        return payload, snapshot
+    repository = inventory(repository_path, observe_paths=frozenset())
+    policy = load_policy(repository.canonical_path)
+    store = MetadataStore(repository.common_dir)
+    snapshot = store.load()
+    payload = envelope(command)
+    payload["repository"] = _compact_repository_payload(repository, policy, snapshot)
+    payload["worktrees"] = []
+    payload["warnings"] = [dict(item) for item in snapshot.warnings]
+    return payload, snapshot
 
 
 def _resolve_target(
@@ -813,13 +1073,22 @@ def _plan_from_snapshot(
     target: Path | None = None,
 ) -> dict[str, Any]:
     """Evaluate read-only planning; acquire still rechecks under its own lock."""
+    full = _full_status_requested()
     result = envelope("plan")
     warnings = _metadata_warnings(repository, policy, snapshot)
-    result["repository"] = _repository_payload(repository, policy, snapshot)
-    result["worktrees"] = [
-        _worktree_payload(item, _record_for(item, snapshot), snapshot)
-        for item in repository.worktrees
-    ]
+    result["repository"] = (
+        _repository_payload(repository, policy, snapshot)
+        if full
+        else _compact_repository_payload(repository, policy, snapshot)
+    )
+    result["worktrees"] = (
+        [
+            _worktree_payload(item, _record_for(item, snapshot), snapshot)
+            for item in repository.worktrees
+        ]
+        if full
+        else []
+    )
     result["warnings"] = warnings
     requested = {
         "task_key": task_key,
@@ -875,6 +1144,10 @@ def _plan_from_snapshot(
     task_matches = [(item, record) for item, record in active if record.task_key == task_key]
     if task_matches:
         item, record = task_matches[0]
+        if not full:
+            result["worktrees"] = [
+                _compact_worktree_row(_worktree_payload(item, record, snapshot))
+            ]
         return decide(
             "REUSE",
             "an active allocation already owns this task",
@@ -944,7 +1217,11 @@ def guard_write(
     its repository lock) passes them, so the decision uses that same snapshot.
     """
 
-    result = status(repository_path) if observe else envelope("write-guard")
+    result = (
+        compact_status(repository_path, command="write-guard", target=target)
+        if observe
+        else envelope("write-guard")
+    )
     result["command"] = "write-guard"
     repository = state if state is not None else inventory(repository_path)
     store = MetadataStore(repository.common_dir)
@@ -1246,11 +1523,23 @@ def adopt(
         )
     policy = load_policy(repository_after.canonical_path)
     snapshot_after = store.load()
-    result["repository"] = _repository_payload(repository_after, policy, snapshot_after)
-    result["worktrees"] = [
-        _worktree_payload(item, _record_for(item, snapshot_after), snapshot_after)
-        for item in repository_after.worktrees
-    ]
+    full = _full_status_requested()
+    result["repository"] = (
+        _repository_payload(repository_after, policy, snapshot_after)
+        if full
+        else _compact_repository_payload(repository_after, policy, snapshot_after)
+    )
+    if full:
+        result["worktrees"] = [
+            _worktree_payload(item, _record_for(item, snapshot_after), snapshot_after)
+            for item in repository_after.worktrees
+        ]
+    else:
+        result["worktrees"] = [
+            _compact_worktree_row(
+                _worktree_payload(after_item, _record_for(after_item, snapshot_after), snapshot_after)
+            )
+        ]
     result["warnings"] = _metadata_warnings(repository_after, policy, snapshot_after)
     result["decision"] = {
         "code": "ADOPTED" if created else "ALREADY_ADOPTED",

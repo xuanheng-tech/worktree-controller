@@ -31,7 +31,7 @@ def recovery_guide(repository_path: Path, *, target: Path | None = None,
         raise ControllerError("INVALID_SELECTOR", "select exactly one path or integration intent")
     repository = inventory(repository_path)
     store = MetadataStore(repository.common_dir)
-    observed = status(repository_path)
+    observed = status(repository_path, full_status=True)
     canonical = str(repository.canonical_path)
     with store.lock(exclusive=False):
         snapshot = store._load_unlocked()

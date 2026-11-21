@@ -513,8 +513,8 @@ def acquire_writer_lease(
 ) -> dict[str, Any]:
     """Claim write entitlement for one live process, without touching ownership."""
 
+    from .controller import compact_status as _compact_status
     from .controller import envelope
-    from .controller import status as _status
     from .git_backend import inventory as _inventory
     from .policy import load_policy
     from .semantics import assert_record_version as _cas
@@ -639,7 +639,11 @@ def acquire_writer_lease(
             )
             store.write_writer_lease(lease)
             code = "WRITER_LEASE_ACQUIRED"
-    payload = _status(repository_path) if observe else envelope("writer-lease-acquire")
+    payload = (
+        _compact_status(repository_path, command="writer-lease-acquire", target=target)
+        if observe
+        else envelope("writer-lease-acquire")
+    )
     payload["command"] = "writer-lease-acquire"
     payload["decision"] = {
         "code": code,
@@ -672,7 +676,7 @@ def release_writer_lease(
 ) -> dict[str, Any]:
     """Give up write entitlement. This says nothing about whether the task finished."""
 
-    from .controller import status as _status
+    from .controller import compact_status as _compact_status
     from .git_backend import inventory as _inventory
     from .semantics import managed_record as _managed_record
     from .store import MetadataStore as _Store
@@ -719,7 +723,7 @@ def release_writer_lease(
                 else "writer entitlement released; allocation and work untouched"
             )
 
-    payload = _status(repository_path)
+    payload = _compact_status(repository_path, command="writer-lease-release", target=target)
     payload["command"] = "writer-lease-release"
     payload["decision"] = {
         "code": "WRITER_LEASE_RELEASED" if removed else "NO_WRITER_LEASE",

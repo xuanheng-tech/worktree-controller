@@ -496,7 +496,7 @@ def _directory(store: MetadataStore, transaction: str, recovery_id: str) -> Path
 
 def prepare(repo: Path, *, target: Path, owner: str, version: int, recovery: dict[str, Any],
             dry_run: bool, expected_plan_id: str | None = None) -> dict[str, Any]:
-    from .controller import status
+    from .controller import compact_status
 
     store = MetadataStore(inventory(repo).common_dir)
     with store.lock(exclusive=not dry_run):
@@ -526,7 +526,7 @@ def prepare(repo: Path, *, target: Path, owner: str, version: int, recovery: dic
                 "timestamp": now_iso(),
             }
             decision.update(recovery_id=recovery_id, recovery_receipt=e.write(directory, "record.json", record))
-    result = status(repo)
+    result = compact_status(repo, command="resource-recover")
     result.update(command="resource-recover", decision=decision)
     return result
 
@@ -656,7 +656,7 @@ def _append_terminal(store: MetadataStore, record: dict[str, Any], directory: Pa
 
 
 def resume(repo: Path, *, recovery_path: Path, recovery_sha: str, dry_run: bool) -> dict[str, Any]:
-    from .controller import status
+    from .controller import compact_status
     from .lifecycle import cleanup_typed_disposable
 
     store = MetadataStore(inventory(repo).common_dir)
@@ -720,7 +720,7 @@ def resume(repo: Path, *, recovery_path: Path, recovery_sha: str, dry_run: bool)
         decision = {"code": "MULTIPLE_RECOVERY_CLEANED", "receipt_id": receipt_id,
                     "recovery_id": record["recovery_id"], "recovery_completion": reference,
                     "completed_action_will_replay": False}
-    result = status(repo)
+    result = compact_status(repo, command="resource-recover")
     result.update(command="resource-recover", decision=decision)
     return result
 

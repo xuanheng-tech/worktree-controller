@@ -16,7 +16,14 @@ from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .controller import _warning, envelope, plan, status, status_observation
+from .controller import (
+    TERMINAL_INTENT_EFFECTIVE_STATES,
+    _warning,
+    compact_observation,
+    compact_status,
+    envelope,
+    plan,
+)
 from .disposable import CONTRACT as TYPED_RESOURCE_CONTRACT
 from .disposable import classify_resources, delete_typed_resource, resource_evidence
 from .environment import (
@@ -550,36 +557,64 @@ def _intent_payload(intent: IntegrationIntent) -> dict[str, Any]:
     }
 
 
-def integration_queue(repository_path: Path) -> dict[str, Any]:
-    payload, snapshot = status_observation(repository_path)
+def integration_queue(
+    repository_path: Path,
+    *,
+    include_terminal: bool = False,
+    full_status: bool | None = None,
+) -> dict[str, Any]:
+    payload, snapshot = compact_observation(
+        repository_path, command="integration-queue", full_status=full_status
+    )
     intents = sorted(
         snapshot.integration_intents.values(),
         key=_intent_order,
     )
+    entries = [
+        {
+            **_intent_payload(intent),
+            "effective_state": _effective_intent_state(snapshot, intent),
+        }
+        for intent in intents
+    ]
+    effective_counts: dict[str, int] = {}
+    for entry in entries:
+        state = str(entry["effective_state"])
+        effective_counts[state] = effective_counts.get(state, 0) + 1
+    active_entries = [
+        entry
+        for entry in entries
+        if entry["effective_state"] not in TERMINAL_INTENT_EFFECTIVE_STATES
+    ]
+    selected = entries if include_terminal else active_entries
+    terminal_count = len(entries) - len(active_entries)
     payload["command"] = "integration-queue"
     payload["decision"] = {
         "code": "INTEGRATION_QUEUE_STATUS",
         "reason": "integration intents are ordered by immutable enqueue identity",
         "queued": sum(
-            _effective_intent_state(snapshot, intent) in {"QUEUED", "WAITING_SCOPE"}
-            for intent in intents
+            entry["effective_state"] in {"QUEUED", "WAITING_SCOPE"} for entry in active_entries
         ),
-        "intents": [
-            {
-                **_intent_payload(intent),
-                "effective_state": _effective_intent_state(snapshot, intent),
-            }
-            for intent in intents
-        ],
+        "total_intents": len(entries),
+        "active_intents": len(active_entries),
+        "terminal_intents": terminal_count,
+        "omitted_terminal_intents": 0 if include_terminal else terminal_count,
+        "include_terminal": include_terminal,
+        "effective_state_counts": dict(sorted(effective_counts.items())),
+        "intents": selected,
     }
     return payload
 
 
-def lifecycle_events(repository_path: Path, *, consumer: str) -> dict[str, Any]:
+def lifecycle_events(
+    repository_path: Path, *, consumer: str, full_status: bool | None = None
+) -> dict[str, Any]:
     _requested, common_dir = resolve_repository(repository_path)
     store = MetadataStore(common_dir)
     events = store.list_lifecycle_events(consumer)
-    payload = status(repository_path)
+    payload = compact_status(
+        repository_path, command="lifecycle-events", full_status=full_status
+    )
     payload["command"] = "lifecycle-events"
     payload["decision"] = {
         "code": "LIFECYCLE_EVENTS",
@@ -597,7 +632,7 @@ def acknowledge_lifecycle_event(
     store = MetadataStore(repository.common_dir)
     with store.lock(exclusive=True):
         created = store.acknowledge_lifecycle_event(consumer, event_id)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="lifecycle-event-ack")
     payload["command"] = "lifecycle-event-ack"
     payload["decision"] = {
         "code": "LIFECYCLE_EVENT_ACKNOWLEDGED",
@@ -666,7 +701,7 @@ INTEGRATION_RECOVERY_MATRIX: dict[str, dict[str, str]] = {
 
 
 def integration_recovery_matrix(repository_path: Path) -> dict[str, Any]:
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="integration-recovery-matrix")
     payload["command"] = "integration-recovery-matrix"
     payload["decision"] = {
         "code": "INTEGRATION_RECOVERY_MATRIX",
@@ -953,7 +988,7 @@ def enqueue_integration(
             store.write_integration_intent(intent)
             _emit_lifecycle_event(store, repository_id, intent, "INTENT_QUEUED")
             created = True
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="integration-enqueue")
     payload["command"] = "integration-enqueue"
     payload["decision"] = {
         "code": "INTEGRATION_ENQUEUED" if created else "INTEGRATION_ALREADY_QUEUED",
@@ -966,7 +1001,7 @@ def enqueue_integration(
 def _queue_wait_decision(
     repository_path: Path, intent: IntegrationIntent, reason: str
 ) -> dict[str, Any]:
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="integration-claim")
     payload["command"] = "integration-claim"
     payload["decision"] = {
         "code": (
@@ -1028,7 +1063,7 @@ def _reuse_integration_claim(
         if conflicts(store, allocation=record.allocation_id, target=item.path):
             raise ControllerError("INTERRUPTED_TRANSACTION", "candidate has unresolved lifecycle effects")
         _sources(repository, snapshot, store, intent, require_idle=False)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="integration-claim", target=item.path)
     payload["command"] = "integration-claim"
     payload["decision"] = {
         "code": "INTEGRATION_CONFLICT_CLAIMED" if pending_merge else "INTEGRATION_CANDIDATE_CLAIMED",
@@ -1337,7 +1372,7 @@ def _record_claim_conflict(
         )
         store.replace_integration_intent(intent)
         _emit_lifecycle_event(store, snapshot.repository_id, intent, "ATTENTION_REQUIRED")
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="integration-claim")
     payload["command"] = "integration-claim"
     payload["decision"] = {
         "code": "INTEGRATION_CONFLICT_BLOCKED",
@@ -1534,7 +1569,7 @@ def reconcile_integration_intents(
                 "RESOURCE_WAIT",
             }:
                 break
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="reconcile integration-intents")
     payload["command"] = "reconcile integration-intents"
     payload["decision"] = {
         "code": (
@@ -2205,7 +2240,11 @@ def _acquire_once(
         store.remove_transaction(transaction_id)
         if resource_request is not None:
             AdmissionLedger().allocated(resource_request, allocation_id=record.allocation_id)
-    payload = status(repository_path) if observe else envelope("acquire")
+    payload = (
+        compact_status(repository_path, command="acquire", target=target_path)
+        if observe
+        else envelope("acquire")
+    )
     payload["command"] = "acquire"
     payload["decision"] = {
         "code": "ACQUIRED",
@@ -2315,7 +2354,7 @@ def park(
                               {**updated.history[-1], "checkpoint": checkpoint}))
         store.replace_record(updated)
         store.remove_writer_lease(record.allocation_id)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="park", target=target)
     payload["command"] = "park"
     payload["decision"] = {
         "code": "RETAINED",
@@ -2494,7 +2533,11 @@ def complete_no_change(
                 history=(*updated.history[:-1],
                 {**receipt["completion_event"], "no_change_completion_ref": completion_ref}))
         store.replace_record(updated)
-    payload = status(repository_path)
+    payload = compact_status(
+        repository_path,
+        command="close-preserved" if preserve_only else "complete-no-change",
+        target=target,
+    )
     payload["command"] = "close-preserved" if preserve_only else "complete-no-change"
     payload["decision"] = {
         "code": close_state,
@@ -2631,7 +2674,7 @@ def abort_integration(
         }}
         updated = replace(updated, history=tuple(history))
         store.replace_record(updated)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="integration-abort", target=target)
     payload["command"] = "integration-abort"
     payload["decision"] = {
         "code": "INTEGRATION_ABORTED",
@@ -2701,7 +2744,7 @@ def reconcile_session(
             f"session ended ({trigger}); unfinished task retained, nothing released"
         )
         return payload
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="reconcile-session", target=target)
     payload["command"] = "reconcile-session"
     payload["decision"] = {
         "code": "NO_TERMINAL_ACTION",
@@ -2742,7 +2785,7 @@ def resume(
             raise ControllerError("DETACHED_WORKTREE", "detached worktree cannot resume")
         updated = _updated_record(record, "RESUMED", lifecycle="ACTIVE")
         store.replace_record(updated)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="resume", target=target)
     payload["command"] = "resume"
     payload["decision"] = {
         "code": "RESUMED",
@@ -2843,7 +2886,7 @@ def adopt_delivered(
         )
         updated = _updated_record(record, "OWNER_ADOPTED", owner=owner)
         store.replace_record(updated)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="adopt-delivered", target=target)
     payload["command"] = "adopt-delivered"
     payload["decision"] = {
         "code": "OWNER_ADOPTED",
@@ -2913,7 +2956,7 @@ def abandon_integration_intent(
                 allocation_id=None,
             )
             store.replace_integration_intent(updated)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="integration-abandon")
     payload["command"] = "integration-abandon"
     payload["decision"] = {
         "code": "INTEGRATION_ABANDONED",
@@ -2983,7 +3026,7 @@ def reconcile_release_plans(
                     "actor": actor_name,
                 }
             )
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="reconcile")
     payload["command"] = "reconcile"
     payload["decision"] = {
         "code": "RELEASE_PLANS_RECONCILED",
@@ -3105,7 +3148,7 @@ def review(
             }
             updated = replace(updated, history=(*updated.history[:-1], event))
         store.replace_record(updated)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="review", target=target)
     payload["command"] = "review"
     payload["decision"] = {
         "code": "SCOPE_AMENDED" if additions else "REVIEWED",
@@ -3246,7 +3289,7 @@ def handoff(
             base_commit=mainline_oid,
         )
         store.replace_record(updated)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="handoff", target=target)
     payload["command"] = "handoff"
     payload["decision"] = {
         "code": "HANDOFF_READY" if kind == "integration-ready" else "PRESERVED",
@@ -3378,7 +3421,7 @@ def reopen(
             )
         )
         store.replace_record(updated)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="reopen", target=target)
     payload["command"] = "reopen"
     payload["decision"] = {
         "code": "REOPENED",
@@ -3560,7 +3603,11 @@ def update_external_binding(
                 for value in updated.external_bindings
             ):
                 release_execution(snapshot.repository_id, record.allocation_id, declared[1])
-    payload = status(repository_path) if observe else envelope(f"binding-{action}")
+    payload = (
+        compact_status(repository_path, command=f"binding-{action}", target=target)
+        if observe
+        else envelope(f"binding-{action}")
+    )
     payload["command"] = f"binding-{action}"
     payload["decision"] = {
         "code": {"add": "BINDING_ADDED", "remove": "BINDING_REMOVED", "transfer": "BINDING_TRANSFERRED"}[action],
@@ -3742,7 +3789,7 @@ def record_equivalent_replay(
         )
         store.replace_integration_intent(updated_intent)
         store.replace_record(updated_record)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="integration-equivalent", target=target)
     payload["command"] = "integration-equivalent"
     payload["decision"] = {
         "code": "EQUIVALENT_REPLAY_RECORDED",
@@ -3890,7 +3937,7 @@ def validate_integration(
         store.replace_record(updated_record)
         store.replace_integration_intent(updated_intent)
         _emit_lifecycle_event(store, repository_id, updated_intent, "PREPARED")
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="integration-validate", target=target)
     payload["command"] = "integration-validate"
     payload["decision"] = {
         "code": "INTEGRATION_PREPARED",
@@ -3974,7 +4021,7 @@ def reopen_integration(
         if snapshot.repository_id is None:
             raise ControllerError("BLOCK_DRIFT", "repository metadata is missing")
         _emit_lifecycle_event(store, snapshot.repository_id, updated_intent, "PREPARE_SLOT_GRANTED")
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="integration-reopen", target=target)
     payload["command"] = "integration-reopen"
     payload["decision"] = {
         "code": "INTEGRATION_REOPENED",
@@ -4184,7 +4231,7 @@ def refresh_integration(
                 decision_reason = (
                     "candidate rebuilt from frozen handoffs and latest main; revalidation required"
                 )
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="integration-refresh", target=target)
     payload["command"] = "integration-refresh"
     payload["decision"] = {
         "code": decision_code,
@@ -4277,7 +4324,7 @@ def quarantine(
             _emit_lifecycle_event(
                 store, snapshot.repository_id, recovery_intent, "RECOVERY_REQUIRED"
             )
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="quarantine", target=target)
     payload["command"] = "quarantine"
     payload["decision"] = {
         "code": "QUARANTINED",
@@ -4372,7 +4419,7 @@ def adopt_recovery(
             _emit_lifecycle_event(
                 store, snapshot.repository_id, recovery_intent, "RECOVERY_REQUIRED"
             )
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="recovery-adopt", target=recovery_target)
     payload["command"] = "recovery-adopt"
     payload["decision"] = {
         "code": "RECOVERY_ADOPTED",
@@ -4436,7 +4483,7 @@ def externalize(
             recovery_ref=recovery_ref,
         )
         store.replace_record(updated)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="externalize", target=source_target)
     payload["command"] = "externalize"
     payload["decision"] = {
         "code": "RECOVERY_EXTERNALIZED",
@@ -4735,7 +4782,7 @@ def register_disposable(
                 )
             )
         store.replace_record(updated)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="resource-register", target=target)
     payload["command"] = "resource-register"
     payload["decision"] = {
         "code": "DISPOSABLE_REGISTERED",
@@ -4847,7 +4894,7 @@ def cleanup_disposable(
             disposable_resources=tuple(resources),
         )
         store.replace_record(updated)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="resource-clean", target=target)
     payload["command"] = "resource-clean"
     payload["decision"] = {
         "code": "DISPOSABLE_CLEANED",
@@ -5689,7 +5736,7 @@ def cleanup_typed_disposable(
                         getattr(exc, "code", "RESOURCE_CLEANUP_FAILED"),
                         f"cleanup failed; transaction and immutable receipt {transaction_id} retained for recovery",
                     ) from exc
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="resource-clean", target=target)
     payload["command"] = "resource-clean"
     payload["decision"] = {
         "code": code,
@@ -5979,7 +6026,7 @@ def acquire_publication_lease(
                     store.replace_integration_intent(publishing)
                     _emit_lifecycle_event(store, repository_id, publishing, "PUBLICATION_LEASE_GRANTED")
             break
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="lease-acquire", target=target)
     payload["command"] = "lease-acquire"
     if stale_intent is not None:
         payload["decision"] = {
@@ -6354,7 +6401,7 @@ def complete_publication_lease(
                 repository_path,
                 publication_receipt_id=receipt.receipt_id,
             )
-            payload = status(repository_path)
+            payload = compact_status(repository_path, command="lease-complete", target=target)
             payload["command"] = "lease-complete"
             payload["decision"] = {
                 "code": "PUBLICATION_COMPLETED",
@@ -6438,7 +6485,7 @@ def complete_publication_lease(
         repository_path,
         publication_receipt_id=receipt.receipt_id,
     )
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="lease-complete", target=target)
     payload["command"] = "lease-complete"
     payload["decision"] = {
         "code": "PUBLICATION_RELEASED"
@@ -6585,7 +6632,7 @@ def abort_publication_lease(
             if snapshot.repository_id is None:
                 raise ControllerError("BLOCK_DRIFT", "repository metadata is missing")
             _emit_lifecycle_event(store, snapshot.repository_id, restored_intent, "PREPARED")
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="lease-abort", target=target)
     payload["command"] = "lease-abort"
     payload["decision"] = {
         "code": decision_code,
@@ -6860,7 +6907,7 @@ def create_release_intent(
             )
             store.write_release_intent(intent)
             created = True
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="release-intent", target=target)
     payload["command"] = "release-intent"
     payload["decision"] = {
         "code": "RELEASE_INTENT_CREATED" if created else "RELEASE_INTENT_EXISTS",
@@ -7254,7 +7301,7 @@ def reconcile_publication_receipts(
                 _emit_lifecycle_event(store, snapshot.repository_id, released_intent, "RELEASED")
             store.write_reconciliation_receipt(reconciliation)
             written.append(receipt_id)
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="reconcile receipts")
     payload["command"] = "reconcile receipts"
     payload["decision"] = {
         "code": "RECEIPT_RECONCILIATION_PLAN" if dry_run else "RECEIPTS_RECONCILED",
@@ -7655,7 +7702,7 @@ def reconcile_release_intents(
                     )
                     break
 
-    payload = status(repository_path)
+    payload = compact_status(repository_path, command="reconcile release-intents")
     payload["command"] = "reconcile release-intents"
     payload["decision"] = {
         "code": "RELEASE_RECONCILIATION_PLAN" if dry_run else "RELEASE_INTENTS_RECONCILED",
@@ -8942,7 +8989,17 @@ def _release_registered_target(
                     )
                 )
             store.remove_transaction(transaction_id)
-    payload = status(repository_path)
+            from .cleanup_retention import auto_prune_terminal_cleanup_locked
+
+            auto_prune_terminal_cleanup_locked(
+                repository_released,
+                store,
+                store._load_unlocked(),
+                keep_allocations=frozenset({updated.allocation_id}),
+            )
+    payload = compact_status(
+        repository_path, command="release", target=target if dry_run else None
+    )
     payload["command"] = "release"
     if dry_run:
         if plan is None:
@@ -8994,7 +9051,11 @@ def _released_payload(
     code: str,
     base_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    payload = base_payload if base_payload is not None else status(repository_path)
+    payload = (
+        base_payload
+        if base_payload is not None
+        else compact_status(repository_path, command="release")
+    )
     payload["command"] = "release"
     payload["decision"] = {
         "code": code,
@@ -9031,7 +9092,7 @@ def _recover_or_replay_removed_release(
 ) -> dict[str, Any]:
     repository_initial = inventory(repository_path)
     store = MetadataStore(repository_initial.common_dir)
-    preflight_status = status(repository_path)
+    preflight_status = compact_status(repository_path, command="release")
     recovered = False
     teardown_receipt: dict[str, Any] | None = None
     with store.lock(exclusive=not dry_run):
@@ -9320,7 +9381,7 @@ def release(
                     repository_path,
                     publication_receipt_id=publication_receipt_id,
                 )
-                refreshed = status(repository_path)
+                refreshed = compact_status(repository_path, command=payload["command"])
                 refreshed["command"] = payload["command"]
                 refreshed["decision"] = {
                     **payload["decision"],
@@ -9347,7 +9408,7 @@ def release(
             repository_path,
             publication_receipt_id=publication_receipt_id,
         )
-        refreshed = status(repository_path)
+        refreshed = compact_status(repository_path, command=payload["command"])
         refreshed["command"] = payload["command"]
         refreshed["decision"] = {
             **payload["decision"],

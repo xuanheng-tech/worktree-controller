@@ -96,7 +96,8 @@ def test_abandoned_preparation_is_terminal_but_an_unexplained_orphan_stays_block
         assert abandoned.blocked_reason == decision["failure_reason"]
         assert _record(repository, source_allocation) == source_before
         assert doctor(repository.repo)["decision"]["code"] == "PASS"
-        queued = integration_queue(repository.repo)["decision"]["intents"]
+        assert integration_queue(repository.repo)["decision"]["intents"] == []
+        queued = integration_queue(repository.repo, include_terminal=True)["decision"]["intents"]
         assert (
             next(i for i in queued if i["intent_id"] == intent_id)["effective_state"] == "ABANDONED"
         )

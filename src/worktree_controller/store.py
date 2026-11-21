@@ -1422,7 +1422,9 @@ class MetadataStore:
             ) from exc
         if payload.get("receipt_id") != receipt_id:
             raise ControllerError("INVALID_METADATA", "completion receipt id does not match")
-        self._atomic_json(self.completion_receipts_dir / f"{receipt_id}.json", dict(payload))
+        self._atomic_json(
+            self.completion_receipts_dir / f"{receipt_id}.json", dict(payload), compact=True
+        )
 
     def load_teardown_receipt(self, receipt_id: str) -> dict[str, Any]:
         try:

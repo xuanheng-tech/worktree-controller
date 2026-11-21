@@ -368,10 +368,9 @@ def apply_prune(
         journal["phase"] = "RELEASED_RECORDED"
         journal["updated_at"] = now_iso()
         store.write_transaction(transaction_id, journal)
-    from .controller import status
+    from .controller import compact_status
 
-    result = status(repository_path)
-    result["command"] = "gc-apply"
+    result = compact_status(repository_path, command="gc-apply")
     result["decision"] = {
         "code": "REGISTRATION_PRUNED",
         "allocation_id": journal["allocation_id"],

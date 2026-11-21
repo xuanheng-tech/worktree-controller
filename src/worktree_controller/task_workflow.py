@@ -73,7 +73,7 @@ def _row(observed: dict[str, Any], *, task_key: str | None, target: Path | None)
 
 
 def _identity(row: dict[str, Any]) -> dict[str, Any]:
-    return {field: row[field] for field in (
+    return {field: row.get(field) for field in (
         "allocation_id", "task_key", "authority_key", "owner", "path", "branch", "head",
         "record_version", "lifecycle", "role", "scope_paths", "wait_checkpoint",
     )}

@@ -335,7 +335,7 @@ def _reconcile_no_change_completion(repository_path: Path, *, target: Path, owne
                                     cleanup_sha256: tuple[str, ...], dry_run: bool,
                                     expected_plan_id: str | None) -> dict[str, Any]:
     from .cleanup_evidence import read, write
-    from .controller import status
+    from .controller import compact_status
     from .lifecycle import _release_transaction
     from .preserved_cleanup import cleanup_receipts
     from .semantics import assert_record_version as _cas
@@ -412,7 +412,7 @@ def _reconcile_no_change_completion(repository_path: Path, *, target: Path, owne
                 verify_no_change_cleanup(store, item, updated, snapshot.repository_id)
                 store.replace_record(updated)
                 decision = {"code": "NO_CHANGE_COMPLETION_RECONCILED", "receipt": ref, "record_version": updated.record_version}
-    result = status(repository_path)
+    result = compact_status(repository_path, command="reconcile", target=target)
     result.update(command="reconcile", decision=decision)
     return result
 

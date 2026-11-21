@@ -6,7 +6,7 @@ description: "编排多 worktree 仓库任务的 authority、预算、handoff、
 # Worktree lifecycle
 
 Route repository work through the existing tools without merging their responsibilities.
-Context Loader reads context; Worktree Controller owns allocation, ownership, admission,
+Worktree Controller owns allocation, ownership, admission,
 leases and lifecycle; Snapshot Runner gathers read-only evidence; Git Finalizer commits and
 publishes. Git stays authoritative for worktrees, refs, HEAD and cleanliness. This Skill grants
 no commit, push or destructive authority; the caller's task authorization does.

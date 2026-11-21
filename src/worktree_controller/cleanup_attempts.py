@@ -202,14 +202,14 @@ def reconcile_typed_locked(repo: Path, store: MetadataStore, transaction: str, d
 
 def reconcile_typed(repo: Path, transaction: str, digest: str, *, dry_run: bool,
                     expected_plan_id: str | None = None) -> dict:
-    from .controller import status
+    from .controller import compact_status
     from .git_backend import inventory
 
     store = MetadataStore(inventory(repo).common_dir)
     with store.lock(exclusive=not dry_run):
         decision = reconcile_typed_locked(repo, store, transaction, digest, dry_run=dry_run,
                                           expected_plan_id=expected_plan_id)
-    result = status(repo)
+    result = compact_status(repo, command="resource-recover")
     result.update(command="resource-recover", decision=decision)
     return result
 

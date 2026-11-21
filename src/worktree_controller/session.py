@@ -260,7 +260,7 @@ def _summary(result: dict[str, Any]) -> None:
 def _resolve(path: Path) -> tuple[Path, dict[str, Any]]:
     resolved = path.expanduser().resolve(strict=True)
     repository = inventory(resolved)
-    payload = status(repository.canonical_path)
+    payload = status(repository.canonical_path, full_status=True)
     worktrees = payload.get("worktrees")
     if not isinstance(worktrees, list):
         raise ControllerError("UNKNOWN_TASK", "controller status is unavailable")

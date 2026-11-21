@@ -11,10 +11,10 @@ from worktree_controller.models import ControllerError
 from worktree_controller.store import MetadataStore
 
 
-def read(repository, reader):
+def read(repository, reader, *, full_status=True):
     if reader == "queue":
-        return integration_queue(repository.repo)
-    return lifecycle_events(repository.repo, consumer="observation-test")
+        return integration_queue(repository.repo, full_status=full_status)
+    return lifecycle_events(repository.repo, consumer="observation-test", full_status=full_status)
 
 
 @pytest.mark.parametrize("reader", ["queue", "events"])

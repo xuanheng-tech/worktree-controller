@@ -98,6 +98,11 @@ def _common_parser() -> argparse.ArgumentParser:
         "--repo", type=Path, default=Path.cwd(), help="path inside the managed Git repository"
     )
     parser.add_argument("--json", action="store_true", help="emit the stable JSON contract")
+    parser.add_argument(
+        "--full-status",
+        action="store_true",
+        help="embed full repository status and all worktree metadata rows in the response",
+    )
     return parser
 
 
@@ -117,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = commands.add_parser("status", parents=[common], help="show Git and controller state")
     status_parser.add_argument("--namespace-pid", type=int,
                                help="compare mounts with an existing writer process")
+    status_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="include full verbose worktree fields and historical released record summaries",
+    )
     history_parser = commands.add_parser(
         "lifecycle-history", parents=[common],
         help="query live allocation and durable closed lifecycle evidence without mutation",
@@ -310,8 +320,13 @@ def build_parser() -> argparse.ArgumentParser:
     acquire_parser.add_argument("--source-handoff", action="append", default=[])
     acquire_parser.add_argument("--external-binding", action="append", default=[])
 
-    commands.add_parser(
+    queue_parser = commands.add_parser(
         "integration-queue", parents=[common], help="show frozen integration intent queue"
+    )
+    queue_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="include terminal historical intents (RELEASED and ABANDONED)",
     )
 
     enqueue_parser = commands.add_parser(
@@ -999,6 +1014,15 @@ def build_parser() -> argparse.ArgumentParser:
     integration_intents_parser.add_argument("--intent-id", action="append", default=[])
     integration_intents_parser.add_argument("--dry-run", action="store_true")
     integration_intents_parser.add_argument("--dispatch", action="store_true")
+    cleanup_evidence_parser = reconcile_commands.add_parser(
+        "cleanup-evidence",
+        parents=[common],
+        help="prune verified terminal RELEASED cleanup-actions and completion-receipts (dry-run unless --apply)",
+    )
+    cleanup_evidence_parser.add_argument("--apply", action="store_true")
+    cleanup_evidence_parser.add_argument("--keep-recent", type=int, default=0)
+    cleanup_evidence_parser.add_argument("--older-than-days", type=float, default=0.0)
+    cleanup_evidence_parser.add_argument("--max-bytes", type=int, default=None)
 
     doctor_parser = commands.add_parser("doctor", parents=[common], help="diagnose controller drift")
     doctor_parser.add_argument("--namespace-pid", type=int,
@@ -1023,7 +1047,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _print(payload: dict[str, Any], as_json: bool) -> None:
     if as_json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
     else:
         print(render(payload))
 
@@ -1054,6 +1078,10 @@ def _main(argv: list[str] | None) -> int:
         return writer_session_main(arguments[1:])
     parser = build_parser()
     parsed = parser.parse_args(arguments)
+    from .controller import status_output_mode
+
+    _status_mode = status_output_mode(full_status=bool(getattr(parsed, "full_status", False)))
+    _status_mode.__enter__()
     try:
         if parsed.command == "capabilities":
             from .writer_session import (
@@ -1150,7 +1178,11 @@ def _main(argv: list[str] | None) -> int:
                 lease_id=parsed.lease_id, run_id=parsed.run_id,
             )
         elif parsed.command == "status":
-            payload = status(parsed.repo, namespace_pid=parsed.namespace_pid)
+            payload = status(
+                parsed.repo,
+                namespace_pid=parsed.namespace_pid,
+                include_all=parsed.all,
+            )
         elif parsed.command == "canonical-refresh":
             from .canonical_refresh import refresh_canonical
 
@@ -1316,7 +1348,7 @@ def _main(argv: list[str] | None) -> int:
             if convergence is not None:
                 payload["retention_convergence"] = convergence
         elif parsed.command == "integration-queue":
-            payload = integration_queue(parsed.repo)
+            payload = integration_queue(parsed.repo, include_terminal=parsed.all)
         elif parsed.command == "integration-enqueue":
             payload = enqueue_integration(
                 parsed.repo,
@@ -1948,6 +1980,16 @@ def _main(argv: list[str] | None) -> int:
                 dry_run=parsed.dry_run,
                 dispatch=parsed.dispatch,
             )
+        elif parsed.command == "reconcile" and parsed.reconcile_command == "cleanup-evidence":
+            from .cleanup_retention import reconcile_cleanup_evidence
+
+            payload = reconcile_cleanup_evidence(
+                parsed.repo,
+                apply=parsed.apply,
+                keep_recent=parsed.keep_recent,
+                older_than_days=parsed.older_than_days,
+                max_total_bytes=parsed.max_bytes,
+            )
         elif parsed.command == "conflict-check":
             from .frontier import conflict_check
 
@@ -1991,6 +2033,8 @@ def _main(argv: list[str] | None) -> int:
             payload["decision"]["lease_outcome"] = exc.details
         _print(payload, bool(parsed.json or parsed.command == "hook-adapter"))
         return 2
+    finally:
+        _status_mode.__exit__(None, None, None)
     _print(payload, parsed.json)
     if parsed.command == "task" and (
         payload.get("errors") or payload.get("decision", {}).get("operation_complete") is False

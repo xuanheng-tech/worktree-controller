@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from .controller import status
+from .controller import compact_status
 from .git_backend import (
     branch_exists,
     git_write,
@@ -277,8 +277,7 @@ def recover_frozen_checkout(
             ),
         )
         store.replace_record(updated)
-    payload = status(repository_path)
-    payload["command"] = command
+    payload = compact_status(repository_path, command=command, target=target)
     payload["decision"] = {
         "code": "FROZEN_CHECKOUT_RECOVERED",
         "allocation_id": updated.allocation_id,

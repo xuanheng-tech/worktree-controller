@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .controller import status
+from .controller import compact_status
 from .git_backend import (
     _git,
     fetch_remote_branch,
@@ -354,8 +354,7 @@ def transition_canonical(
         }
         updated = replace(updated, history=(*updated.history[:-1], event))
         store.replace_record(updated)
-    payload = status(repository_path)
-    payload["command"] = "canonical-transition"
+    payload = compact_status(repository_path, command="canonical-transition", target=target)
     payload["decision"] = {
         "code": "CANONICAL_MAIN_REFRESHED" if refresh_main else "CANONICAL_TRANSITIONED",
         "allocation_id": updated.allocation_id,

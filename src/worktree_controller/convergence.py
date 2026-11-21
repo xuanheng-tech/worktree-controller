@@ -849,6 +849,17 @@ def _converge(
             release_plan_id=receipt["decision"].get("release_plan_id"),
         )
 
+    cleanup_pruned: dict[str, Any] | None = None
+    if not dry_run:
+        from .cleanup_retention import auto_prune_terminal_cleanup_locked
+
+        with store.lock(exclusive=True):
+            live_repo = inventory(repository_path, observe_paths=frozenset())
+            live_snap = store._load_unlocked()
+            pruned = auto_prune_terminal_cleanup_locked(live_repo, store, live_snap)
+            if pruned.get("pruned_receipts", 0) > 0:
+                cleanup_pruned = pruned
+
     result = envelope("reconcile retention")
     counts = Counter(str(row["outcome"]) for row in findings)
     attention = counts[ATTENTION]
@@ -868,6 +879,7 @@ def _converge(
         "would_release": sum(row["outcome"] == PLANNED for row in findings),
         "attention_required": attention,
         "findings": findings,
+        **({"cleanup_evidence_pruned": cleanup_pruned} if cleanup_pruned is not None else {}),
     }
     return result
 

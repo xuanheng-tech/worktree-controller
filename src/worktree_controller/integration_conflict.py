@@ -22,7 +22,7 @@ def resolve_integration(
     expected_head: str,
     finalizer_record_id: str,
 ) -> dict[str, Any]:
-    from .controller import status
+    from .controller import compact_status
     from .lifecycle import _intent_payload
     from .record_updates import updated_intent, updated_record
     from .semantics import assert_record_version as _cas
@@ -107,8 +107,7 @@ def resolve_integration(
         )
         store.replace_record(updated)
         store.replace_integration_intent(resolved)
-    payload = status(repository_path)
-    payload["command"] = "integration-resolve"
+    payload = compact_status(repository_path, command="integration-resolve", target=target)
     payload["decision"] = {
         "code": "INTEGRATION_CONFLICT_RESOLVED",
         "reason": "resolved merge accepted; fresh tests, Snapshot and validation are still required",

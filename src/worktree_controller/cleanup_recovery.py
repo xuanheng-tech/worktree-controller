@@ -348,7 +348,7 @@ def prepare(
     dry_run: bool,
     expected_plan_id: str | None = None,
 ) -> dict[str, Any]:
-    from .controller import status
+    from .controller import compact_status
 
     store = MetadataStore(inventory(repo).common_dir)
     decision: dict[str, Any]
@@ -379,7 +379,7 @@ def prepare(
             }
             reference = e.write(directory, "record.json", document)
             decision.update(recovery_id=recovery_id, recovery_receipt=reference)
-    result = status(repo)
+    result = compact_status(repo, command="resource-recover")
     result.update(command="resource-recover", decision=decision)
     return result
 
@@ -470,7 +470,7 @@ def rollout_check(
     repo: Path, *, receipt_path: Path | None = None, receipt_sha: str | None = None
 ) -> dict[str, Any]:
     """Read-only installation compatibility, never a transaction state transition."""
-    from .controller import status
+    from .controller import compact_status
     from .transaction_scope import is_atomic_temp
 
     store = MetadataStore(inventory(repo).common_dir)
@@ -495,7 +495,7 @@ def rollout_check(
                     "ROLLOUT_TRANSACTION_UNSUPPORTED", f"transaction recovery evidence is malformed: {exc}"
                 )
                 raise RolloutTransactionError(cause, path.stem, journal) from exc
-    result = status(repo)
+    result = compact_status(repo, command="resource-recover")
     result.update(
         command="resource-recover",
         decision={
@@ -552,7 +552,7 @@ def reconcile_attempt(
     dry_run: bool,
     expected_plan_id: str | None = None,
 ) -> dict[str, Any]:
-    from .controller import status
+    from .controller import compact_status
 
     store = MetadataStore(inventory(repo).common_dir)
     with store.lock(exclusive=not dry_run):
@@ -606,7 +606,7 @@ def reconcile_attempt(
             decision["reconciliation"] = e.write(
                 path.parent, path.name, {**plan, "plan_id": plan_id, "timestamp": now_iso()}
             )
-    result = status(repo)
+    result = compact_status(repo, command="resource-recover")
     result.update(command="resource-recover", decision=decision)
     return result
 
@@ -681,7 +681,7 @@ def _incomplete(
 
 
 def resume(repo: Path, *, recovery_path: Path, recovery_sha: str, dry_run: bool) -> dict[str, Any]:
-    from .controller import status
+    from .controller import compact_status
     from .lifecycle import cleanup_typed_disposable
 
     store = MetadataStore(inventory(repo).common_dir)
@@ -806,7 +806,7 @@ def resume(repo: Path, *, recovery_path: Path, recovery_sha: str, dry_run: bool)
         )
     except Exception as exc:
         return _incomplete(repo, store, document, attempt_directory, attempt_id, underlying, exc)
-    result = status(repo)
+    result = compact_status(repo, command="resource-recover")
     result.update(
         command="resource-recover",
         decision={

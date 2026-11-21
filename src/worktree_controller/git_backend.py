@@ -316,20 +316,35 @@ def canonical_checkout(path: Path) -> Path:
     return Path(str(parsed[0]["path"])).resolve(strict=True)
 
 
-def inventory(path: Path) -> RepositoryInventory:
+def inventory(
+    path: Path, *, observe_paths: frozenset[Path] | None = None
+) -> RepositoryInventory:
     requested_root, common = resolve_repository(path)
     parsed = _registered_worktrees(requested_root, common)
     canonical_path = Path(str(parsed[0]["path"])).resolve(strict=True)
     present = [
         record.get("bare") is not True and Path(str(record["path"])).exists() for record in parsed
     ]
+    resolved_targets = (
+        frozenset(target.expanduser().resolve(strict=False) for target in observe_paths)
+        if observe_paths is not None
+        else None
+    )
+    observe_flags = [
+        exists
+        and (
+            resolved_targets is None
+            or Path(str(record["path"])).resolve(strict=False) in resolved_targets
+        )
+        for record, exists in zip(parsed, present, strict=True)
+    ]
     observed = iter(
         _observe_each(
             _status_counts,
             [
                 Path(str(record["path"]))
-                for record, exists in zip(parsed, present, strict=True)
-                if exists
+                for record, should_observe in zip(parsed, observe_flags, strict=True)
+                if should_observe
             ],
         )
     )
@@ -341,8 +356,10 @@ def inventory(path: Path) -> RepositoryInventory:
         canonical = index == 0
         git_dir = common if canonical else _linked_git_dir(common, item_path)
         prunable = bool(record.get("prunable", False))
-        if present[index]:
+        if observe_flags[index]:
             clean, staged, modified, untracked = next(observed).result()
+        elif present[index]:
+            clean, staged, modified, untracked = True, 0, 0, 0
         elif prunable:
             clean, staged, modified, untracked = False, 0, 0, 0
         else:

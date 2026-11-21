@@ -398,7 +398,7 @@ def retry_integration(
     expected_plan_id: str | None = None,
 ) -> dict[str, Any]:
     """Plan/CAS an append-only dependency decision or restart the original intent."""
-    from .controller import status
+    from .controller import compact_status
     from .lifecycle import _blocking_scope_intent, _emit_lifecycle_event
     from .record_updates import updated_intent
 
@@ -505,8 +505,7 @@ def retry_integration(
                 store.replace_integration_intent(intent)
                 if not prerequisite_intent_id:
                     _emit_lifecycle_event(store, snapshot.repository_id, intent, "INTENT_QUEUED")
-    payload = status(repository_path)
-    payload["command"] = "integration-retry"
+    payload = compact_status(repository_path, command="integration-retry")
     payload["decision"] = {
         "code": "INTEGRATION_RETRY_PLAN"
         if dry_run
