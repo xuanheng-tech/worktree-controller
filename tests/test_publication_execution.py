@@ -252,7 +252,7 @@ def test_completion_recovers_release_interrupted_after_metadata_written(leased, 
     )
 
 
-def test_public_session_holds_producer_lock_until_consumer_disconnects(leased):
+def test_status_read_finishes_while_verified_consumer_remains_connected(leased):
     _, target, decision, _ = leased
     process = _process(target, decision)
     observer = None
@@ -273,15 +273,13 @@ def test_public_session_holds_producer_lock_until_consumer_disconnects(leased):
             stderr=subprocess.PIPE,
             text=True,
         )
-        with pytest.raises(subprocess.TimeoutExpired):
-            observer.communicate(timeout=0.1)
+        stdout, stderr = observer.communicate(timeout=10)
+        assert observer.returncode == 0, stderr
+        assert json.loads(stdout)["command"] == "status"
         assert process.stdin is not None
         process.stdin.close()
         assert _read(process)["code"] == "PUBLICATION_SESSION_CLOSED"
         assert process.wait(timeout=5) == 1
-        stdout, stderr = observer.communicate(timeout=5)
-        assert observer.returncode == 0, stderr
-        assert json.loads(stdout)["command"] == "status"
     finally:
         _close(process)
         if observer is not None:

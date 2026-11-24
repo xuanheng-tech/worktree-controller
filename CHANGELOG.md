@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.36.3
+
+- Serialize publication authorization and lease abort. A concurrent consumer reports
+  `PUBLICATION_EXECUTION_BUSY` before attempting a push.
+- Verify installed CLI receipt loss and process interruption against real Git refs,
+  terminal intents, and the exact writer identity.
+
 ## 1.36.2
 
 - Integration policies can require verified Snapshot Runner branch reviews for the exact checkout,

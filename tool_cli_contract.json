@@ -1126,7 +1126,7 @@
   "session_launcher_entrypoint": "worktree-session",
   "session_entrypoint": "worktree-session-end",
   "tool_name": "worktree-controller",
-  "tool_version": "1.36.2",
+  "tool_version": "1.36.3",
   "delivered_closeout_version": 1,
   "retained_archive_version": 1,
   "retention_convergence_version": 2,
@@ -1712,10 +1712,10 @@
       "name",
       "version"
     ],
-    "lock_owner": "Controller; one exclusive repository lock spans verify, authorize, consumer push and producer completion observation",
+    "lock_owner": "Controller serializes the authorize-to-complete interval with lease abort. Metadata readers remain available.",
     "completion": "Controller reobserves the exact remote candidate and returns execution evidence; lease-complete persists the existing publication receipt and owns lifecycle/lease/release changes",
     "recovery": "Reuse the same candidate, lease and run; an already-published candidate is observed without another push, including after lease expiry",
-    "failure": "Missing authority, protocol drift, disconnect, timeout or an unverified remote fails closed; observe the live remote before retrying an interrupted mutation",
+    "failure": "A competing operation returns PUBLICATION_EXECUTION_BUSY without changing authority. After a disconnect or timeout, check the original operation and remote state. An external push may still be in flight.",
     "threat_model": "Trusted local caller and OS; no claim of protection from arbitrary same-UID process interference"
   },
   "integration_retry_version": 1,

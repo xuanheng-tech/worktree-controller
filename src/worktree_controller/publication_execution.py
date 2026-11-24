@@ -1,8 +1,8 @@
 """A public, provider-neutral publication session under the producer's lock.
 
 The consumer performs the Git push.  The Controller owns all metadata validation
-and keeps its existing repository lock until it independently observes completion
-or the bounded stdio session ends.  No private path or digest recipe crosses this
+and serializes authorization with other publishers and lease abort until completion
+or the bounded stdio session ends. Metadata reads remain available.  No private path or digest recipe crosses this
 boundary, and the existing lease-complete command persists the lifecycle receipt.
 """
 
