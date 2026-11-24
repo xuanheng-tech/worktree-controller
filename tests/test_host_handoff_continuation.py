@@ -183,9 +183,9 @@ def test_malformed_requests_fail_closed(frozen, access, target):
 
 
 @pytest.mark.parametrize("access", [None, "read", "exec", "write"])
-def test_active_checkout_keeps_its_existing_grant(hosted, tmp_path, access):
+def test_active_checkout_keeps_its_existing_grant(hosted, access):
     _, path, _, _, _ = hosted
-    target = tmp_path / "anywhere" if access == "write" else None
+    target = path / "mine.txt" if access == "write" else None
     decision = writer_session.host_check(path, access=access, target=target)
     assert decision["admission"] == "GRANTED" and decision["code"] == "WRITE_ALLOWED"
 

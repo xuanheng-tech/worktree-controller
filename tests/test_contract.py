@@ -76,7 +76,7 @@ def test_public_contract_matches_package_and_commands(tmp_path: Path) -> None:
         project = tomllib.load(stream)["project"]
     assert contract["schema_version"] == SCHEMA_VERSION == 1
     assert contract["contract_version"] == 62
-    assert contract["sandbox_mode_version"] == 1
+    assert contract["sandbox_mode_version"] == 2
     assert contract["conflict_check_version"] == 1
     assert contract["hook_adapter_version"] == 1
     assert contract["aborted_integration_preserved_cleanup_version"] == 2
@@ -357,7 +357,7 @@ def test_release_versions_are_independently_declared_and_advertised(capsys) -> N
         "reconciliation",
     ]
     assert advertised["contract_version"] == contract["contract_version"] == 62
-    assert advertised["sandbox_mode_version"] == contract["sandbox_mode_version"] == 1
+    assert advertised["sandbox_mode_version"] == contract["sandbox_mode_version"] == 2
     assert advertised["conflict_check_version"] == contract["conflict_check_version"] == 1
     assert advertised["hook_adapter_version"] == contract["hook_adapter_version"] == 1
     assert (
