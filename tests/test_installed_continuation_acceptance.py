@@ -100,12 +100,9 @@ def test_installed_hosted_holder_continues_after_handoff(installed, frozen, tmp_
     ] == "REFUSED"
 
 
-def leased_target(repository):
+def leased_target(repository, holder):
     path, payload = acquire_one(
         repository, task="held", authority="held", scope_paths=("held.txt",)
-    )
-    holder = writer_lease.resolve_holder(
-        str(os.getpid()), client_id="another-client", session_id="held-session", run_id=None
     )
     writer_lease.acquire_writer_lease(
         repository.repo, target=path, client_id=holder.client_id,
@@ -114,24 +111,35 @@ def leased_target(repository):
     return path / "held.txt", payload["decision"]["allocation_id"]
 
 
-def test_installed_same_holder_can_write_other_leased_checkouts(installed, frozen):
-    repository, _, _, _ = frozen
-    local_target, local_allocation = leased_target(repository)
+@pytest.mark.parametrize("identity", ["same", "other-client", "other-session"])
+def test_installed_continuation_requires_target_lease_identity(installed, frozen, identity):
+    repository, _, _, holder = frozen
+    target_holder = writer_lease.resolve_holder(
+        str(os.getpid()),
+        client_id="another-client" if identity == "other-client" else holder.client_id,
+        session_id="another-session" if identity == "other-session" else holder.session_id,
+        run_id=None,
+    )
+    local_target, local_allocation = leased_target(repository, target_holder)
     unheld, _ = acquire_one(
         repository, task="unheld", authority="unheld", scope_paths=("unheld.txt",)
     )
     with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES) as other:
         adopt_canonical(other)
         _configure_remote(other)
-        cross_target, cross_allocation = leased_target(other)
+        cross_target, cross_allocation = leased_target(other, target_holder)
         before = metadata(other)
         for mode in ("direct", "hosted"):
             for target, allocation in (
                 (local_target, local_allocation), (cross_target, cross_allocation),
             ):
                 decision = check(installed, frozen, mode, access="write", target=target)
-                assert decision["admission"] == "CONTINUATION_GRANTED"
-                assert decision["target_allocation_id"] == allocation
+                if identity == "same":
+                    assert decision["admission"] == "CONTINUATION_GRANTED"
+                    assert decision["target_allocation_id"] == allocation
+                else:
+                    assert decision["admission"] == "REFUSED"
+                    assert decision["code"] == "BLOCK_HOST_CONTINUATION_TARGET"
                 assert not target.exists()
             assert check(installed, frozen, mode, access="write", target=unheld / "unheld.txt")[
                 "admission"

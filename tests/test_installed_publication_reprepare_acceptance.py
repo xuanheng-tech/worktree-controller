@@ -33,7 +33,7 @@ VALIDATION_FIELDS = (
 
 
 def state(case):
-    status = controller(case, "status")
+    status = controller(case, "status", "--full-status")
     return {
         "intent": intent(case, case["intent_id"]),
         "candidate": next(row for row in status["worktrees"]

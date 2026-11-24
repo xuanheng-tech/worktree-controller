@@ -368,7 +368,7 @@ def test_duplicate_json_and_oversized_frame_release_session_without_push(leased)
             _close(process)
 
 
-def test_real_finalizer_crash_recovery_and_duplicate_execution(leased):
+def test_real_finalizer_lost_receipt_recovers_without_second_ref_update(leased):
     repository, target, decision, session = leased
     executable = os.environ.get("GIT_FINALIZER_ACCEPTANCE")
     if not executable:
@@ -398,14 +398,14 @@ def test_real_finalizer_crash_recovery_and_duplicate_execution(leased):
         decision["run_id"],
         "--summary",
     ]
-    crashed = subprocess.run(
-        command,
-        env={**environment, "GIT_FINALIZER_TEST_CRASH_AFTER_PUSH": "1"},
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert crashed.returncode == 97, crashed.stdout + crashed.stderr
+    remote = Path(git(target, "remote", "get-url", "origin"))
+    git(remote, "config", "core.logAllRefUpdates", "true")
+    assert git(remote, "rev-parse", "refs/heads/main") == decision["expected_main_oid"]
+    # Drop the first consumer response at the caller boundary.
+    subprocess.run(command, env=environment, stdout=subprocess.DEVNULL, check=True, timeout=30)
+    assert git(remote, "rev-parse", "refs/heads/main") == decision["candidate_oid"]
+    updates = git(remote, "reflog", "show", "--format=%H", "refs/heads/main").splitlines()
+    assert updates.count(decision["candidate_oid"]) == 1
     for _ in range(2):
         recovered = subprocess.run(
             command, env=environment, capture_output=True, text=True, timeout=30
@@ -415,6 +415,9 @@ def test_real_finalizer_crash_recovery_and_duplicate_execution(leased):
         assert summary["push"]["result"] == "already_published_recovered"
         assert summary["push"]["executed"] is False
         assert summary["controller_execution"]["contract"] == CONTRACT
+        assert summary["lease_id"] == decision["lease_id"]
+        assert summary["run_id"] == decision["run_id"]
+        assert git(remote, "reflog", "show", "--format=%H", "refs/heads/main").splitlines() == updates
     completed = complete_publication_lease(
         repository.repo,
         target=target,

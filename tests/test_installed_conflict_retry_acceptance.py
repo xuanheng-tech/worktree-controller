@@ -56,7 +56,7 @@ def item(case, path):
 
 
 def intent(case, intent_id):
-    return next(row for row in controller(case, "integration-queue")["decision"]["intents"]
+    return next(row for row in controller(case, "integration-queue", "--all")["decision"]["intents"]
                 if row["intent_id"] == intent_id)
 
 
