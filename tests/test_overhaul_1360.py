@@ -196,7 +196,8 @@ def test_h1_git_hardening_strips_untrusted_config_env_and_dash_options(tmp_path:
 def test_h2_held_checkout_isolates_client_and_session_on_same_pid(tmp_path: Path) -> None:
     with GitRepository(linked=0) as repository:
         adopt_canonical(repository)
-        worktree, acquired = acquire_one(repository)
+        worktree, acquired = acquire_one(repository, scope_paths=("tracked.txt",))
+        target = worktree / "tracked.txt"
         allocation_id = acquired["decision"]["allocation_id"]
         store = MetadataStore(git_backend.inventory(repository.repo).common_dir)
         snapshot = store.load()
@@ -218,19 +219,19 @@ def test_h2_held_checkout_isolates_client_and_session_on_same_pid(tmp_path: Path
         other_client = replace(lease.holder, client_id="claude")
         assert (
             writer_session._held_checkout(
-                repository.repo, worktree, lease.holder, known=(inv, snapshot)
+                repository.repo, worktree, lease.holder, target=target, known=(inv, snapshot)
             )
             == allocation_id
         )
         assert (
             writer_session._held_checkout(
-                repository.repo, worktree, other_session, known=(inv, snapshot)
+                repository.repo, worktree, other_session, target=target, known=(inv, snapshot)
             )
             is None
         )
         assert (
             writer_session._held_checkout(
-                repository.repo, worktree, other_client, known=(inv, snapshot)
+                repository.repo, worktree, other_client, target=target, known=(inv, snapshot)
             )
             is None
         )
@@ -240,7 +241,7 @@ def test_h2_held_checkout_isolates_client_and_session_on_same_pid(tmp_path: Path
         )
         assert (
             writer_session._held_checkout(
-                repository.repo, worktree, lease.holder, known=(inv, wrong_owner)
+                repository.repo, worktree, lease.holder, target=target, known=(inv, wrong_owner)
             )
             is None
         )

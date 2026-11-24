@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.36.5
+
+- Verify held-checkout identity against an explicit file target in the full test suite.
+
 ## 1.36.4
 
 - Check explicit file targets against the active writer scope. The optional Linux
