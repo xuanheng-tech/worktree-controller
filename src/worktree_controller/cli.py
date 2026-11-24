@@ -1093,7 +1093,7 @@ def _main(argv: list[str] | None) -> int:
             payload["decision"] = {
                 "code": "CAPABILITIES",
                 "contract_version": 62,
-                "sandbox_mode_version": 1,
+                "sandbox_mode_version": 2,
                 "conflict_check_version": 1,
                 "hook_adapter_version": 1,
                 "task_workflow_version": 1,
