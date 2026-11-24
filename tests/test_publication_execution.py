@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import selectors
+import signal
 import subprocess
 import sys
 from dataclasses import replace
@@ -368,7 +369,8 @@ def test_duplicate_json_and_oversized_frame_release_session_without_push(leased)
             _close(process)
 
 
-def test_real_finalizer_lost_receipt_recovers_without_second_ref_update(leased):
+@pytest.mark.parametrize("interruption", ["lost-response", "exit-after-ref-update"])
+def test_real_finalizer_recovers_without_second_ref_update(leased, interruption):
     repository, target, decision, session = leased
     executable = os.environ.get("GIT_FINALIZER_ACCEPTANCE")
     if not executable:
@@ -401,8 +403,31 @@ def test_real_finalizer_lost_receipt_recovers_without_second_ref_update(leased):
     remote = Path(git(target, "remote", "get-url", "origin"))
     git(remote, "config", "core.logAllRefUpdates", "true")
     assert git(remote, "rev-parse", "refs/heads/main") == decision["expected_main_oid"]
-    # Drop the first consumer response at the caller boundary.
-    subprocess.run(command, env=environment, stdout=subprocess.DEVNULL, check=True, timeout=30)
+    if interruption == "lost-response":
+        subprocess.run(command, env=environment, stdout=subprocess.DEVNULL, check=True, timeout=30)
+    else:
+        # Block the disposable receiver after it changes the ref, before the
+        # Finalizer can observe success. Only the test-owned process group is killed.
+        ready = remote / "post-receive-ready"
+        hold = remote / "post-receive-hold"
+        os.mkfifo(ready)
+        os.mkfifo(hold)
+        hook = remote / "hooks/post-receive"
+        hook.write_text("#!/bin/sh\nprintf x >post-receive-ready\nread -r line <post-receive-hold\n")
+        hook.chmod(0o755)
+        with os.fdopen(os.open(ready, os.O_RDWR | os.O_NONBLOCK), "rb") as event:
+            with selectors.DefaultSelector() as selector:
+                selector.register(event, selectors.EVENT_READ)
+                with subprocess.Popen(command, env=environment, start_new_session=True,
+                                      stdout=subprocess.DEVNULL) as publisher:
+                    try:
+                        assert selector.select(timeout=20), "receiver did not update its ref"
+                        assert event.read(1) == b"x"
+                        assert git(remote, "rev-parse", "refs/heads/main") == decision["candidate_oid"]
+                    finally:
+                        os.killpg(publisher.pid, signal.SIGKILL)
+                    assert publisher.wait(timeout=10) == -signal.SIGKILL
+        hook.unlink()
     assert git(remote, "rev-parse", "refs/heads/main") == decision["candidate_oid"]
     updates = git(remote, "reflog", "show", "--format=%H", "refs/heads/main").splitlines()
     assert updates.count(decision["candidate_oid"]) == 1
