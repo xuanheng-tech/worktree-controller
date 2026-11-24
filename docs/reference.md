@@ -658,8 +658,8 @@ background --apply` beside `reconcile-writers`, which first moves provably dead 
 - `lease-acquire`: refresh configured main, validate candidate lineage, and acquire the single
   publication lease.
 - `publication-execution-session`: public, provider-neutral JSON-line verification, authorization
-  and result observation for an exact leased candidate; the Controller holds the repository lock
-  while the caller performs its Git push. See the protocol below.
+  and result observation for an exact leased candidate; the Controller serializes publisher authorization and lease abort
+  while keeping metadata reads available. See the protocol below.
 - `lease-complete` / `lease-abort`: verify published remote state or release unchanged authority;
   both bind the exact publication run, and completion defaults to receipt-authorized auto-release.
 - `release-intent`: bind one short-lived feature/audit release authority to exact HEAD, record CAS,
@@ -886,12 +886,14 @@ exact non-force branch push. `RECOVER_ALREADY_PUBLISHED` requires no push. After
 `executor: {name, version}`, boolean `push_executed` and the observed `remote_oid`. The Controller
 independently reobserves Git before returning `completed` with matching execution evidence.
 
-One Controller-owned exclusive lock spans all three phases. Frames are limited to 64 KiB and
-input waits to 300 seconds. Wrong identities, duplicate keys, missing or drifted authority,
-disconnects and timeouts fail closed. A disconnected executor may already have pushed: retry the
-same lease/run/candidate after observing the remote, and an already-published candidate is
-recovered without another mutation even after lease expiry. The local caller and OS are trusted;
-this does not protect against arbitrary interference by other processes running as the same user.
+The Controller checks the lease and remote at each phase. After the consumer requests
+authorization, a publication operation lock excludes another authorization or lease abort
+until completion or disconnection. Metadata readers remain available. A competing operation
+returns `PUBLICATION_EXECUTION_BUSY`. A refused abort leaves the lease in force.
+Frames are limited to 64 KiB and input waits to 300 seconds. After a timeout or disconnect,
+an external Git operation can still be in flight. Establish its terminal state and observe
+the expected ref before taking further action. A candidate already published can be recovered
+with the same lease, run and candidate even after lease expiry. The local caller and OS are trusted.
 
 A completed session does not change allocation lifecycle or release authority. Pass its consumer
 `record_id` to the existing `lease-complete`; that command persists the publication receipt and
