@@ -492,3 +492,45 @@ def test_allocation_lookup_refuses_ambiguous_integration_identity() -> None:
         with pytest.raises(ControllerError, match="multiple intents bind one allocation") as caught:
             intent_for_allocation(snapshot, allocation)
         assert caught.value.code == "INVALID_METADATA"
+
+
+def test_candidate_policy_checks_snapshot_before_prepared_receipt(monkeypatch) -> None:
+    policy = POLICY_THREE_CANDIDATES.replace("[review]", "[review]\nverify_candidate_snapshot = true")
+    with GitRepository(linked=0, policy_text=policy) as repository:
+        adopt_canonical(repository)
+        _configure_remote(repository)
+        _, allocation, handoff = _source(
+            repository, task="review-source", relative_path="review.txt", content="review\n"
+        )
+        queued = _enqueue(repository, task="review-candidate", source_allocation=allocation)
+        intent_id = queued["decision"]["intent_id"]
+        candidate, _ = _claim(repository, task="review-candidate", intent_id=intent_id)
+        store = MetadataStore(inventory(repository.repo).common_dir)
+        intent = store.load().integration_intents[intent_id]
+        with pytest.raises(ControllerError, match="full Snapshot Runner SHA-256"):
+            _validate(repository, candidate, "same-placeholder")
+        assert store.load().integration_intents[intent_id].state == "PREPARING_INTEGRATION"
+
+        digest = "d" * 64
+
+        def read_snapshot(ref, checkout, branch, head, base):
+            assert ref == f"snapshot-runner:bounded:{digest}"
+            assert (checkout, branch, head, base) == (
+                candidate, "integration/review-candidate", handoff, intent.base_main_oid,
+            )
+            return {"snapshot_id": digest, "status": "partial", "truncated": True, "evidence_gap": True}
+
+        monkeypatch.setattr(lifecycle_module, "verify_candidate_snapshot", read_snapshot)
+        prepared = lifecycle_module.validate_integration(
+            repository.repo, target=candidate, expected_record_version=1, owner="integration-owner",
+            validation_evidence_id="candidate-checks", tests_receipt_id="candidate-tests",
+            snapshot_receipt_id=f"snapshot-runner:bounded:{digest}",
+        )
+        assert prepared["decision"]["snapshot_review"]["truncated"] is True
+        assert store.load().integration_intents[intent_id].snapshot_receipt_id == digest
+        after = store.load()
+        prepared_id = after.integration_intents[intent_id].prepared_receipt_id
+        assert after.prepared_candidate_receipts[prepared_id].snapshot_receipt_id == digest
+        saved = after.records[after.prepared_candidate_receipts[prepared_id].allocation_id].history[-1]
+        assert saved["prepared_receipt_id"] == prepared_id
+        assert saved["snapshot_review"] == prepared["decision"]["snapshot_review"]

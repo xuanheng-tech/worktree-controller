@@ -115,3 +115,20 @@ Every poll rechecks the immutable tag and main containment; normal inventory and
 remain active. Command errors, unknown assets, yanked files and identity/checksum drift stop
 immediately. Polls never repeat writes. If visibility still times out, the job fails and keeps the
 original bundle and current release. Audit destinations and rerun failed jobs in the same run as above.
+
+
+### Candidate review evidence
+
+Set `verify_candidate_snapshot = true` in the repository policy's existing `[review]` table
+to validate preparation evidence using the installed Snapshot Runner. Run `branch-review`
+on the clean integration checkout against its prepared base. Supply its full SHA-256 to
+`integration-validate --snapshot-receipt-id`. The `snapshot-runner:` prefix is also accepted.
+Controller calls the Runner's read interface to verify the stored artifact, checkout, review
+type, target branch, candidate and base commits. The prepared receipt keeps the digest.
+
+When the Runner reports partial coverage or evidence gaps, review the uncovered changes separately
+and identify the additional evidence in the candidate validation record. Use
+`snapshot-runner:bounded:<sha256>` to acknowledge that scope. The candidate allocation retains the observed
+status and coverage flags in its validation history, linked to the prepared receipt ID and original
+artifact SHA-256.
+Existing prepared receipts remain readable under their original contract.

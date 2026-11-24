@@ -236,7 +236,7 @@ def parse_policy(canonical_path: Path, data: dict[str, Any]) -> WorktreePolicy:
     )
     if set(slots) != expected_slots:
         raise ControllerError("INVALID_POLICY", "policy [slots] fields are invalid")
-    if set(review) != {"stale_warning_days"}:
+    if set(review) not in ({"stale_warning_days"}, {"stale_warning_days", "verify_candidate_snapshot"}):
         raise ControllerError("INVALID_POLICY", "policy [review] fields are invalid")
     if set(authority) != {
         "require_adoption",
@@ -406,6 +406,10 @@ def parse_policy(canonical_path: Path, data: dict[str, Any]) -> WorktreePolicy:
         preserved_auto_release=preserved_auto_release,
         release_intent_ttl_seconds=release_intent_ttl_seconds,
         stale_warning_days=stale,
+        verify_candidate_snapshot=(
+            _boolean(review, "verify_candidate_snapshot")
+            if "verify_candidate_snapshot" in review else False
+        ),
         require_adoption=_boolean(authority, "require_adoption"),
         require_task_key=_boolean(authority, "require_task_key"),
         require_authority_key=_boolean(authority, "require_authority_key"),

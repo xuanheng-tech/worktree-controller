@@ -111,6 +111,7 @@ from .semantics import publication_receipt_lease_released as _publication_receip
 from .semantics import record_for as _record_for
 from .semantics import scope_digest as _scope_digest
 from .semantics import scopes_overlap as _scopes_overlap
+from .snapshot_receipt import verify_candidate_snapshot
 from .store import (
     INTEGRATION_INTENT_CONTRACT_VERSION,
     INTEGRATION_INTENT_SCHEMA_VERSION,
@@ -3862,6 +3863,13 @@ def validate_integration(
                 "MISSING_PREPARATION_EVIDENCE",
                 "policy schema v4 requires explicit tests and Snapshot receipts",
             )
+        snapshot_review = None
+        if policy.verify_candidate_snapshot:
+            snapshot_review = verify_candidate_snapshot(
+                snapshot_evidence, item.path, item.branch, item.head, intent.base_main_oid
+            )
+            # Persist the content address used by evidence readers, regardless of input prefix.
+            snapshot_evidence = snapshot_review["snapshot_id"]
         tree_oid = commit_tree_oid(item.path, item.head)
         identity_payload = {
             "allocation_id": record.allocation_id,
@@ -3911,6 +3919,10 @@ def validate_integration(
         updated_record = _updated_record(
             record,
             "INTEGRATION_VALIDATED",
+            event_detail=(
+                {"prepared_receipt_id": receipt_id, "snapshot_review": snapshot_review}
+                if snapshot_review is not None else None
+            ),
             lifecycle="HANDOFF_READY",
             handoff_commit=item.head,
             finalizer_record_id=evidence,
@@ -3942,6 +3954,7 @@ def validate_integration(
     payload["decision"] = {
         "code": "INTEGRATION_PREPARED",
         "reason": "tests and Snapshot evidence are bound to the exact prepared candidate",
+        **({"snapshot_review": snapshot_review} if snapshot_review is not None else {}),
         "record_version": updated_record.record_version,
         **_intent_payload(updated_intent),
     }

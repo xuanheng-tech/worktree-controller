@@ -232,6 +232,7 @@ class WorktreePolicy:
     keyed_documents: tuple[KeyedDocumentRule, ...] = ()
     disposable_resources: tuple[tuple[str, str], ...] = ()
     disposable_resources_configured: bool = False
+    verify_candidate_snapshot: bool = False
 
 
 @dataclass(frozen=True)
