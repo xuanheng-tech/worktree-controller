@@ -105,6 +105,20 @@ def _delivery(
         if not project:
             continue
         prepared = prepared_receipts[0] if len(prepared_receipts) == 1 else None
+        # Coverage is attached to a particular preparation, including after reprepare.
+        allocation_record = snapshot.records.get(publication.allocation_id)
+        snapshot_ids = {p.receipt_id: p.snapshot_receipt_id for p in prepared_receipts}
+        reviews = {}
+        if allocation_record is not None:
+            for event in allocation_record.history:
+                if event.get("event") != "INTEGRATION_VALIDATED" or "snapshot_review" not in event:
+                    continue
+                receipt_id = event["prepared_receipt_id"]
+                if receipt_id in snapshot_ids:
+                    review = event["snapshot_review"]
+                    if review["snapshot_id"] != snapshot_ids[receipt_id]:
+                        _conflict("recorded Snapshot review differs from the prepared receipt")
+                    reviews[receipt_id] = review
         deliveries.append(
             {
                 "integration_intent_id": publication.intent_id,
@@ -120,6 +134,7 @@ def _delivery(
                 "validation_evidence_id": publication.validation_evidence_id,
                 "prepared_candidate_receipt": asdict(prepared) if prepared else None,
                 "prepared_candidate_receipts": [asdict(p) for p in prepared_receipts],
+                "prepared_snapshot_reviews": reviews,
                 "finalizer_record_id": publication.finalizer_record_id,
             }
         )

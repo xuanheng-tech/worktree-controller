@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.36.2
+
+- Integration policies can require verified Snapshot Runner branch reviews for the exact checkout,
+  base and candidate. Closed lifecycle history includes the coverage recorded during preparation.
+
 ## 1.36.1
 
 - **Output slimming & default active filtering**:

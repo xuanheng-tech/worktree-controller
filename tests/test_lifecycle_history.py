@@ -147,7 +147,22 @@ def test_publication_receipt_proves_source_owner_separately_from_publisher(monke
         monkeypatch.setattr(MetadataStore, "_load_unlocked", lambda self: snapshot)
         repeated = lifecycle_history(repository.repo, integration_intent_id=intent_id)["decision"]
         assert repeated["closed_releases"] == history["closed_releases"]
+        assert delivery["prepared_snapshot_reviews"] == {}
         prepared = next(iter(snapshot.prepared_candidate_receipts.values()))
+        review = {
+            "snapshot_id": prepared.snapshot_receipt_id,
+            "status": "partial",
+            "truncated": True,
+            "evidence_gap": True,
+        }
+        record = snapshot.records[prepared.allocation_id]
+        snapshot.records[record.allocation_id] = replace(
+            record,
+            history=(*record.history, {
+                "event": "INTEGRATION_VALIDATED", "prepared_receipt_id": prepared.receipt_id,
+                "snapshot_review": review,
+            }),
+        )
         duplicate = replace(
             prepared,
             receipt_id="9eee1e75-1693-42eb-9c71-c1d26b227063",
@@ -158,6 +173,7 @@ def test_publication_receipt_proves_source_owner_separately_from_publisher(monke
         delivery = ambiguous["closed_releases"][0]["deliveries"][0]
         assert delivery["prepared_candidate_receipt"] is None
         assert len(delivery["prepared_candidate_receipts"]) == 2
+        assert delivery["prepared_snapshot_reviews"] == {prepared.receipt_id: review}
 
 
 def test_history_does_not_take_owner_from_mutable_record_or_new_authority():

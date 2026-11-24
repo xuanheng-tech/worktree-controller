@@ -130,5 +130,6 @@ When the Runner reports partial coverage or evidence gaps, review the uncovered 
 and identify the additional evidence in the candidate validation record. Use
 `snapshot-runner:bounded:<sha256>` to acknowledge that scope. The candidate allocation retains the observed
 status and coverage flags in its validation history, linked to the prepared receipt ID and original
-artifact SHA-256.
+artifact SHA-256. After release, `lifecycle-history` exposes these recorded coverage objects in
+`prepared_snapshot_reviews`, indexed by prepared receipt ID.
 Existing prepared receipts remain readable under their original contract.
