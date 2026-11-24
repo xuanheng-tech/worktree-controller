@@ -247,7 +247,7 @@ def test_pid_one_entry_preserves_interpreter_flags_and_spaced_arguments(
     assert proof["worker_arguments"] == arguments
     assert proof["uv_arguments"] == [
         str(root / "bin/uv"), "sync", "--locked", "--no-config", "--default-index",
-        "https://pypi.org/simple", "--python", sys.executable, "--offline",
+        "https://pypi.org/simple", "--extra", "native-session", "--python", sys.executable, "--offline",
     ]
     assert result.returncode == 1, result.stderr
     assert "Project checks failed:" in result.stderr
