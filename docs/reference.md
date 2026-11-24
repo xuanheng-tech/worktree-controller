@@ -1687,7 +1687,8 @@ agree. Missing, duplicate, unknown or mismatched fields refuse the operation. Ho
 commands never acquire, release or reconcile their parent's allocation.
 
 A per-tool host gate passes one `--access` class: `read`, `exec`, or `write` with exactly one
-absolute `--target`. While the allocation is `ACTIVE` the answer is the unchanged `GRANTED`.
+absolute `--target`. An active lease admits an explicit write only within the applicable
+checkout and its recorded scope. The host must mediate the actual operation.
 After this holder's own handoff (`HANDOFF_READY` or `PRESERVED`), the same holder receives
 `CONTINUATION_GRANTED` for reads, commands, writes outside governance, and writes into an
 `ACTIVE` integration candidate whose `source_allocations` include the frozen allocation and whose

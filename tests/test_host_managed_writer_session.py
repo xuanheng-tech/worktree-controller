@@ -292,3 +292,49 @@ def test_scoped_file_writes_only_after_success(task, tmp_path):
     assert refused.returncode != 0
     assert target.read_text() == "result"
     assert sibling.read_text() == "retain"
+
+
+@pytest.mark.parametrize("operation", ["rename", "unlink"])
+def test_scoped_file_keeps_host_names(hosted, operation):
+    repo, root, allocation, holder, context = hosted
+    original = root / "mine.txt"
+    original.write_text("baseline")
+    store = _store(repo)
+    record = store.load().records[allocation]
+    script = "p.rename('new')" if operation == "rename" else "p.unlink()"
+    rc = writer_session._scoped_file_command(
+        ["/usr/bin/python3", "-Ic", "from pathlib import Path; p=Path('mine.txt'); " + script],
+        root, repo.repo, record, store, holder, context["lease_id"])
+    assert rc != 0 and original.read_text() == "baseline" and not (root / "new").exists()
+
+
+def test_scoped_file_discards_staged_bytes_after_revocation(hosted, monkeypatch):
+    from worktree_controller.models import ControllerError
+
+    repo, root, allocation, holder, context = hosted
+    original = root / "mine.txt"
+    original.write_text("baseline")
+    store = _store(repo)
+    record = store.load().records[allocation]
+    real_run = subprocess.run
+
+    def revoke_during_child(argv, **kwargs):
+        if argv[0] != "/usr/bin/bwrap":
+            return real_run(argv, **kwargs)
+        kwargs.pop("check")
+        with subprocess.Popen(argv, stdout=subprocess.PIPE, text=True, **kwargs) as child:
+            assert child.stdout.readline().strip() == "staged" and child.poll() is None
+            writer_lease.release_writer_lease(repo.repo, target=root, holder=holder)
+            assert allocation not in store.load().writer_leases
+            rc = child.wait(timeout=10)
+            assert rc == 0
+            return subprocess.CompletedProcess(argv, rc)
+
+    monkeypatch.setattr(subprocess, "run", revoke_during_child)
+    script = ("from pathlib import Path; import time; Path('mine.txt').write_text('pending'); "
+              "print('staged', flush=True); time.sleep(1)")
+    with pytest.raises(ControllerError) as error:
+        writer_session._scoped_file_command(
+            ["/usr/bin/python3", "-Ic", script], root, repo.repo, record,
+            store, holder, context["lease_id"])
+    assert error.value.code == "WRITER_LEASE_MISMATCH" and original.read_text() == "baseline"
