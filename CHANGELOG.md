@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.36.4
+
+- Check explicit file targets against the active writer scope. The optional Linux
+  scoped-file command edits a staged copy of one existing regular file and checks
+  the original lease again before writing back. Existing shell modes retain
+  their checkout-level lease contract.
+
 ## 1.36.3
 
 - Serialize publication authorization and lease abort. A concurrent consumer reports
