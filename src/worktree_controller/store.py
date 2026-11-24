@@ -306,6 +306,22 @@ class MetadataStore:
             finally:
                 os.close(descriptor)
 
+    @contextmanager
+    def publication_operation(self) -> Iterator[None]:
+        """Serialize consumer authorization and abort without blocking metadata readers."""
+        fd = os.open(self.root / "publication-execution.lock",
+                     os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise ControllerError(
+                    "PUBLICATION_EXECUTION_BUSY", "another publication operation is in flight"
+                ) from error
+            yield
+        finally:
+            os.close(fd)
+
     @property
     def flock_held(self) -> bool:
         """True only while this process actually holds the repository flock."""

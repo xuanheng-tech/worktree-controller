@@ -6550,101 +6550,102 @@ def abort_publication_lease(
         else None
     )
     expected_main = peek_lease.expected_main_oid if peek_lease is not None else peek_record.base_commit
-    observed_remote: str | None = None
-    if check_candidate is not None:
-        observed_remote = ls_remote_branch(repository_initial.canonical_path, remote_name, branch_name)
-        if observed_remote == check_candidate:
-            raise ControllerError(
-                "PUBLICATION_RECOVERY_REQUIRED",
-                "publication candidate already reached remote; complete or recover its lease instead of aborting",
-            )
-        if (
-            observed_remote is not None
-            and expected_main is not None
-            and observed_remote != expected_main
-        ):
-            fetched_remote = fetch_remote_branch(
-                repository_initial.canonical_path, remote_name, branch_name
-            )
-            if fetched_remote == check_candidate or is_ancestor(
-                repository_initial.canonical_path, check_candidate, fetched_remote
-            ):
+    with store.publication_operation():
+        observed_remote: str | None = None
+        if check_candidate is not None:
+            observed_remote = ls_remote_branch(repository_initial.canonical_path, remote_name, branch_name)
+            if observed_remote == check_candidate:
                 raise ControllerError(
                     "PUBLICATION_RECOVERY_REQUIRED",
-                    "publication candidate is already in remote branch; complete or recover its lease instead of aborting",
-                )
-    with store.lock(exclusive=True):
-        repository = inventory(repository_path)
-        snapshot = store._load_unlocked()
-        lease = snapshot.publication_lease
-        item, record = _managed_record(repository, snapshot, target)
-        if (
-            (lease.lease_id if lease is not None else None)
-            != (peek_lease.lease_id if peek_lease is not None else None)
-            or (
-                lease is not None
-                and (lease.remote != remote_name or lease.branch != branch_name)
-            )
-        ):
-            raise ControllerError(
-                "PUBLICATION_LEASE_DRIFT", "publication lease state changed during abort check"
-            )
-        _cas(record, expected_record_version)
-        if lease is None:
-            if (
-                lease_id is not None
-                or record.lifecycle != "INTEGRATING"
-                or record.owner != owner
-                or item.head != record.task_commit
-                or not item.clean
-            ):
-                raise ControllerError(
-                    "LEASE_MISMATCH", "no recoverable interrupted publication transition exists"
-                )
-            updated = _updated_record(
-                record,
-                "PUBLICATION_LEASE_RECOVERED",
-                lifecycle="HANDOFF_READY",
-            )
-            store.replace_record(updated)
-            decision_code = "PUBLICATION_LEASE_RECOVERED"
-        else:
-            if lease.lease_id != lease_id or lease.holder != owner or lease.run_id != run_id:
-                raise ControllerError(
-                    "LEASE_MISMATCH", "publication lease owner or id does not match"
+                    "publication candidate already reached remote; complete or recover its lease instead of aborting",
                 )
             if (
-                record.allocation_id != lease.allocation_id
-                or record.lifecycle not in {"INTEGRATING", "HANDOFF_READY"}
-                or item.head != lease.candidate_oid
-                or not item.clean
+                observed_remote is not None
+                and expected_main is not None
+                and observed_remote != expected_main
+            ):
+                fetched_remote = fetch_remote_branch(
+                    repository_initial.canonical_path, remote_name, branch_name
+                )
+                if fetched_remote == check_candidate or is_ancestor(
+                    repository_initial.canonical_path, check_candidate, fetched_remote
+                ):
+                    raise ControllerError(
+                        "PUBLICATION_RECOVERY_REQUIRED",
+                        "publication candidate is already in remote branch; complete or recover its lease instead of aborting",
+                    )
+        with store.lock(exclusive=True):
+            repository = inventory(repository_path)
+            snapshot = store._load_unlocked()
+            lease = snapshot.publication_lease
+            item, record = _managed_record(repository, snapshot, target)
+            if (
+                (lease.lease_id if lease is not None else None)
+                != (peek_lease.lease_id if peek_lease is not None else None)
+                or (
+                    lease is not None
+                    and (lease.remote != remote_name or lease.branch != branch_name)
+                )
             ):
                 raise ControllerError(
-                    "PUBLICATION_LEASE_DRIFT", "drifted publication lease cannot be aborted"
+                    "PUBLICATION_LEASE_DRIFT", "publication lease state changed during abort check"
                 )
-            updated = _updated_record(
-                record, "PUBLICATION_LEASE_ABORTED", lifecycle="HANDOFF_READY"
-            )
-            store.replace_record(updated)
-            store.remove_publication_lease(lease.lease_id)
-            decision_code = "PUBLICATION_LEASE_ABORTED"
-        intent = _intent_for_allocation(snapshot, record.allocation_id)
-        if intent is not None:
-            if intent.state != "PUBLISHING":
-                raise ControllerError(
-                    "INTEGRATION_INTENT_MISMATCH",
-                    "publication abort requires a publishing intent",
+            _cas(record, expected_record_version)
+            if lease is None:
+                if (
+                    lease_id is not None
+                    or record.lifecycle != "INTEGRATING"
+                    or record.owner != owner
+                    or item.head != record.task_commit
+                    or not item.clean
+                ):
+                    raise ControllerError(
+                        "LEASE_MISMATCH", "no recoverable interrupted publication transition exists"
+                    )
+                updated = _updated_record(
+                    record,
+                    "PUBLICATION_LEASE_RECOVERED",
+                    lifecycle="HANDOFF_READY",
                 )
-            restored_intent = _updated_intent(
-                intent,
-                "PUBLICATION_LEASE_ABORTED",
-                state="READY_TO_PUBLISH",
-                publication_identity=None,
-            )
-            store.replace_integration_intent(restored_intent)
-            if snapshot.repository_id is None:
-                raise ControllerError("BLOCK_DRIFT", "repository metadata is missing")
-            _emit_lifecycle_event(store, snapshot.repository_id, restored_intent, "PREPARED")
+                store.replace_record(updated)
+                decision_code = "PUBLICATION_LEASE_RECOVERED"
+            else:
+                if lease.lease_id != lease_id or lease.holder != owner or lease.run_id != run_id:
+                    raise ControllerError(
+                        "LEASE_MISMATCH", "publication lease owner or id does not match"
+                    )
+                if (
+                    record.allocation_id != lease.allocation_id
+                    or record.lifecycle not in {"INTEGRATING", "HANDOFF_READY"}
+                    or item.head != lease.candidate_oid
+                    or not item.clean
+                ):
+                    raise ControllerError(
+                        "PUBLICATION_LEASE_DRIFT", "drifted publication lease cannot be aborted"
+                    )
+                updated = _updated_record(
+                    record, "PUBLICATION_LEASE_ABORTED", lifecycle="HANDOFF_READY"
+                )
+                store.replace_record(updated)
+                store.remove_publication_lease(lease.lease_id)
+                decision_code = "PUBLICATION_LEASE_ABORTED"
+            intent = _intent_for_allocation(snapshot, record.allocation_id)
+            if intent is not None:
+                if intent.state != "PUBLISHING":
+                    raise ControllerError(
+                        "INTEGRATION_INTENT_MISMATCH",
+                        "publication abort requires a publishing intent",
+                    )
+                restored_intent = _updated_intent(
+                    intent,
+                    "PUBLICATION_LEASE_ABORTED",
+                    state="READY_TO_PUBLISH",
+                    publication_identity=None,
+                )
+                store.replace_integration_intent(restored_intent)
+                if snapshot.repository_id is None:
+                    raise ControllerError("BLOCK_DRIFT", "repository metadata is missing")
+                _emit_lifecycle_event(store, snapshot.repository_id, restored_intent, "PREPARED")
     payload = compact_status(repository_path, command="lease-abort", target=target)
     payload["command"] = "lease-abort"
     payload["decision"] = {

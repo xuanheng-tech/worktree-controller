@@ -380,20 +380,21 @@ def run_session(repository: Path, *, candidate_oid: str, lease_id: str, run_id: 
         _emit(sys.stdout, "verified", **verified)
         request = channel.read()
         _request(request, "authorize", verified["identity"])
-        with session.store.lock(exclusive=False):
-            identity = session._guard_identity()
-        auth_remote = session._remote_oid(identity)
-        with session.store.lock(exclusive=False):
-            authorized = session.authorize(remote_oid=auth_remote)
-        _emit(sys.stdout, "authorized", **authorized)
-        request = channel.read()
-        _request(request, "complete", verified["identity"])
-        with session.store.lock(exclusive=False):
-            identity = session._guard_identity()
-        complete_remote = session._remote_oid(identity)
-        with session.store.lock(exclusive=False):
-            completed = session.complete(request["result"], remote_oid=complete_remote)
-        _emit(sys.stdout, "completed", **completed)
+        with session.store.publication_operation():
+            with session.store.lock(exclusive=False):
+                identity = session._guard_identity()
+            auth_remote = session._remote_oid(identity)
+            with session.store.lock(exclusive=False):
+                authorized = session.authorize(remote_oid=auth_remote)
+            _emit(sys.stdout, "authorized", **authorized)
+            request = channel.read()
+            _request(request, "complete", verified["identity"])
+            with session.store.lock(exclusive=False):
+                identity = session._guard_identity()
+            complete_remote = session._remote_oid(identity)
+            with session.store.lock(exclusive=False):
+                completed = session.complete(request["result"], remote_oid=complete_remote)
+            _emit(sys.stdout, "completed", **completed)
         return 0
     except (ControllerError, OSError, RecursionError, UnicodeError, ValueError) as exc:
         with suppress(BrokenPipeError):

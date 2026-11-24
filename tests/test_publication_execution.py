@@ -288,6 +288,47 @@ def test_public_session_holds_producer_lock_until_consumer_disconnects(leased):
             _close(observer)
 
 
+def test_abort_unadopted_checkout_preserves_diagnosis():
+    with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES) as repository:
+        with pytest.raises(ControllerError) as error:
+            lifecycle.abort_publication_lease(
+                repository.repo, target=repository.repo, expected_record_version=1,
+                lease_id=None, owner="integration-owner", run_id="unadopted",
+            )
+        assert error.value.code == "NEEDS_ADOPTION"
+        assert not (repository.repo / ".git/worktree-controller/v1/publication-execution.lock").exists()
+
+
+def test_authorized_consumer_excludes_duplicate_and_abort_until_disconnect(leased):
+    repository, target, decision, session = leased
+    first = _process(target, decision)
+    second = _process(target, decision)
+    try:
+        original = _read(first)["identity"]
+        duplicate = _read(second)["identity"]
+        assert original == duplicate
+        _send(first, "authorize", original)
+        assert _read(first)["phase"] == "authorized"
+        _send(second, "authorize", duplicate)
+        assert _read(second)["code"] == "PUBLICATION_EXECUTION_BUSY"
+        assert second.wait(timeout=5) == 1
+        assert session.store.load().publication_lease.lease_id == decision["lease_id"]
+        abort = dict(target=target, expected_record_version=decision["record_version"],
+                     lease_id=decision["lease_id"], owner="integration-owner", run_id=decision["run_id"])
+        with pytest.raises(ControllerError) as error:
+            lifecycle.abort_publication_lease(repository.repo, **abort)
+        assert error.value.code == "PUBLICATION_EXECUTION_BUSY"
+        assert git(target, "ls-remote", "origin", "refs/heads/main").split()[0] == decision["expected_main_oid"]
+        first.stdin.close()
+        assert _read(first)["code"] == "PUBLICATION_SESSION_CLOSED"
+        assert first.wait(timeout=5) == 1
+        aborted = lifecycle.abort_publication_lease(repository.repo, **abort)
+        assert aborted["decision"]["code"] == "PUBLICATION_LEASE_ABORTED"
+    finally:
+        _close(second)
+        _close(first)
+
+
 @pytest.mark.parametrize("action", ["complete", "authorize-with-wrong-identity"])
 def test_out_of_order_or_wrong_identity_does_not_grant_a_push(leased, action):
     _, target, decision, _ = leased
@@ -415,18 +456,20 @@ def test_real_finalizer_recovers_without_second_ref_update(leased, interruption)
         hook = remote / "hooks/post-receive"
         hook.write_text("#!/bin/sh\nprintf x >post-receive-ready\nread -r line <post-receive-hold\n")
         hook.chmod(0o755)
-        with os.fdopen(os.open(ready, os.O_RDWR | os.O_NONBLOCK), "rb") as event:
-            with selectors.DefaultSelector() as selector:
-                selector.register(event, selectors.EVENT_READ)
-                with subprocess.Popen(command, env=environment, start_new_session=True,
-                                      stdout=subprocess.DEVNULL) as publisher:
-                    try:
-                        assert selector.select(timeout=20), "receiver did not update its ref"
-                        assert event.read(1) == b"x"
-                        assert git(remote, "rev-parse", "refs/heads/main") == decision["candidate_oid"]
-                    finally:
-                        os.killpg(publisher.pid, signal.SIGKILL)
-                    assert publisher.wait(timeout=10) == -signal.SIGKILL
+        with (
+            os.fdopen(os.open(ready, os.O_RDWR | os.O_NONBLOCK), "rb") as event,
+            selectors.DefaultSelector() as selector,
+        ):
+            selector.register(event, selectors.EVENT_READ)
+            with subprocess.Popen(command, env=environment, start_new_session=True,
+                                  stdout=subprocess.DEVNULL) as publisher:
+                try:
+                    assert selector.select(timeout=20), "receiver did not update its ref"
+                    assert event.read(1) == b"x"
+                    assert git(remote, "rev-parse", "refs/heads/main") == decision["candidate_oid"]
+                finally:
+                    os.killpg(publisher.pid, signal.SIGKILL)
+                assert publisher.wait(timeout=10) == -signal.SIGKILL
         hook.unlink()
     assert git(remote, "rev-parse", "refs/heads/main") == decision["candidate_oid"]
     updates = git(remote, "reflog", "show", "--format=%H", "refs/heads/main").splitlines()
