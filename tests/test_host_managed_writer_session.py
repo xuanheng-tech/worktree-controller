@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from copy import deepcopy
@@ -266,10 +267,22 @@ def test_active_writer_checks_exact_file_scope(hosted, client):
     assert inspect(path / "mine.txt")["admission"] == "REFUSED"
 
 
-def test_scoped_file_writes_only_after_success(task, tmp_path):
-    import shutil
-    if not shutil.which("bwrap"):
+@pytest.fixture
+def scoped_sandbox():
+    if not shutil.which("bwrap", path="/usr/bin"):
         pytest.skip("requires bubblewrap")
+    probe = subprocess.run(
+        ["/usr/bin/bwrap", "--unshare-all", "--unshare-user", "--disable-userns",
+         "--ro-bind", "/", "/", "--", "/bin/true"],
+        capture_output=True, text=True, timeout=10, check=False)
+    denied = ("operation not permitted", "permission denied", "unprivileged user namespaces",
+              "no permissions")
+    if probe.returncode and any(reason in probe.stderr.lower() for reason in denied):
+        pytest.skip("host policy denies namespaces for scoped-file")
+    assert probe.returncode == 0, probe.stderr
+
+
+def test_scoped_file_writes_only_after_success(task, tmp_path, scoped_sandbox):
     repo, path, _ = task
     target = path / "mine.txt"
     target.write_text("initial")
@@ -295,7 +308,7 @@ def test_scoped_file_writes_only_after_success(task, tmp_path):
 
 
 @pytest.mark.parametrize("operation", ["rename", "unlink"])
-def test_scoped_file_keeps_host_names(hosted, operation):
+def test_scoped_file_keeps_host_names(hosted, operation, scoped_sandbox):
     repo, root, allocation, holder, context = hosted
     original = root / "mine.txt"
     original.write_text("baseline")
@@ -308,7 +321,7 @@ def test_scoped_file_keeps_host_names(hosted, operation):
     assert rc != 0 and original.read_text() == "baseline" and not (root / "new").exists()
 
 
-def test_scoped_file_discards_staged_bytes_after_revocation(hosted, monkeypatch):
+def test_scoped_file_discards_staged_bytes_after_revocation(hosted, monkeypatch, scoped_sandbox):
     from worktree_controller.models import ControllerError
 
     repo, root, allocation, holder, context = hosted
