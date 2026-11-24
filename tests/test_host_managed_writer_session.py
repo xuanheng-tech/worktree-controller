@@ -248,3 +248,47 @@ def test_explicit_null_run_identity_is_preserved(hosted):
     _repo, path, _, holder, context = hosted
     assert holder.run_id is None and context["run_id"] is None
     assert writer_session.host_check(path)["code"] == "WRITE_ALLOWED"
+
+
+@pytest.mark.parametrize("client", ["direct", "host"])
+def test_active_writer_checks_exact_file_scope(hosted, client):
+    _, path, _, holder, _ = hosted
+    def inspect(target):
+        if client == "host":
+            return writer_session.host_check(path, access="write", target=target)
+        return writer_session.check(path, client_id=holder.client_id, selector=str(holder.pid),
+                                    session_id=holder.session_id, run_id=holder.run_id,
+                                    access="write", target=target)
+    assert inspect(path / "mine.txt")["admission"] == "GRANTED"
+    assert inspect(path / "other.txt")["admission"] == "REFUSED"
+    assert inspect(path / "sub" / ".." / "mine.txt")["admission"] == "REFUSED"
+    (path / "mine.txt").symlink_to("other.txt")
+    assert inspect(path / "mine.txt")["admission"] == "REFUSED"
+
+
+def test_scoped_file_writes_only_after_success(task, tmp_path):
+    import shutil
+    if not shutil.which("bwrap"):
+        pytest.skip("requires bubblewrap")
+    repo, path, _ = task
+    target = path / "mine.txt"
+    target.write_text("initial")
+    sibling = path / "unrelated"
+    sibling.write_text("retain")
+    def launch(script, run):
+        return subprocess.run(
+            [sys.executable, "-B", "-c",
+             "from worktree_controller.writer_session import run_main; raise SystemExit(run_main())",
+             "--path", str(path), "--client-id", "acceptance", "--session-id", "scope",
+             "--run-id", run, "--sandbox", "scoped-file", "--", "/usr/bin/python3", "-Ic", script],
+            cwd=tmp_path, start_new_session=True, capture_output=True, text=True, timeout=30,
+            env={"PATH": os.environ["PATH"], "HOME": str(tmp_path), "PYTHONPATH": str(ROOT / "src"),
+                 "PYTHONDONTWRITEBYTECODE": "1"})
+    success = launch("from pathlib import Path; Path('mine.txt').write_text('result')", "valid")
+    assert success.returncode == 0, success.stderr
+    assert target.read_text() == "result"
+    refused = launch("from pathlib import Path; Path('mine.txt').write_text('pending'); "
+                     "Path('unrelated').write_text('denied')", "invalid")
+    assert refused.returncode != 0
+    assert target.read_text() == "result"
+    assert sibling.read_text() == "retain"

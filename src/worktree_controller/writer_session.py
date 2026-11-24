@@ -11,14 +11,16 @@ import contextlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from .git_backend import inventory, resolve_repository
-from .models import ControllerError, WriterHolder
+from .models import ControllerError, MetadataRecord, WriterHolder
 from .policy import load_policy
 from .store import MetadataStore
 from .writer_lease import (
@@ -50,6 +52,23 @@ def _context_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise ValueError("duplicate context key")
         value[key] = item
     return value
+
+
+def _check_file_scope(root: Path, target: Path, scopes: tuple[str, ...]) -> None:
+    from .semantics import path_in_scopes
+
+    if not target.is_absolute() or ".." in target.parts or not target.is_relative_to(root):
+        raise ControllerError("INVALID_TARGET", "write target must be inside the leased checkout")
+    relative = target.relative_to(root)
+    if (not relative.parts or ".git" in relative.parts or target.resolve() != target
+            or (scopes and not path_in_scopes(relative.as_posix(), scopes))):
+        raise ControllerError("INVALID_TARGET", "write target is outside the allocated file scope")
+    existing = next(parent for parent in (target, *target.parents) if parent.is_dir())
+    governed = governed_target(existing, load_metadata=False)
+    if not governed or governed[1] != root:
+        raise ControllerError("INVALID_TARGET", "write target belongs to a different checkout")
+    if target.is_file() and target.stat().st_nlink != 1:
+        raise ControllerError("INVALID_TARGET", "write target has multiple filesystem names")
 
 
 def host_check(
@@ -166,6 +185,8 @@ def host_check(
                 state=state,
                 snapshot=snapshot,
             )["decision"]
+            if decision["code"] == "WRITE_ALLOWED" and target is not None:
+                _check_file_scope(root, target, record.scope_paths)
             if decision["code"] != "WRITE_ALLOWED" and access is not None:
                 return _continuation(
                     decision,
@@ -252,7 +273,7 @@ def _continuation(
     if target_root == root:
         return {**refusal, "admission": "REFUSED"}
     same = (state, snapshot) if target_repository == repository else None
-    held = _held_checkout(target_repository, target_root, holder, known=same)
+    held = _held_checkout(target_repository, target_root, holder, target=target, known=same)
     if held is not None:
         return {**granted, "code": "HOST_HANDOFF_CONTINUATION",
                 "reason": "write target is another checkout this process holds a writer lease on",
@@ -280,13 +301,14 @@ def _continuation(
     )["decision"]
     if decision["code"] != "WRITE_ALLOWED":
         return {**decision, "admission": "REFUSED"}
+    _check_file_scope(target_root, target, candidate.scope_paths)
     return {**granted, "code": "HOST_HANDOFF_CONTINUATION",
             "reason": "write target is an integration candidate of this handoff",
             "candidate_allocation_id": candidate.allocation_id}
 
 
 def _held_checkout(
-    repository: Path, root: Path, holder: WriterHolder, *, known: tuple[Any, Any] | None = None
+    repository: Path, root: Path, holder: WriterHolder, *, target: Path, known: tuple[Any, Any] | None = None
 ) -> str | None:
     """The allocation at ``root`` when this exact live process holds its writer lease.
 
@@ -335,7 +357,10 @@ def _held_checkout(
         state=state,
         snapshot=snapshot,
     )["decision"]
-    return record.allocation_id if decision["code"] == "WRITE_ALLOWED" else None
+    if decision["code"] != "WRITE_ALLOWED":
+        return None
+    _check_file_scope(root, target, record.scope_paths)
+    return record.allocation_id
 
 
 def _present(path: Path) -> bool:
@@ -552,6 +577,8 @@ def check(
                 state=state,
                 snapshot=snapshot,
             )["decision"]
+            if decision["code"] == "WRITE_ALLOWED" and target is not None:
+                _check_file_scope(root, target, record.scope_paths)
             if decision["code"] != "WRITE_ALLOWED" and access is not None:
                 return _continuation(
                     decision,
@@ -769,6 +796,72 @@ def _sandbox_command(
     return argv
 
 
+def _scoped_file_command(
+    command: list[str], root: Path, repository: Path, record: MetadataRecord,
+    store: MetadataStore, holder: WriterHolder, lease_id: str,
+) -> int:
+    """Run a byte edit on a private copy. Commit one file under the lease lock."""
+    from .controller import guard_write
+
+    if len(record.scope_paths) != 1:
+        raise ControllerError("INVALID_SCOPE", "scoped-file requires one existing regular file")
+    name = record.scope_paths[0]
+    target = root / name
+    _check_file_scope(root, target, record.scope_paths)
+    if not target.is_file():
+        raise ControllerError("INVALID_TARGET", "scoped-file requires an existing regular file")
+    original = target.read_bytes()
+    mode = stat.S_IMODE(target.stat().st_mode)
+    with tempfile.TemporaryDirectory() as temp:
+        stage = Path(temp) / "content"
+        stage.write_bytes(original)
+        dest = "/work/" + name
+        # Expose the one staged inode, system executables, and private scratch.
+        # No host checkout, Git directory, home, service sockets or environment.
+        argv = ["/usr/bin/bwrap", "--unshare-all", "--unshare-user", "--disable-userns", "--new-session",
+                "--die-with-parent", "--cap-drop", "ALL", "--clearenv",
+                "--setenv", "PATH", "/usr/bin:/bin", "--ro-bind", "/usr", "/usr"]
+        for alias in ("bin", "lib", "lib64"):
+            system = Path("/") / alias
+            if system.exists():
+                argv.extend(["--ro-bind", str(system), str(system)])
+        argv.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                     "--bind", str(stage), dest, "--remount-ro", "/", "--chdir", "/work",
+                     "--", *command])
+        result = subprocess.run(argv, cwd=temp, env={}, stdin=subprocess.DEVNULL, check=False)
+        if result.returncode:
+            return result.returncode
+        updated = stage.read_bytes()
+    with store.lock(exclusive=True):
+        state = inventory(root)
+        snapshot = store._load_unlocked(include_history=False, include_intents=False)
+        live = snapshot.records.get(record.allocation_id)
+        lease = snapshot.writer_leases.get(record.allocation_id)
+        if (not live or not lease or lease.lease_id != lease_id or
+                live.scope_paths != record.scope_paths):
+            raise ControllerError("WRITER_LEASE_MISMATCH", "file edit lost its original authority")
+        decision = guard_write(repository, target=root, task_key=live.task_key,
+                               authority_key=live.authority_key, owner=live.owner,
+                               operation="feature-write", holder=holder, observe=False,
+                               state=state, snapshot=snapshot)["decision"]
+        if decision["code"] != "WRITE_ALLOWED":
+            raise ControllerError(decision["code"], "file edit no longer authorized")
+        _check_file_scope(root, target, live.scope_paths)
+        if target.read_bytes() != original or stat.S_IMODE(target.stat().st_mode) != mode:
+            raise ControllerError("INVALID_TARGET", "file changed during staged edit")
+        if updated != original:
+            with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as out:
+                pending = Path(out.name)
+            try:
+                pending.write_bytes(updated)
+                shutil.copystat(target, pending)
+                os.utime(pending, None)
+                pending.replace(target)
+            finally:
+                pending.unlink(missing_ok=True)
+    return 0
+
+
 def run_main(argv: list[str] | None = None) -> int:
     """Run any executable under the same explicit writer contract.
 
@@ -780,7 +873,7 @@ def run_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--client-id", required=True)
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--run-id")
-    parser.add_argument("--sandbox", choices=("auto", "bwrap"), default=None)
+    parser.add_argument("--sandbox", choices=("auto", "bwrap", "scoped-file"), default=None)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     parsed = parser.parse_args(argv)
     command = parsed.command
@@ -801,7 +894,8 @@ def run_main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     path = parsed.path.expanduser().resolve()
     try:
-        launch_command = _sandbox_command(command, sandbox=parsed.sandbox, worktree_path=path, common_dir=None)
+        launch_command = (command if parsed.sandbox == "scoped-file" else
+                          _sandbox_command(command, sandbox=parsed.sandbox, worktree_path=path, common_dir=None))
     except (ControllerError, OSError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
@@ -936,6 +1030,16 @@ def run_main(argv: list[str] | None = None) -> int:
         else:
             governed = governed_target(path, load_metadata=False)
             common_dir = resolve_repository(governed[1])[1] if governed is not None else None
+        if parsed.sandbox == "scoped-file":
+            if execution != "managed" or not own_lease:
+                raise ControllerError("WRITER_LEASE_REQUIRED", "scoped-file requires a fresh managed lease")
+            holder = resolve_holder(identity["selector"], client_id=parsed.client_id,
+                                    session_id=parsed.session_id, run_id=parsed.run_id)
+            result = _scoped_file_command(command, Path(projection["worktree_path"]),
+                                          Path(projection["repository_path"]), record, MetadataStore(common_dir),
+                                          holder, admitted["lease_id"])
+            finished = True
+            return result if result >= 0 else 128 - result
         if parsed.sandbox is not None and common_dir is not None:
             launch_command = _sandbox_command(
                 command,

@@ -146,3 +146,23 @@ It requires exact exported payloads, published release identities and current ro
 ordinary bootstrap, copying the shared Skill or matching storage versions is not a substitute.
 A catalog refusal blocks deployment while isolated protocol validation and source delivery can
 continue. Record staged, activated and verified results separately.
+
+
+## File-scoped edits
+
+For a managed allocation with one existing regular file as its exact scope,
+`worktree-session --sandbox scoped-file` runs a system command in a private
+Linux bubblewrap namespace. Its working directory is `/work`. Only a staged
+copy of the allocated file is available at its checkout-relative name.
+A successful child exit requests a byte update. Controller holds its repository
+lock while checking the original lease, holder, scope, file and lifecycle and
+replacing the original file. An unsuccessful child or failed revalidation
+discards the staged edit. This mode requires bubblewrap and supported user
+namespaces. File creation, renames, deletes and directory allocations need
+other execution contracts.
+
+A host using native edit tools must ask for the specific absolute target on
+every write. This preflight checks the active checkout scope, including Git
+ownership and link aliases. Host editors retain responsibility for mediation
+at the actual write. Default shell execution retains the worktree lease
+contract. Delivery continues to validate the resulting Git diff independently.
