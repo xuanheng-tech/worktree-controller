@@ -415,18 +415,20 @@ def test_real_finalizer_recovers_without_second_ref_update(leased, interruption)
         hook = remote / "hooks/post-receive"
         hook.write_text("#!/bin/sh\nprintf x >post-receive-ready\nread -r line <post-receive-hold\n")
         hook.chmod(0o755)
-        with os.fdopen(os.open(ready, os.O_RDWR | os.O_NONBLOCK), "rb") as event:
-            with selectors.DefaultSelector() as selector:
-                selector.register(event, selectors.EVENT_READ)
-                with subprocess.Popen(command, env=environment, start_new_session=True,
-                                      stdout=subprocess.DEVNULL) as publisher:
-                    try:
-                        assert selector.select(timeout=20), "receiver did not update its ref"
-                        assert event.read(1) == b"x"
-                        assert git(remote, "rev-parse", "refs/heads/main") == decision["candidate_oid"]
-                    finally:
-                        os.killpg(publisher.pid, signal.SIGKILL)
-                    assert publisher.wait(timeout=10) == -signal.SIGKILL
+        with (
+            os.fdopen(os.open(ready, os.O_RDWR | os.O_NONBLOCK), "rb") as event,
+            selectors.DefaultSelector() as selector,
+        ):
+            selector.register(event, selectors.EVENT_READ)
+            with subprocess.Popen(command, env=environment, start_new_session=True,
+                                  stdout=subprocess.DEVNULL) as publisher:
+                try:
+                    assert selector.select(timeout=20), "receiver did not update its ref"
+                    assert event.read(1) == b"x"
+                    assert git(remote, "rev-parse", "refs/heads/main") == decision["candidate_oid"]
+                finally:
+                    os.killpg(publisher.pid, signal.SIGKILL)
+                assert publisher.wait(timeout=10) == -signal.SIGKILL
         hook.unlink()
     assert git(remote, "rev-parse", "refs/heads/main") == decision["candidate_oid"]
     updates = git(remote, "reflog", "show", "--format=%H", "refs/heads/main").splitlines()
