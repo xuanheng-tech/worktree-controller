@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.36.6
+
+- **Host write-fence hardening (`scripts/controller-consumer`)**:
+  - Replace AST/command-blacklist heuristics with a fail-closed host write fence for Claude and Grok hooks that checks lexical and `realpath` targets against protected canonical checkouts and routes linked-worktree writes and non-readonly shell executions through `writer-session check` / `host-check`.
+  - Complete Grok `SessionEnd` routing through `worktree-session-end` when exiting a governed repository.
+- **Snapshot receipt verification hardening (`snapshot_receipt.py`)**:
+  - Align `repository_display_name()` with Snapshot Runner `2.7.1`, enforce strict `branch` and 40-hex commit identity prechecks, add a 60-second fail-closed timeout on `snapshot-runner read`, and reject contradictory `evidence_gap=True` / `status="complete"` coverage receipts.
+- **Rollback-safe performance and storage optimizations (storage layout `5` unchanged)**:
+  - Add `O_NOFOLLOW` fast linked-worktree gitdir resolution (`_fast_linked_git_dir`), single-pass `inventory` in `writer_session`, and read-only `include_receipts=False` / `include_release_intents=False` fast loads in `MetadataStore` + single-pass `guard_write`.
+  - Keep all persisted metadata (`transactions`, `completion-receipts`, `cleanup-actions`, `cleanup-recoveries`) in pure UTF-8 plaintext JSON (with compact JSON for `transactions`) so upgrades to `1.36.6` and rollbacks to `1.36.5` (`b677c77`) remain 100% cross-version readable and lossless.
+- **Delivery closeout hardening**:
+  - Fail closed (`PUBLICATION_RECEIPT_REQUIRED` / `PUBLICATION_RECEIPT_DRIFT`) when releasing a `PUBLISHED` candidate without an exact matching `--publication-receipt-id`, preventing stranded `REMOTE_VERIFIED` `IntegrationIntent`s and `PUBLICATION_RECEIPT_DRIFT`.
+  - Allow metadata-only `resource-register` of reproducible `.venv` on `READY_TO_PUBLISH` (`HANDOFF_READY`) integration candidates, include read-only `reproducible_check` feedback on `resource-register`, and emit `cleanup.message` + `cleanup.recovery_argv` on `CLEANUP_PENDING` `lease-complete`.
+  - Automatically clear a finished `worktree-session`'s own `runtime:process-v1` binding on normal exit when no live descendants, active checkout users, or procfs scan uncertainties remain; preserve the binding whenever any live background descendant or process reference remains.
+  - Fix `recovery-guide` on retained `PUBLISHED` checkouts so it reports `cleanup_pending=True`, exact `publication_receipt_id`, `IGNORED_CONTENT` blockers, and formal `resource-register` + `release --publication-receipt-id --dry-run` recovery commands instead of claiming no recovery is needed.
+- CLI contract (`62`) and storage layout (`5`) are unchanged.
+
 ## 1.36.5
 
 - Verify held-checkout identity against an explicit file target in the full test suite.

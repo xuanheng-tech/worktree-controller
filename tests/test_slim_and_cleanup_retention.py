@@ -427,12 +427,12 @@ def test_release_auto_bounds_historical_terminal_cleanup_evidence(monkeypatch) -
         assert integration_queue(repository.repo)["worktrees"] == []
 
 
-def test_large_topology_evidence_compresses_losslessly_and_remains_prunable(capsys) -> None:
+def test_large_topology_evidence_stays_compact_plaintext_json_and_prunable(capsys) -> None:
     from worktree_controller import cleanup_evidence
 
     with GitRepository(linked=0, policy_text=POLICY_V8) as repository:
         adopt_canonical(repository)
-        wt, acq = acquire_one(repository, task="gzip-task", authority="gzip-auth")
+        wt, acq = acquire_one(repository, task="plain-json-task", authority="plain-json-auth")
         alloc = acq["decision"]["allocation_id"]
         _close_and_release(repository, wt)
         store = MetadataStore(inventory(repository.repo).common_dir)
@@ -456,8 +456,9 @@ def test_large_topology_evidence_compresses_losslessly_and_remains_prunable(caps
             for idx in range(700)
         }
         topology = {"contract": "cleanup-hardlink-topology/v1", "resources": ["apps/docs/node_modules"], "anchors": {}, "groups": groups}
-        raw_json_len = len(json.dumps(topology, separators=(",", ":")).encode("utf-8"))
-        assert raw_json_len > 200_000
+        pretty_len = len(json.dumps(topology, indent=2, sort_keys=True).encode("utf-8"))
+        compact_len = len(json.dumps(topology, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+        assert compact_len > 200_000 and compact_len < pretty_len
 
         rid = str(uuid.uuid4())
         action_dir = store.cleanup_actions_dir / rid
@@ -468,20 +469,23 @@ def test_large_topology_evidence_compresses_losslessly_and_remains_prunable(caps
         )
         before_path = Path(before_ref["path"])
         before_raw = before_path.read_bytes()
-        assert before_raw.startswith(b"\x1f\x8b")
-        assert len(before_raw) < raw_json_len // 4
+        assert before_raw.startswith(b"{") and not before_raw.startswith(b"\x1f\x8b")
+        assert json.loads(before_raw.decode("utf-8"))["topology"] == topology
 
-        # Lossless roundtrip + exact SHA-256 verification.
+        # Exact SHA-256 verification and plaintext roundtrip.
         decoded, actual_sha = cleanup_evidence.read(before_path, before_ref["sha256"])
         assert actual_sha == before_ref["sha256"]
         assert decoded["topology"] == topology
 
-        # Large transaction journal and completion receipt compress transparently and roundtrip.
+        # Large transaction journal and completion receipt stay compact UTF-8 plaintext JSON.
         tx_id = str(uuid.uuid4())
         tx_payload = {"transaction_id": tx_id, "allocation_id": alloc, "cleanup_plan": {"hardlink_topology": topology}}
         store.write_transaction(tx_id, tx_payload)
         tx_path = store.transactions_dir / f"{tx_id}.json"
-        assert tx_path.read_bytes().startswith(b"\x1f\x8b")
+        tx_raw = tx_path.read_bytes()
+        assert tx_raw.startswith(b"{") and not tx_raw.startswith(b"\x1f\x8b")
+        assert len(tx_raw) < pretty_len
+        assert json.loads(tx_raw.decode("utf-8")) == tx_payload
         assert store._read_json(tx_path) == tx_payload
         store.remove_transaction(tx_id)
 
@@ -501,11 +505,13 @@ def test_large_topology_evidence_compresses_losslessly_and_remains_prunable(caps
             },
         )
         receipt_path = store.completion_receipts_dir / f"{rid}.json"
-        assert receipt_path.read_bytes().startswith(b"\x1f\x8b")
-        assert len(receipt_path.read_bytes()) < raw_json_len // 4
+        receipt_raw = receipt_path.read_bytes()
+        assert receipt_raw.startswith(b"{") and not receipt_raw.startswith(b"\x1f\x8b")
+        assert len(receipt_raw) < pretty_len
+        assert json.loads(receipt_raw.decode("utf-8"))["plan"]["hardlink_topology"] == topology
         assert cleanup_evidence.read(receipt_path)[0]["plan"]["hardlink_topology"] == topology
 
-        # reconcile cleanup-evidence still reads and prunes compressed RELEASED evidence cleanly.
+        # reconcile cleanup-evidence reads and prunes plaintext RELEASED evidence cleanly.
         code, applied, _ = _cli_json(
             capsys, "reconcile", "cleanup-evidence", "--repo", str(repository.repo), "--apply"
         )

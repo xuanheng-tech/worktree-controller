@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .controller import envelope, status
-from .git_backend import inventory
+from .environment import unsafe_ignored_paths
+from .git_backend import ignored_paths, inventory
 from .lifecycle_history import lifecycle_history
 from .models import ControllerError
+from .semantics import publication_receipt_lease_released
 from .store import MetadataStore
 
 CONTRACT = "recovery-guidance/v1"
@@ -231,12 +233,193 @@ def recovery_guide(repository_path: Path, *, target: Path | None = None,
         decision["reason"] = "A frozen handoff needs exact Finalizer identity before session closeout"
         step("check_session", "Run worktree-session-end --check with the real client/session/holder/run "
              "and expected allocation IDs; read every row and summary.terminal_complete")
-    elif lifecycle in {"RELEASED", "ARCHIVED", "PUBLISHED"}:
+    elif lifecycle in {"RELEASED", "ARCHIVED"}:
         decision["terminal_status"] = lifecycle
         decision["reason"] = f"Allocation is already in {lifecycle}; no recovery or re-finalization is needed"
         step("inspect_history", "Inspect lifecycle evidence if audit is required",
              ["worktree-controller", "lifecycle-history", "--repo", canonical,
               "--allocation-id", item["allocation_id"], "--json"])
+    elif lifecycle == "PUBLISHED":
+        matching_receipts = sorted(
+            (
+                receipt
+                for receipt in snapshot.publication_receipts.values()
+                if receipt.allocation_id == item["allocation_id"]
+                and receipt.status == "REMOTE_VERIFIED"
+                and publication_receipt_lease_released(snapshot, receipt)
+                and receipt.candidate_oid == item["head"]
+                and receipt.finalizer_record_id == item.get("finalizer_record_id")
+            ),
+            key=lambda receipt: (receipt.remote_verified_at, receipt.receipt_id),
+        )
+        if len(matching_receipts) != 1:
+            blockers.append(
+                "MISSING_PUBLICATION_RECEIPT"
+                if not matching_receipts
+                else "PUBLICATION_RECEIPT_DRIFT"
+            )
+            decision["reason"] = (
+                "Published checkout is still retained, but matching lease-cleared publication "
+                "receipt evidence is missing or ambiguous"
+            )
+            step("inspect_history", "Inspect immutable publication evidence and doctor diagnostics",
+                 ["worktree-controller", "lifecycle-history", "--repo", canonical,
+                  "--allocation-id", item["allocation_id"], "--json"])
+            step("inspect_doctor", "Check publication receipt drift before releasing",
+                 ["worktree-controller", "doctor", "--repo", canonical, "--json"])
+            return result
+        pub_id = matching_receipts[0].receipt_id
+        decision["publication_receipt_id"] = pub_id
+        decision["cleanup_pending"] = True
+        target_root = Path(item["path"])
+        registered_resources = [
+            resource for resource in item.get("disposable_resources", [])
+            if resource.get("state") == "registered"
+        ]
+        registered_roots = [str(resource["path"]) for resource in registered_resources]
+        has_registered_venv = any(
+            resource.get("path") == ".venv"
+            and resource.get("kind") == "python-venv"
+            and resource.get("reproducible") is True
+            and resource.get("teardown_policy") == "on-release"
+            and (target_root / ".venv").exists()
+            for resource in registered_resources
+        )
+        try:
+            unclassified = tuple(
+                rel_path
+                for rel_path in unsafe_ignored_paths(ignored_paths(target_root))
+                if not any(
+                    rel_path.rstrip("/") == root or rel_path.startswith(root + "/")
+                    for root in registered_roots
+                )
+            )
+        except (ControllerError, OSError):
+            blockers.append("IGNORED_CONTENT_INSPECTION_FAILED")
+            decision["reason"] = (
+                "Published checkout is still retained, and ignored content inspection failed"
+            )
+            step("inspect_doctor", "Inspect checkout health before guarded release",
+                 ["worktree-controller", "doctor", "--repo", canonical, "--json"])
+            return result
+        unclassified_venv = [
+            rel_path for rel_path in unclassified
+            if PurePosixPath(rel_path).parts[:1] == (".venv",)
+        ]
+        unclassified_other = [
+            rel_path for rel_path in unclassified
+            if PurePosixPath(rel_path).parts[:1] != (".venv",)
+        ]
+        venv_dir = target_root / ".venv"
+        recognizable_unregistered_venv = (
+            bool(unclassified_venv)
+            and not any(resource.get("path") == ".venv" for resource in registered_resources)
+            and venv_dir.is_dir()
+            and not venv_dir.is_symlink()
+            and not venv_dir.is_mount()
+            and (venv_dir / "pyvenv.cfg").is_file()
+            and not (venv_dir / "pyvenv.cfg").is_symlink()
+        )
+        if unclassified:
+            blockers.append("IGNORED_CONTENT")
+            decision["unclassified_ignored_paths"] = list(unclassified)
+        if recognizable_unregistered_venv:
+            decision["reason"] = (
+                "Published checkout is still retained and blocked by unclassified ignored "
+                "content (.venv); register reproducible .venv and run guarded release with "
+                "the exact publication receipt"
+            )
+            step(
+                "register_reproducible_venv",
+                "Verify .venv is rebuildable with the recorded owner and register it; "
+                "never auto-delete unclassified files",
+                [
+                    "worktree-controller", "resource-register", "--repo", canonical,
+                    "--path", item["path"],
+                    "--expected-record-version", str(item["record_version"]),
+                    "--owner", item["owner"],
+                    "--resource-path", ".venv",
+                    "--kind", "python-venv",
+                    "--reproducible",
+                    "--creator", item["owner"],
+                    "--teardown-policy", "on-release",
+                    "--json",
+                ],
+            )
+            if unclassified_other:
+                step(
+                    "classify_unclassified_content",
+                    "Preserve remaining unclassified ignored files and preview typed cleanup "
+                    "before release",
+                    [
+                        "worktree-controller", "resource-clean", "--repo", canonical,
+                        "--path", item["path"],
+                        "--expected-record-version", str(item["record_version"]),
+                        "--owner", item["owner"],
+                        "--typed", "--dry-run", "--json",
+                    ],
+                )
+            step(
+                "inspect_release",
+                "After resource-register advances record_version, reobserve recovery-guide "
+                "and run guarded release with the exact --publication-receipt-id (never "
+                "omit --publication-receipt-id on a PUBLISHED checkout)",
+                [
+                    "worktree-controller", "release", "--repo", canonical,
+                    "--path", item["path"],
+                    "--expected-record-version", str(item["record_version"]),
+                    "--publication-receipt-id", pub_id,
+                    "--teardown-reproducible-venv", "--dry-run", "--json",
+                ],
+            )
+        elif unclassified:
+            decision["reason"] = (
+                "Published checkout is still retained and blocked by unclassified ignored "
+                "content; preserve or classify files before guarded release"
+            )
+            step(
+                "classify_unclassified_content",
+                "Preserve unknown files and run typed cleanup dry-run before release; "
+                "never auto-delete unclassified content",
+                [
+                    "worktree-controller", "resource-clean", "--repo", canonical,
+                    "--path", item["path"],
+                    "--expected-record-version", str(item["record_version"]),
+                    "--owner", item["owner"],
+                    "--typed", "--dry-run", "--json",
+                ],
+            )
+            step(
+                "inspect_release",
+                "After unclassified content is cleared, inspect guarded release with the "
+                "exact --publication-receipt-id",
+                [
+                    "worktree-controller", "release", "--repo", canonical,
+                    "--path", item["path"],
+                    "--expected-record-version", str(item["record_version"]),
+                    "--publication-receipt-id", pub_id,
+                    *(["--teardown-reproducible-venv"] if has_registered_venv else []),
+                    "--dry-run", "--json",
+                ],
+            )
+        else:
+            decision["reason"] = (
+                "Candidate is PUBLISHED on the remote, but its checkout is still retained; "
+                "inspect guarded release with the exact publication receipt"
+            )
+            step(
+                "inspect_release",
+                "Preview guarded release using the exact --publication-receipt-id so the "
+                "integration intent and source release triggers converge",
+                [
+                    "worktree-controller", "release", "--repo", canonical,
+                    "--path", item["path"],
+                    "--expected-record-version", str(item["record_version"]),
+                    "--publication-receipt-id", pub_id,
+                    *(["--teardown-reproducible-venv"] if has_registered_venv else []),
+                    "--dry-run", "--json",
+                ],
+            )
     else:
         decision["reason"] = "Unfinished work needs its existing Task checkpoint or a verified handoff"
         step("preserve_task", "Finalize deliverable files through Git Finalizer, or save the existing "

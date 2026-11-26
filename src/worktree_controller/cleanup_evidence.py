@@ -1,8 +1,6 @@
 """FD-relative immutable evidence reads and exclusive cleanup action evidence."""
 
-import gzip
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
@@ -14,47 +12,6 @@ from .models import ControllerError
 from .store import MetadataStore, now_iso
 
 MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
-COMPRESS_THRESHOLD_BYTES = 65536
-
-
-def _decode_evidence_bytes(raw: bytes) -> dict[str, Any]:
-    if raw.startswith(b"\x1f\x8b"):
-        with gzip.GzipFile(fileobj=io.BytesIO(raw), mode="rb") as stream:
-            uncompressed = stream.read(MAX_EVIDENCE_BYTES + 1)
-        if len(uncompressed) > MAX_EVIDENCE_BYTES:
-            raise ControllerError(
-                "PRESERVATION_COVERAGE_INVALID", "preservation evidence exceeds its bound"
-            )
-        value = json.loads(uncompressed)
-    else:
-        value = json.loads(raw)
-    if not isinstance(value, dict):
-        raise ControllerError("PRESERVATION_COVERAGE_INVALID", "invalid preservation document")
-    return value
-
-
-def _write_once_bytes(parent: p._Directory, name: str, data: bytes) -> str:
-    parent.check()
-    fd = os.open(
-        name,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-        0o600,
-        dir_fd=parent.fd,
-    )
-    try:
-        expected = p._inode(os.fstat(fd))
-        with os.fdopen(os.dup(fd), "wb") as stream:
-            stream.write(data)
-            stream.flush()
-        os.fchmod(fd, 0o400)
-        os.fsync(fd)
-        if p._inode(os.stat(name, dir_fd=parent.fd, follow_symlinks=False)) != expected:
-            raise p._fail("PRESERVATION_DESTINATION_CHANGED", "evidence file replaced")
-        parent.check()
-        os.fsync(parent.fd)
-    finally:
-        os.close(fd)
-    return hashlib.sha256(data).hexdigest()
 
 
 def read_document(directory: p._Directory, name: str) -> tuple[dict[str, Any], str]:
@@ -70,7 +27,9 @@ def read_document(directory: p._Directory, name: str) -> tuple[dict[str, Any], s
     if len(raw) > MAX_EVIDENCE_BYTES:
         raise ControllerError("PRESERVATION_COVERAGE_INVALID", "preservation evidence exceeds its bound")
     directory.check()
-    value = _decode_evidence_bytes(raw)
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ControllerError("PRESERVATION_COVERAGE_INVALID", "invalid preservation document")
     return value, hashlib.sha256(raw).hexdigest()
 
 
@@ -104,11 +63,8 @@ def completion_for_allocation(
 
 
 def write(directory: Path, name: str, value: dict[str, Any]) -> dict[str, str]:
-    data = p._json_bytes(value)
-    if len(data) > COMPRESS_THRESHOLD_BYTES:
-        data = gzip.compress(data, compresslevel=6, mtime=0)
     with p._absolute_directory(directory, create=True) as chain:
-        digest = _write_once_bytes(chain[-1], name, data)
+        digest = p._write_once(chain[-1], name, value)
     return {"path": str(directory / name), "sha256": digest}
 
 

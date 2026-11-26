@@ -302,11 +302,13 @@ def test_published_detached_reattaches_then_uses_unchanged_release(published):
     assert receipts == {
         p.name: p.read_bytes() for p in store.publication_receipts_dir.glob("*.json")
     }
+    pub_id = next(iter(store.load().publication_receipts))
     released = release(
         repository.repo,
         target=candidate,
         expected_record_version=result["decision"]["record_version"],
         owner_release=original.owner,
+        publication_receipt_id=pub_id,
     )
     assert released["decision"]["code"] == "RELEASED"
     assert not candidate.exists()

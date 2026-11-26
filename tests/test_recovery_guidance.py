@@ -208,3 +208,107 @@ def test_terminal_guidance_never_infers_completion_from_missing_or_drifted_evide
     assert result["blockers"] == ["CLOSED_LIFECYCLE_EVIDENCE_INCOMPLETE"]
     assert [step["action"] for step in result["next_steps"]] == ["inspect_history"]
     assert result["task_completed"] is result["execution_authority"] is False
+
+
+def test_retained_published_checkout_with_unregistered_venv_guides_exact_closeout():
+    from tests.test_controlled import _commit_reproducible_project, _create_reproducible_venv
+    from worktree_controller.controller import doctor
+
+    with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES_V5) as repository:
+        _commit_reproducible_project(repository)
+        candidate, claimed, _source = _prepared_candidate(repository)
+        _validate(repository, candidate, "published-guidance-validation")
+        _create_reproducible_venv(candidate)
+        completed = _publish(repository, candidate)
+        assert completed["decision"]["code"] == "PUBLICATION_COMPLETED"
+        assert completed["decision"]["cleanup"]["result"] == "CLEANUP_PENDING"
+        pub_id = completed["decision"]["receipt_id"]
+        assert candidate.exists()
+
+        guide = observe(repository, candidate)
+        assert "terminal_status" not in guide
+        assert guide["cleanup_pending"] is True
+        assert guide["publication_receipt_id"] == pub_id
+        assert "IGNORED_CONTENT" in guide["blockers"]
+        assert any(".venv" in p for p in guide["unclassified_ignored_paths"])
+        actions = [step["action"] for step in guide["next_steps"]]
+        assert actions == ["register_reproducible_venv", "inspect_release"]
+        register_argv = guide["next_steps"][0]["argv"]
+        assert register_argv[1] == "resource-register"
+        assert "--resource-path" in register_argv and ".venv" in register_argv
+        release_hint_argv = guide["next_steps"][1]["argv"]
+        assert release_hint_argv[1] == "release"
+        assert "--publication-receipt-id" in release_hint_argv
+        assert pub_id in release_hint_argv
+        assert "--dry-run" in release_hint_argv
+
+        # Execute formal resource-register, then reobserve recovery-guide for fresh CAS release.
+        reg = execute(register_argv)
+        assert reg["decision"]["code"] == "DISPOSABLE_REGISTERED"
+        assert reg["decision"]["reproducible_check"]["verified"] is True
+
+        after_reg = observe(repository, candidate)
+        assert after_reg["cleanup_pending"] is True
+        assert after_reg["publication_receipt_id"] == pub_id
+        assert after_reg["blockers"] == []
+        assert [step["action"] for step in after_reg["next_steps"]] == ["inspect_release"]
+        release_dry = after_reg["next_steps"][0]["argv"]
+        assert "--publication-receipt-id" in release_dry and pub_id in release_dry
+        assert "--teardown-reproducible-venv" in release_dry
+        assert execute(release_dry)["decision"]["code"] == "RELEASE_PLAN_READY"
+        released = execute([arg for arg in release_dry if arg != "--dry-run"])
+        assert released["decision"]["code"] == "RELEASED"
+        assert not candidate.exists()
+        store = MetadataStore(inventory(repository.repo).common_dir)
+        assert store.load().integration_intents[claimed["intent_id"]].state == "RELEASED"
+        assert doctor(repository.repo)["decision"]["code"] == "PASS"
+
+
+def test_retained_published_checkout_with_non_venv_ignored_guides_typed_cleanup():
+    with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES_V5) as repository:
+        (repository.repo / ".gitignore").write_text("build_out/\n")
+        git(repository.repo, "add", ".gitignore")
+        git(repository.repo, "commit", "-m", "ignore build_out")
+        candidate, _claimed, _source = _prepared_candidate(repository)
+        _validate(repository, candidate, "published-ignored-validation")
+        (candidate / "build_out").mkdir()
+        (candidate / "build_out/artifact.bin").write_bytes(b"keep-me")
+        completed = _publish(repository, candidate)
+        pub_id = completed["decision"]["receipt_id"]
+
+        guide = observe(repository, candidate)
+        assert "terminal_status" not in guide
+        assert guide["cleanup_pending"] is True
+        assert guide["publication_receipt_id"] == pub_id
+        assert "IGNORED_CONTENT" in guide["blockers"]
+        assert [step["action"] for step in guide["next_steps"]] == [
+            "classify_unclassified_content",
+            "inspect_release",
+        ]
+        assert guide["next_steps"][0]["argv"][1] == "resource-clean"
+        assert "--typed" in guide["next_steps"][0]["argv"]
+        assert "--dry-run" in guide["next_steps"][0]["argv"]
+        assert pub_id in guide["next_steps"][1]["argv"]
+        assert (candidate / "build_out/artifact.bin").read_bytes() == b"keep-me"
+
+
+def test_retained_published_checkout_clean_guides_direct_receipt_release():
+    with GitRepository(linked=0, policy_text=POLICY_THREE_CANDIDATES_V5) as repository:
+        candidate, claimed, _source = _prepared_candidate(repository)
+        _validate(repository, candidate, "published-clean-validation")
+        completed = _publish(repository, candidate, auto_release=False)
+        pub_id = completed["decision"]["receipt_id"]
+
+        guide = observe(repository, candidate)
+        assert "terminal_status" not in guide
+        assert guide["cleanup_pending"] is True
+        assert guide["publication_receipt_id"] == pub_id
+        assert guide["blockers"] == []
+        assert [step["action"] for step in guide["next_steps"]] == ["inspect_release"]
+        release_dry = guide["next_steps"][0]["argv"]
+        assert execute(release_dry)["decision"]["code"] == "RELEASE_PLAN_READY"
+        released = execute([arg for arg in release_dry if arg != "--dry-run"])
+        assert released["decision"]["code"] == "RELEASED"
+        assert not candidate.exists()
+        store = MetadataStore(inventory(repository.repo).common_dir)
+        assert store.load().integration_intents[claimed["intent_id"]].state == "RELEASED"

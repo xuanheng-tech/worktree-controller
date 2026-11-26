@@ -899,6 +899,22 @@ def run_main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     path = parsed.path.expanduser().resolve()
     try:
+        if parsed.sandbox is not None:
+            from .policy import load_policy
+
+            sandbox_target = governed_target(path, load_metadata=False)
+            if sandbox_target is not None:
+                sandbox_repo, sandbox_root = sandbox_target
+                if sandbox_repo == sandbox_root:
+                    try:
+                        canonical_protected = load_policy(sandbox_repo).canonical_protected
+                    except ControllerError:
+                        canonical_protected = True
+                    if canonical_protected:
+                        raise ControllerError(
+                            "BLOCK_CANONICAL",
+                            "sandboxed worktree-session cannot bind protected canonical checkout read-write",
+                        )
         launch_command = (command if parsed.sandbox == "scoped-file" else
                           _sandbox_command(command, sandbox=parsed.sandbox, worktree_path=path, common_dir=None))
     except (ControllerError, OSError) as exc:
@@ -1074,13 +1090,27 @@ def run_main(argv: list[str] | None = None) -> int:
                                  *(["--run-id", parsed.run_id] if parsed.run_id is not None else [])])
             except (ControllerError, OSError) as exc:
                 print(f"Session cleanup deferred: {exc}", file=sys.stderr)
+            if own_lease and managed_binding is not None:
+                try:
+                    from .lifecycle import release_own_runtime_binding
+
+                    repo_dir, wt_dir, bind_owner, binding_value = managed_binding
+                    release_own_runtime_binding(
+                        Path(repo_dir),
+                        target=Path(wt_dir),
+                        owner=bind_owner,
+                        binding=binding_value,
+                        holder_pid=os.getpid(),
+                    )
+                except (ControllerError, OSError) as exc:
+                    print(f"Runtime binding cleanup deferred: {exc}", file=sys.stderr)
         elif own_lease:
             if managed_binding is not None:
                 try:
-                    from .lifecycle import release_own_aborted_runtime_binding
+                    from .lifecycle import release_own_runtime_binding
 
                     repo_dir, wt_dir, bind_owner, binding_value = managed_binding
-                    release_own_aborted_runtime_binding(
+                    release_own_runtime_binding(
                         Path(repo_dir),
                         target=Path(wt_dir),
                         owner=bind_owner,

@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
-import gzip
 import hashlib
-import io
 import json
 import os
 import stat
@@ -150,20 +148,6 @@ def decode_cache(*, reuse: bool = True) -> Iterator[None]:
             _DECODE_CACHE = previous
             _HISTORY_CACHE = history_previous
             _BYTE_READS = bytes_previous
-
-
-_EVIDENCE_COMPRESS_THRESHOLD_BYTES = 65536
-_MAX_DECOMPRESSED_JSON_BYTES = 64 * 1024 * 1024
-
-
-def _decode_json_bytes(raw: bytes) -> Any:
-    if raw.startswith(b"\x1f\x8b"):
-        with gzip.GzipFile(fileobj=io.BytesIO(raw), mode="rb") as stream:
-            data = stream.read(_MAX_DECOMPRESSED_JSON_BYTES + 1)
-        if len(data) > _MAX_DECOMPRESSED_JSON_BYTES:
-            raise ValueError("compressed metadata exceeds its bound")
-        return json.loads(data.decode("utf-8"))
-    return json.loads(raw.decode("utf-8"))
 
 
 def _identity(info: os.stat_result) -> tuple[int, int, int, int]:
@@ -644,12 +628,12 @@ class MetadataStore:
         try:
             descriptor = self._open_metadata_file(path)
             try:
-                with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                with os.fdopen(descriptor, "r", encoding="utf-8", closefd=False) as handle:
                     raw = handle.read()
             finally:
                 os.close(descriptor)
-            value = _decode_json_bytes(raw)
-        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+            value = json.loads(raw)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ControllerError("INVALID_METADATA", f"cannot read {os.fspath(path)}: {exc}") from exc
         if not isinstance(value, dict):
             raise ControllerError("INVALID_METADATA", f"metadata must be an object: {os.fspath(path)}")
@@ -709,20 +693,13 @@ class MetadataStore:
         return values
 
     def _atomic_json(
-        self,
-        path: Path,
-        payload: Mapping[str, Any],
-        *,
-        compact: bool = False,
-        compress_above: int | None = None,
+        self, path: Path, payload: Mapping[str, Any], *, compact: bool = False
     ) -> None:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         encoded = (json.dumps(
             payload, ensure_ascii=False, indent=None if compact else 2, sort_keys=True,
             separators=(",", ":") if compact else None,
         ) + "\n").encode("utf-8")
-        if compress_above is not None and len(encoded) > compress_above:
-            encoded = gzip.compress(encoded, compresslevel=6, mtime=0)
         descriptor, temporary_name = tempfile.mkstemp(
             dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
         )
@@ -1459,7 +1436,6 @@ class MetadataStore:
             self.transactions_dir / f"{transaction_id}.json",
             payload,
             compact=True,
-            compress_above=_EVIDENCE_COMPRESS_THRESHOLD_BYTES,
         )
 
     def write_teardown_receipt(self, receipt_id: str, payload: Mapping[str, Any]) -> None:
@@ -1485,7 +1461,6 @@ class MetadataStore:
             self.completion_receipts_dir / f"{receipt_id}.json",
             dict(payload),
             compact=True,
-            compress_above=_EVIDENCE_COMPRESS_THRESHOLD_BYTES,
         )
 
     def load_teardown_receipt(self, receipt_id: str) -> dict[str, Any]:

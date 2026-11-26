@@ -96,7 +96,18 @@ def test_terminal_preserve_cleanup_release_retains_proof_and_branch(terminal):
     assert proof.read_bytes() == original
     assert not (target / "unknown").exists()
     head, branch = git(target, "rev-parse", "HEAD"), git(target, "branch", "--show-current")
-    lifecycle.release(repository.repo, target=target, expected_record_version=record.record_version, owner_release=record.owner)
+    release_kwargs = (
+        {"publication_receipt_id": proof.stem}
+        if record.lifecycle == "PUBLISHED"
+        else {}
+    )
+    lifecycle.release(
+        repository.repo,
+        target=target,
+        expected_record_version=record.record_version,
+        owner_release=record.owner,
+        **release_kwargs,
+    )
     assert not target.exists()
     assert git(repository.repo, "rev-parse", branch) == head
     assert Path(copied["receipt"]).is_file()

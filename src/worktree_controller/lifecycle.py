@@ -3623,7 +3623,7 @@ def update_external_binding(
     return payload
 
 
-def release_own_aborted_runtime_binding(
+def release_own_runtime_binding(
     repository_path: Path,
     *,
     target: Path,
@@ -3631,15 +3631,17 @@ def release_own_aborted_runtime_binding(
     binding: str,
     holder_pid: int,
 ) -> dict[str, Any]:
-    """Clear this process's own aborted runtime binding if no descendants or target users remain."""
+    """Clear this process's own runtime binding if no descendants or target users remain."""
     from .resource_admission import release_execution
     from .writer_lease import (
+        boot_id,
         describe_holder,
         live_descendant_exists,
         own_ancestry,
         paths_in_use,
         runtime_binding,
         same_holder,
+        start_ticks,
     )
 
     binding_value = binding.strip()
@@ -3667,7 +3669,49 @@ def release_own_aborted_runtime_binding(
         if record.owner != owner:
             raise ControllerError("OWNER_MISMATCH", "binding owner does not match")
         ancestry = own_ancestry() | {holder_pid}
-        remaining_users = [(pid, cmd) for pid, cmd in paths_in_use(item.path) if pid not in ancestry]
+        current_boot = boot_id()
+        evidence = runtime_authority_evidence(item.path, holders=(current,))
+        if any(row["pid"] not in ancestry for row in evidence["managed_references"]):
+            raise ControllerError("RUNTIME_OCCUPIED", "child or background runtime process is still alive")
+        if any(
+            row["pid"] not in ancestry
+            for row in (
+                *evidence["managed_visibility_uncertainties"],
+                *evidence["scan_uncertainties"],
+            )
+        ):
+            raise ControllerError("RUNTIME_SCAN_UNCERTAIN", "runtime visibility remains uncertain")
+        observed_users = []
+        for reference in evidence["observed_references"]:
+            ref_pid = int(reference["pid"])
+            if ref_pid in ancestry:
+                continue
+            try:
+                ticks = start_ticks(ref_pid)
+            except ControllerError:
+                ticks = None
+            if (
+                ticks is None
+                or current.boot_id != current_boot
+                or ticks >= current.start_ticks
+            ):
+                observed_users.append(reference)
+        if observed_users:
+            raise ControllerError("RUNTIME_OCCUPIED", "target worktree still has active runtime users")
+        remaining_users = []
+        for pid, cmd in paths_in_use(item.path):
+            if pid in ancestry:
+                continue
+            try:
+                ticks = start_ticks(pid)
+            except ControllerError:
+                ticks = None
+            if (
+                ticks is None
+                or current.boot_id != current_boot
+                or ticks >= current.start_ticks
+            ):
+                remaining_users.append((pid, cmd))
         if remaining_users:
             raise ControllerError("RUNTIME_OCCUPIED", "target worktree still has active runtime users")
         bindings = list(record.external_bindings)
@@ -3700,6 +3744,9 @@ def release_own_aborted_runtime_binding(
         "binding": binding_value,
         "changed": changed,
     }
+
+
+release_own_aborted_runtime_binding = release_own_runtime_binding
 
 
 def record_equivalent_replay(
@@ -4700,23 +4747,33 @@ def register_disposable(
         published_handoff = (
             record.lifecycle == "HANDOFF_READY" and record.role == "hotfix" and not pending_release
         )
+        ready_integration_candidate = (
+            record.role == "integration"
+            and record.lifecycle == "HANDOFF_READY"
+            and snapshot.publication_lease is None
+            and item.clean
+            and item.head == record.handoff_commit
+            and any(
+                intent.allocation_id == record.allocation_id and intent.state == "READY_TO_PUBLISH"
+                for intent in snapshot.integration_intents.values()
+            )
+        )
         if record.lifecycle not in (
             {"ACTIVE", "RETAINED", "HANDOFF_READY", "PUBLISHED"} | EVIDENCE_EXEMPT_RELEASE_STATES
         ) or (
             record.lifecycle not in ({"ACTIVE", "RETAINED"} | EVIDENCE_EXEMPT_RELEASE_STATES)
             and not pending_release
             and not published_handoff
+            and not ready_integration_candidate
         ):
             # Evidence-exempt terminal states may still classify a rebuildable environment
             # that the task created, otherwise an aborted preparation can never converge.
-            # A live release intent is the same situation reached from the other side: the
-            # release already earned its evidence and is waiting on this classification.
-            # A retained checkout has no frozen evidence to disturb, and without this it
-            # could only close by reopening a writer it does not need.
-            # Registration is metadata only; every teardown preflight gate is unchanged.
+            # A live release intent or READY_TO_PUBLISH/PUBLISHED integration candidate is
+            # the same situation: registration is metadata only and every teardown preflight
+            # gate still applies unchanged.
             raise ControllerError(
                 "INVALID_LIFECYCLE",
-                "disposable resources must be registered while ACTIVE or after a terminal abort",
+                "disposable resources must be registered while ACTIVE, RETAINED, READY_TO_PUBLISH/PUBLISHED integration candidate, pending release, or after a terminal abort",
             )
         if tracked_paths(item.path, relative):
             raise ControllerError("TRACKED_RESOURCE", "tracked content cannot be disposable")
@@ -4794,6 +4851,30 @@ def register_disposable(
                     expected_record_version=updated.record_version,
                 )
             )
+        reproducible_check: dict[str, Any] | None = None
+        if reproducible and teardown_policy == "on-release":
+            try:
+                project_rel, lock_rel = discover_python_project(
+                    item.path, venv_relative_path=relative
+                )
+                for project_path in (lock_rel, project_rel):
+                    if tracked_paths(item.path, project_path) != (project_path,):
+                        raise ControllerError(
+                            "PROJECT_IDENTITY_MISMATCH",
+                            f"reproducible teardown requires tracked {project_path}",
+                        )
+            except ControllerError as preflight_error:
+                reproducible_check = {
+                    "verified": False,
+                    "blocker": preflight_error.code,
+                    "message": str(preflight_error),
+                }
+            else:
+                reproducible_check = {
+                    "verified": True,
+                    "project_file": project_rel,
+                    "lock_file": lock_rel,
+                }
         store.replace_record(updated)
     payload = compact_status(repository_path, command="resource-register", target=target)
     payload["command"] = "resource-register"
@@ -4807,6 +4888,11 @@ def register_disposable(
         "reproducible": reproducible,
         "creator": creator.strip(),
         "teardown_policy": teardown_policy,
+        **(
+            {"reproducible_check": reproducible_check}
+            if reproducible_check is not None
+            else {}
+        ),
     }
     return payload
 
@@ -5266,6 +5352,7 @@ def _typed_cleanup_plan_locked(
             allow_retained_cleanup=retained_cleanup,
             cleanup_transaction_id=cleanup_transaction_id,
             allow_pending_typed_no_action=not check_transaction and cleanup_transaction_id is None and recovery is None,
+            require_publication_receipt=False,
         )
         if record.allocation_id in snapshot.writer_leases:
             raise ControllerError(
@@ -5663,6 +5750,7 @@ def cleanup_typed_disposable(
                             publication_receipt=None,
                             release_intent=None,
                             cleanup_transaction_id=transaction_id,
+                            require_publication_receipt=False,
                         )
                     receipt_id = transaction_id
                     store.write_completion_receipt(
@@ -6409,7 +6497,14 @@ def complete_publication_lease(
             # The remote publication already happened and is already recorded. Cleanup
             # is a separate outcome: report it, keep the receipt, and still run the
             # source trigger so its answer says what the sources are waiting on.
-            cleanup = {"result": "CLEANUP_PENDING", "blocker": blocked.code}
+            from .recovery_guidance import guide_argv
+
+            cleanup = {
+                "result": "CLEANUP_PENDING",
+                "blocker": blocked.code,
+                "message": str(blocked),
+                "recovery_argv": guide_argv(str(repository_path), str(item.path)),
+            }
             source_release_trigger = _trigger_source_release_intents(
                 repository_path,
                 publication_receipt_id=receipt.receipt_id,
@@ -7876,6 +7971,25 @@ def _validate_multiple_preservation_cleanup(
         ) from exc
 
 
+def _matching_publication_receipts(
+    snapshot: MetadataSnapshot,
+    item: WorktreeGitState,
+    record: MetadataRecord,
+) -> list[PublicationReceipt]:
+    return sorted(
+        (
+            receipt
+            for receipt in snapshot.publication_receipts.values()
+            if receipt.allocation_id == record.allocation_id
+            and receipt.status == "REMOTE_VERIFIED"
+            and _publication_receipt_lease_released(snapshot, receipt)
+            and receipt.candidate_oid == item.head
+            and receipt.finalizer_record_id == record.finalizer_record_id
+        ),
+        key=lambda receipt: (receipt.remote_verified_at, receipt.receipt_id),
+    )
+
+
 def _validate_release_core(
     repository: RepositoryInventory,
     snapshot: MetadataSnapshot,
@@ -7892,6 +8006,7 @@ def _validate_release_core(
     allow_retained_cleanup: bool = False,
     cleanup_transaction_id: str | None = None,
     allow_pending_typed_no_action: bool = False,
+    require_publication_receipt: bool = True,
 ) -> None:
     if item.canonical:
         raise ControllerError("BLOCK_CANONICAL", "canonical can never be released")
@@ -7915,6 +8030,11 @@ def _validate_release_core(
         and publication_receipt.candidate_oid == item.head
         and publication_receipt.finalizer_record_id == record.finalizer_record_id
     )
+    if publication_receipt is not None and not publication_auto_release:
+        raise ControllerError(
+            "PUBLICATION_RECEIPT_DRIFT",
+            "publication receipt does not match this PUBLISHED checkout and released lease",
+        )
     intent_auto_release = release_intent is not None
     if release_intent is not None:
         _validate_release_intent(repository, snapshot, item, record, release_intent)
@@ -7925,6 +8045,17 @@ def _validate_release_core(
     ):
         raise ControllerError(
             "ACTIVE_OWNER", "release requires an explicit decision from the recorded owner"
+        )
+    if record.lifecycle == "PUBLISHED" and publication_receipt is None and require_publication_receipt:
+        matches = _matching_publication_receipts(snapshot, item, record)
+        hint = (
+            f"pass --publication-receipt-id {matches[0].receipt_id}"
+            if len(matches) == 1
+            else "inspect recovery-guide and pass the exact --publication-receipt-id"
+        )
+        raise ControllerError(
+            "PUBLICATION_RECEIPT_REQUIRED",
+            f"releasing a PUBLISHED checkout requires exact publication receipt binding; {hint}",
         )
     if not record.authority_key.strip():
         raise ControllerError("AUTHORITY_MISMATCH", "release authority is missing")
@@ -8199,6 +8330,7 @@ def _build_release_plan_locked(
     publication_receipt: PublicationReceipt | None,
     release_intent: ReleaseIntent | None,
     cleanup_transaction_id: str | None = None,
+    require_publication_receipt: bool = True,
 ) -> ReleasePlan:
     _cas(record, expected_record_version)
     _validate_release_core(
@@ -8214,6 +8346,7 @@ def _build_release_plan_locked(
         publication_receipt=publication_receipt,
         release_intent=release_intent,
         cleanup_transaction_id=cleanup_transaction_id,
+        require_publication_receipt=require_publication_receipt,
     )
     resource_actions = _release_resource_actions(repository, item, record)
     if snapshot.repository_id is None:

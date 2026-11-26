@@ -73,9 +73,39 @@ def _owner_released_candidate(repository: GitRepository) -> tuple[str, str]:
         target=candidate,
         expected_record_version=record.record_version,
         owner_release=record.owner,
+        publication_receipt_id=publication.receipt_id,
     )
     assert released["decision"]["code"] == "RELEASED"
     assert not candidate.exists()
+    # Synthesize historical pre-1.36.6 owner-released candidate state where
+    # ReleasePlan lacked publication_receipt_id and IntegrationIntent stayed REMOTE_VERIFIED.
+    snapshot = store.load()
+    release_receipt = next(
+        r for r in snapshot.release_receipts.values() if r.allocation_id == publication.allocation_id
+    )
+    release_plan = snapshot.release_plans[release_receipt.plan_id]
+    old_plan_path = store.release_plans_dir / f"{release_plan.plan_id}.json"
+    identity = asdict(
+        replace(release_plan, trigger="owner-release", publication_receipt_id=None)
+    )
+    identity.pop("plan_id")
+    legacy_plan = replace(
+        release_plan,
+        trigger="owner-release",
+        publication_receipt_id=None,
+        plan_id=_release_plan_id(identity),
+    )
+    store.write_release_plan(legacy_plan)
+    old_plan_path.unlink()
+    store._atomic_json(
+        store.release_receipts_dir / f"{release_receipt.receipt_id}.json",
+        asdict(replace(release_receipt, plan_id=legacy_plan.plan_id, trigger="owner-release")),
+    )
+    if publication.intent_id is not None:
+        intent = snapshot.integration_intents[publication.intent_id]
+        store.replace_integration_intent(
+            replace(intent, state="REMOTE_VERIFIED", released_at=None)
+        )
     return publication.allocation_id, publication.receipt_id
 
 

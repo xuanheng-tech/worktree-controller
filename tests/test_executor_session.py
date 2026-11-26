@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import select
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -85,9 +87,8 @@ def invoke(
 
 
 @pytest.mark.parametrize("client", ["terminal", "executor-a", "any.executor:17"])
-@pytest.mark.parametrize("uncertain", [False, True], ids=["clear", "uncertain"])
 def test_same_contract_checks_host_identity_and_preserves_exit_status(
-    task, tmp_path, client, procfs, uncertain, capsys,
+    task, tmp_path, client,
 ):
     repo, path, allocation = task
     home = tmp_path / "empty-home"
@@ -105,8 +106,102 @@ def test_same_contract_checks_host_identity_and_preserves_exit_status(
     assert json.loads(result.stdout)["client_id"] == client
     assert (path / "mine.txt").read_bytes() == b"owned change"
     assert allocation not in _store(repo).load().writer_leases
+    # Clean normal exit with no surviving descendants auto-cleans own runtime binding
+    # and settles its execution resource row without parking the active worktree.
+    assert _record(repo, allocation).external_bindings == ()
+    assert _record(repo, allocation).lifecycle == "ACTIVE"
+    rows = [row for row in resource_admission.AdmissionLedger().read()["requests"].values()
+            if row["request"].get("kind") == "execution"]
+    assert len(rows) == 1 and rows[0]["state"] == "RELEASED"
+    assert list(home.iterdir()) == []
+
+
+def test_live_background_descendant_keeps_runtime_binding_and_blocks_removal(
+    task, tmp_path, capsys,
+):
+    repo, path, allocation = task
+    home = tmp_path / "bg-home"
+    home.mkdir()
+    pid_file = tmp_path / "bg.pid"
+    # Spawn a detached background process whose cwd stays inside the worktree, then exit 0.
+    spawner = (
+        "import subprocess, sys; from pathlib import Path; "
+        "Path('mine.txt').write_text('owned change'); "
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+        "start_new_session=True); "
+        f"Path({str(pid_file)!r}).write_text(str(p.pid))"
+    )
+    result = invoke(path, home, "terminal", [sys.executable, "-B", "-c", spawner], run_id="bg-run")
+    assert result.returncode == 0, result.stderr
+    bg_pid = int(pid_file.read_text().strip())
+    try:
+        assert allocation not in _store(repo).load().writer_leases
+        bindings = _record(repo, allocation).external_bindings
+        assert len(bindings) == 1 and bindings[0].startswith(writer_lease.RUNTIME_BINDING_PREFIX)
+        assert "bg-run" in bindings[0]
+        request_id = next(
+            key for key, row in resource_admission.AdmissionLedger().read()["requests"].items()
+            if row["request"].get("kind") == "execution"
+        )
+        assert resource_admission.AdmissionLedger().read()["requests"][request_id]["state"] == "ALLOCATED"
+        # While the real background descendant is alive in the worktree, binding-remove must refuse.
+        record = _record(repo, allocation)
+        assert controller_main([
+            "binding-remove", "--repo", str(repo.repo), "--path", str(path),
+            "--owner", record.owner, "--expected-record-version", str(record.record_version),
+            "--binding", bindings[0], "--json",
+        ]) == 2
+        assert json.loads(capsys.readouterr().out)["errors"][0]["code"] == "RUNTIME_OCCUPIED"
+        assert _record(repo, allocation).external_bindings == bindings
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(bg_pid, signal.SIGKILL)
+    deadline = time.monotonic() + 5.0
+    while Path(f"/proc/{bg_pid}").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    assert controller_main([
+        "admission-queue", "--repo", str(repo.repo), "--apply", "--json",
+    ]) == 0
+    reconciled = json.loads(capsys.readouterr().out)
+    outcome = next(row for row in reconciled["decision"]["outcomes"]
+                   if row["request_id"] == request_id)
+    assert outcome["result"]["code"] == "EXECUTION_RESOURCES_RELEASED", reconciled
+    assert not _record(repo, allocation).external_bindings, reconciled
+    assert _record(repo, allocation).lifecycle != "RELEASED"
+    rows = [row for row in resource_admission.AdmissionLedger().read()["requests"].values()
+            if row["request"].get("kind") == "execution"]
+    assert len(rows) == 1 and rows[0]["state"] == "RELEASED"
+    assert list(home.iterdir()) == []
+
+
+def test_uncertain_procfs_blocks_runtime_binding_removal_and_admission_reconcile(
+    task, tmp_path, procfs, capsys,
+):
+    repo, path, allocation = task
+    home = tmp_path / "uncertain-home"
+    home.mkdir()
+    pid_file = tmp_path / "uncertain-bg.pid"
+    spawner = (
+        "import subprocess, sys; from pathlib import Path; "
+        "Path('mine.txt').write_text('owned change'); "
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+        "start_new_session=True); "
+        f"Path({str(pid_file)!r}).write_text(str(p.pid))"
+    )
+    result = invoke(path, home, "terminal", [sys.executable, "-B", "-c", spawner], run_id="unc-run")
+    assert result.returncode == 0, result.stderr
+    bg_pid = int(pid_file.read_text().strip())
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(bg_pid, signal.SIGKILL)
+    deadline = time.monotonic() + 5.0
+    while Path(f"/proc/{bg_pid}").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+
     bindings = _record(repo, allocation).external_bindings
-    assert bindings
+    assert len(bindings) == 1
     request_id = next(
         key for key, row in resource_admission.AdmissionLedger().read()["requests"].items()
         if row["request"].get("kind") == "execution"
@@ -118,35 +213,34 @@ def test_same_contract_checks_host_identity_and_preserves_exit_status(
         destination.parent.mkdir(exist_ok=True)
         destination.write_bytes(kept[name])
     head = git(path, "rev-parse", "HEAD")
-    # The command/lease use real processes. Only the parent-side visibility scan
-    # uses controlled procfs: host churn cannot promise clearance within a deadline.
-    if uncertain:
-        _, _, create = procfs
-        process = create()
-        (process / "maps").write_text("malformed\n")
-        record = _record(repo, allocation)
-        assert controller_main([
-            "binding-remove", "--repo", str(repo.repo), "--path", str(path),
-            "--owner", record.owner, "--expected-record-version", str(record.record_version),
-            "--binding", bindings[0], "--json",
-        ]) == 2
-        assert json.loads(capsys.readouterr().out)["errors"][0]["code"] == "RUNTIME_SCAN_UNCERTAIN"
-        for public_cli in (False, True):
-            if public_cli:
-                assert controller_main([
-                    "admission-queue", "--repo", str(repo.repo), "--apply", "--json",
-                ]) == 0
-                refused = json.loads(capsys.readouterr().out)
-            else:
-                refused = resource_admission.reconcile(apply=True)
-            outcome = next(row for row in refused["decision"]["outcomes"]
-                           if row["request_id"] == request_id)
-            assert outcome.get("blocker") == "RUNTIME_SCAN_UNCERTAIN", refused
-            assert _record(repo, allocation).external_bindings == bindings
-            assert resource_admission.AdmissionLedger().read()["requests"][request_id]["state"] == "ALLOCATED"
-            assert git(path, "rev-parse", "HEAD") == head
-            assert {name: (path / name).read_bytes() for name in kept} == kept
-        (process / "maps").write_bytes(b"00001000-00002000 r--p 00000000 00:00 0\n")
+
+    _, _, create = procfs
+    process = create()
+    (process / "maps").write_text("malformed\n")
+    record = _record(repo, allocation)
+    assert controller_main([
+        "binding-remove", "--repo", str(repo.repo), "--path", str(path),
+        "--owner", record.owner, "--expected-record-version", str(record.record_version),
+        "--binding", bindings[0], "--json",
+    ]) == 2
+    assert json.loads(capsys.readouterr().out)["errors"][0]["code"] == "RUNTIME_SCAN_UNCERTAIN"
+    for public_cli in (False, True):
+        if public_cli:
+            assert controller_main([
+                "admission-queue", "--repo", str(repo.repo), "--apply", "--json",
+            ]) == 0
+            refused = json.loads(capsys.readouterr().out)
+        else:
+            refused = resource_admission.reconcile(apply=True)
+        outcome = next(row for row in refused["decision"]["outcomes"]
+                       if row["request_id"] == request_id)
+        assert outcome.get("blocker") == "RUNTIME_SCAN_UNCERTAIN", refused
+        assert _record(repo, allocation).external_bindings == bindings
+        assert resource_admission.AdmissionLedger().read()["requests"][request_id]["state"] == "ALLOCATED"
+        assert git(path, "rev-parse", "HEAD") == head
+        assert {name: (path / name).read_bytes() for name in kept} == kept
+    (process / "maps").write_bytes(b"00001000-00002000 r--p 00000000 00:00 0\n")
+
     assert controller_main([
         "admission-queue", "--repo", str(repo.repo), "--apply", "--json",
     ]) == 0
@@ -317,14 +411,34 @@ def test_next_admission_recovers_only_the_previous_managed_binding(task, tmp_pat
         "-c",
         "from pathlib import Path;Path('mine.txt').write_text('change')",
     ]
-    assert invoke(path, home, "terminal", command, run_id="next-run").returncode == 0
+    # Normal clean exit auto-cleans its own binding; simulate a killed session that left a
+    # dead managed runtime binding behind so next admission recovery is exercised directly.
+    pid_file = tmp_path / "stale-bg.pid"
+    spawner = [
+        sys.executable,
+        "-c",
+        (
+            "import subprocess, sys; from pathlib import Path; "
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+            "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+            "start_new_session=True); "
+            f"Path({str(pid_file)!r}).write_text(str(p.pid))"
+        ),
+    ]
+    assert invoke(path, home, "terminal", spawner, run_id="stale-managed-run").returncode == 0
+    bg_pid = int(pid_file.read_text().strip())
+    assert len(_record(repo, allocation).external_bindings) == 1
     first = next(
         key
         for key, row in resource_admission.AdmissionLedger().read()["requests"].items()
         if row["request"].get("kind") == "execution"
     )
-    assert invoke(path, home, "terminal", command).returncode == 0
+    os.kill(bg_pid, signal.SIGKILL)
+    deadline = time.monotonic() + 5.0
+    while Path(f"/proc/{bg_pid}").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert invoke(path, home, "terminal", command, run_id="clean-next-run").returncode == 0
     rows = resource_admission.AdmissionLedger().read()["requests"]
     assert rows[first]["state"] == "RELEASED"
-    assert len(_record(repo, allocation).external_bindings) == 1
+    assert len(_record(repo, allocation).external_bindings) == 0
     assert _record(repo, allocation).lifecycle == "ACTIVE"
