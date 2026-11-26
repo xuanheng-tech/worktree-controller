@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import gzip
 import hashlib
+import io
 import json
 import os
 import stat
@@ -148,6 +150,20 @@ def decode_cache(*, reuse: bool = True) -> Iterator[None]:
             _DECODE_CACHE = previous
             _HISTORY_CACHE = history_previous
             _BYTE_READS = bytes_previous
+
+
+_EVIDENCE_COMPRESS_THRESHOLD_BYTES = 65536
+_MAX_DECOMPRESSED_JSON_BYTES = 64 * 1024 * 1024
+
+
+def _decode_json_bytes(raw: bytes) -> Any:
+    if raw.startswith(b"\x1f\x8b"):
+        with gzip.GzipFile(fileobj=io.BytesIO(raw), mode="rb") as stream:
+            data = stream.read(_MAX_DECOMPRESSED_JSON_BYTES + 1)
+        if len(data) > _MAX_DECOMPRESSED_JSON_BYTES:
+            raise ValueError("compressed metadata exceeds its bound")
+        return json.loads(data.decode("utf-8"))
+    return json.loads(raw.decode("utf-8"))
 
 
 def _identity(info: os.stat_result) -> tuple[int, int, int, int]:
@@ -628,12 +644,12 @@ class MetadataStore:
         try:
             descriptor = self._open_metadata_file(path)
             try:
-                with os.fdopen(descriptor, "r", encoding="utf-8", closefd=False) as handle:
+                with os.fdopen(descriptor, "rb", closefd=False) as handle:
                     raw = handle.read()
             finally:
                 os.close(descriptor)
-            value = json.loads(raw)
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            value = _decode_json_bytes(raw)
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
             raise ControllerError("INVALID_METADATA", f"cannot read {os.fspath(path)}: {exc}") from exc
         if not isinstance(value, dict):
             raise ControllerError("INVALID_METADATA", f"metadata must be an object: {os.fspath(path)}")
@@ -693,13 +709,20 @@ class MetadataStore:
         return values
 
     def _atomic_json(
-        self, path: Path, payload: Mapping[str, Any], *, compact: bool = False
+        self,
+        path: Path,
+        payload: Mapping[str, Any],
+        *,
+        compact: bool = False,
+        compress_above: int | None = None,
     ) -> None:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         encoded = (json.dumps(
             payload, ensure_ascii=False, indent=None if compact else 2, sort_keys=True,
             separators=(",", ":") if compact else None,
         ) + "\n").encode("utf-8")
+        if compress_above is not None and len(encoded) > compress_above:
+            encoded = gzip.compress(encoded, compresslevel=6, mtime=0)
         descriptor, temporary_name = tempfile.mkstemp(
             dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
         )
@@ -722,7 +745,12 @@ class MetadataStore:
             raise
 
     def _load_unlocked(
-        self, *, include_history: bool = True, include_intents: bool = True
+        self,
+        *,
+        include_history: bool = True,
+        include_intents: bool = True,
+        include_receipts: bool = True,
+        include_release_intents: bool = True,
     ) -> MetadataSnapshot:
         warnings: list[dict[str, str]] = []
         repository_id: str | None = None
@@ -810,12 +838,6 @@ class MetadataStore:
                 integration_intents[intent.intent_id] = intent
 
         if include_history:
-            if self.prepared_candidate_receipts_dir.exists():
-                prepared_candidate_receipts = self._history(
-                    self.prepared_candidate_receipts_dir, prepared_candidate_receipt_from_dict,
-                    lambda receipt: receipt.receipt_id, "prepared candidate receipt"
-                )
-
             if self.integration_reconciliation_receipts_dir.exists():
                 for path in _glob_json(self.integration_reconciliation_receipts_dir):
                     receipt = self._decoded(path, integration_reconciliation_receipt_from_dict)
@@ -829,84 +851,91 @@ class MetadataStore:
                         )
                     integration_reconciliation_receipts[receipt.receipt_id] = receipt
 
-            if self.lifecycle_events_dir.exists():
-                event_ids: set[str] = set()
-                event_sequences: set[int] = set()
-                for path in _glob_json(self.lifecycle_events_dir):
-                    event = self._decoded(path, lifecycle_event_from_dict)
-                    if (
-                        path.stem != event.event_id
-                        or event.event_id in event_ids
-                        or event.sequence < 1
-                        or event.sequence in event_sequences
-                    ):
-                        raise ControllerError(
-                            "INVALID_METADATA", "lifecycle event identity or sequence is invalid"
-                        )
-                    event_ids.add(event.event_id)
-                    event_sequences.add(event.sequence)
-            if self.lifecycle_event_acks_dir.exists():
-                for path in _glob_nested_json(self.lifecycle_event_acks_dir):
-                    ack = self._read_json(path)
-                    if set(ack) != {"schema_version", "event_id", "consumer", "acked_at"}:
-                        raise ControllerError("INVALID_METADATA", "lifecycle event ack is invalid")
-                    if ack.get("schema_version") != LIFECYCLE_EVENT_SCHEMA_VERSION:
-                        raise ControllerError(
-                            "INVALID_METADATA", "lifecycle event ack version is invalid"
-                        )
-                    event_id = _optional_uuid(ack.get("event_id"), "event_id")
-                    consumer = _nonempty_string(ack.get("consumer"), "consumer")
-                    if event_id is None or path.stem != event_id:
-                        raise ControllerError(
-                            "INVALID_METADATA", "lifecycle event ack identity is invalid"
-                        )
-                    if path.parent.name != hashlib.sha256(consumer.encode("utf-8")).hexdigest():
-                        raise ControllerError(
-                            "INVALID_METADATA", "lifecycle event ack consumer differs"
-                        )
-                    _validate_timestamp(ack.get("acked_at"), "acked_at")
-
-            if self.publication_receipts_dir.exists():
-                publication_receipts = self._history(
-                    self.publication_receipts_dir, publication_receipt_from_dict,
-                    lambda receipt: receipt.receipt_id, "publication receipt"
-                )
-
-            if self.release_intents_dir.exists():
+            if include_release_intents and self.release_intents_dir.exists():
                 for path in _glob_json(self.release_intents_dir):
                     intent = self._decoded(path, release_intent_from_dict)
                     if path.stem != intent.intent_id or intent.intent_id in release_intents:
                         raise ControllerError("INVALID_METADATA", "release intent filename is invalid")
                     release_intents[intent.intent_id] = intent
 
-            if self.release_plans_dir.exists():
-                release_plans = self._history(
-                    self.release_plans_dir, release_plan_from_dict, lambda plan: plan.plan_id,
-                    "release plan"
-                )
+            if include_receipts:
+                if self.prepared_candidate_receipts_dir.exists():
+                    prepared_candidate_receipts = self._history(
+                        self.prepared_candidate_receipts_dir, prepared_candidate_receipt_from_dict,
+                        lambda receipt: receipt.receipt_id, "prepared candidate receipt"
+                    )
 
-            if self.release_receipts_dir.exists():
-                release_receipts = self._history(
-                    self.release_receipts_dir, release_receipt_from_dict,
-                    lambda receipt: receipt.receipt_id, "release receipt"
-                )
+                if self.lifecycle_events_dir.exists():
+                    event_ids: set[str] = set()
+                    event_sequences: set[int] = set()
+                    for path in _glob_json(self.lifecycle_events_dir):
+                        event = self._decoded(path, lifecycle_event_from_dict)
+                        if (
+                            path.stem != event.event_id
+                            or event.event_id in event_ids
+                            or event.sequence < 1
+                            or event.sequence in event_sequences
+                        ):
+                            raise ControllerError(
+                                "INVALID_METADATA", "lifecycle event identity or sequence is invalid"
+                            )
+                        event_ids.add(event.event_id)
+                        event_sequences.add(event.sequence)
+                if self.lifecycle_event_acks_dir.exists():
+                    for path in _glob_nested_json(self.lifecycle_event_acks_dir):
+                        ack = self._read_json(path)
+                        if set(ack) != {"schema_version", "event_id", "consumer", "acked_at"}:
+                            raise ControllerError("INVALID_METADATA", "lifecycle event ack is invalid")
+                        if ack.get("schema_version") != LIFECYCLE_EVENT_SCHEMA_VERSION:
+                            raise ControllerError(
+                                "INVALID_METADATA", "lifecycle event ack version is invalid"
+                            )
+                        event_id = _optional_uuid(ack.get("event_id"), "event_id")
+                        consumer = _nonempty_string(ack.get("consumer"), "consumer")
+                        if event_id is None or path.stem != event_id:
+                            raise ControllerError(
+                                "INVALID_METADATA", "lifecycle event ack identity is invalid"
+                            )
+                        if path.parent.name != hashlib.sha256(consumer.encode("utf-8")).hexdigest():
+                            raise ControllerError(
+                                "INVALID_METADATA", "lifecycle event ack consumer differs"
+                            )
+                        _validate_timestamp(ack.get("acked_at"), "acked_at")
 
-            if self.reconciliation_receipts_dir.exists():
-                for path in _glob_json(self.reconciliation_receipts_dir):
-                    receipt = self._decoded(path, reconciliation_receipt_from_dict)
-                    if path.stem != receipt.receipt_id or receipt.receipt_id in reconciliation_receipts:
-                        raise ControllerError(
-                            "INVALID_METADATA", "reconciliation receipt filename is invalid"
-                        )
-                    reconciliation_receipts[receipt.receipt_id] = receipt
+                if self.publication_receipts_dir.exists():
+                    publication_receipts = self._history(
+                        self.publication_receipts_dir, publication_receipt_from_dict,
+                        lambda receipt: receipt.receipt_id, "publication receipt"
+                    )
 
-            if self.teardown_receipts_dir.exists():
-                for path in _glob_json(self.teardown_receipts_dir):
-                    receipt = validate_teardown_receipt(self._read_json(path))
-                    if path.stem != receipt["receipt_id"]:
-                        raise ControllerError(
-                            "INVALID_METADATA", f"teardown receipt filename is invalid: {path}"
-                        )
+                if self.release_plans_dir.exists():
+                    release_plans = self._history(
+                        self.release_plans_dir, release_plan_from_dict, lambda plan: plan.plan_id,
+                        "release plan"
+                    )
+
+                if self.release_receipts_dir.exists():
+                    release_receipts = self._history(
+                        self.release_receipts_dir, release_receipt_from_dict,
+                        lambda receipt: receipt.receipt_id, "release receipt"
+                    )
+
+                if self.reconciliation_receipts_dir.exists():
+                    for path in _glob_json(self.reconciliation_receipts_dir):
+                        receipt = self._decoded(path, reconciliation_receipt_from_dict)
+                        if path.stem != receipt.receipt_id or receipt.receipt_id in reconciliation_receipts:
+                            raise ControllerError(
+                                "INVALID_METADATA", "reconciliation receipt filename is invalid"
+                            )
+                        reconciliation_receipts[receipt.receipt_id] = receipt
+
+                if self.teardown_receipts_dir.exists():
+                    for path in _glob_json(self.teardown_receipts_dir):
+                        receipt = validate_teardown_receipt(self._read_json(path))
+                        if path.stem != receipt["receipt_id"]:
+                            raise ControllerError(
+                                "INVALID_METADATA", f"teardown receipt filename is invalid: {path}"
+                            )
 
         writer_leases: dict[str, WriterLease] = {}
         if self.writer_leases_dir.exists():
@@ -959,13 +988,22 @@ class MetadataStore:
         )
 
     def load(
-        self, *, include_history: bool = True, include_intents: bool = True
+        self,
+        *,
+        include_history: bool = True,
+        include_intents: bool = True,
+        include_receipts: bool = True,
+        include_release_intents: bool = True,
     ) -> MetadataSnapshot:
         kwargs: dict[str, Any] = {}
         if not include_history:
             kwargs["include_history"] = False
         if not include_intents:
             kwargs["include_intents"] = False
+        if not include_receipts:
+            kwargs["include_receipts"] = False
+        if not include_release_intents:
+            kwargs["include_release_intents"] = False
         with self.lock(exclusive=False):
             return self._load_unlocked(**kwargs)
 
@@ -1417,7 +1455,12 @@ class MetadataStore:
             uuid.UUID(transaction_id)
         except ValueError as exc:
             raise ControllerError("INVALID_TRANSACTION", "transaction id must be a UUID") from exc
-        self._atomic_json(self.transactions_dir / f"{transaction_id}.json", payload)
+        self._atomic_json(
+            self.transactions_dir / f"{transaction_id}.json",
+            payload,
+            compact=True,
+            compress_above=_EVIDENCE_COMPRESS_THRESHOLD_BYTES,
+        )
 
     def write_teardown_receipt(self, receipt_id: str, payload: Mapping[str, Any]) -> None:
         try:
@@ -1439,7 +1482,10 @@ class MetadataStore:
         if payload.get("receipt_id") != receipt_id:
             raise ControllerError("INVALID_METADATA", "completion receipt id does not match")
         self._atomic_json(
-            self.completion_receipts_dir / f"{receipt_id}.json", dict(payload), compact=True
+            self.completion_receipts_dir / f"{receipt_id}.json",
+            dict(payload),
+            compact=True,
+            compress_above=_EVIDENCE_COMPRESS_THRESHOLD_BYTES,
         )
 
     def load_teardown_receipt(self, receipt_id: str) -> dict[str, Any]:

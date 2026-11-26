@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 import subprocess
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -214,8 +215,61 @@ def resolve_gitdir_pointer(admin_dir: Path) -> Path | None:
     return parent / candidate.name
 
 
+def _fast_linked_git_dir(common: Path, path: Path) -> Path | None:
+    """Resolve a linked worktree's admin dir directly from its `.git` pointer file.
+
+    Falls back to ``git rev-parse`` for any non-regular, symlinked, or unusual layout.
+    """
+    git_file = path / ".git"
+    try:
+        fd = os.open(git_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size == 0 or st.st_size > 4096:
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            raw = handle.read(4097)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(raw) > 4096:
+        return None
+    try:
+        line = os.fsdecode(raw).strip()
+    except UnicodeError:
+        return None
+    if not line.startswith("gitdir: "):
+        return None
+    target_text = line.removeprefix("gitdir: ").strip()
+    if not target_text:
+        return None
+    candidate = Path(target_text)
+    if not candidate.is_absolute():
+        candidate = path / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return None
+    if not resolved.is_dir() or resolved.parent != (common / "worktrees"):
+        return None
+    commondir = resolved / "commondir"
+    try:
+        rel = commondir.read_text(encoding="utf-8").strip()
+        if not rel or (resolved / rel).resolve(strict=True) != common:
+            return None
+    except (OSError, UnicodeError):
+        return None
+    return resolved
+
+
 def _linked_git_dir(common: Path, path: Path) -> Path:
     if path.exists():
+        fast = _fast_linked_git_dir(common, path)
+        if fast is not None:
+            return fast
         return Path(_text(path, "rev-parse", "--absolute-git-dir")).resolve(strict=True)
     admin_root = common / "worktrees"
     if admin_root.is_dir():

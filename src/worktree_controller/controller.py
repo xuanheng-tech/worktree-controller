@@ -903,7 +903,7 @@ def status_observation(
     policy = load_policy(repository.canonical_path)
     store = MetadataStore(repository.common_dir)
     try:
-        snapshot = store.load()
+        snapshot = store.load(include_receipts=False)
     except ControllerError as exc:
         raise _environment_first(exc, diagnosis) from exc
     result["repository"] = _repository_payload(repository, policy, snapshot)
@@ -942,6 +942,51 @@ def status_observation(
     return result, snapshot
 
 
+def _compact_status_from_snapshot(
+    repository: RepositoryInventory,
+    policy: WorktreePolicy,
+    snapshot: MetadataSnapshot,
+    *,
+    command: str,
+    target: Path | None = None,
+    allocation_id: str | None = None,
+) -> dict[str, Any]:
+    matched_item: WorktreeGitState | None = None
+    matched_record: MetadataRecord | None = None
+    if target is not None:
+        resolved_target = target.expanduser().resolve(strict=False)
+        for item in repository.worktrees:
+            if item.path.resolve(strict=False) == resolved_target:
+                matched_item = item
+                matched_record = _record_for(item, snapshot)
+                break
+    elif allocation_id is not None:
+        for item in repository.worktrees:
+            rec = _record_for(item, snapshot)
+            if rec is not None and rec.allocation_id == allocation_id:
+                matched_item = item
+                matched_record = rec
+                break
+        if matched_item is not None and matched_item.path.exists():
+            repository = inventory(repository.canonical_path, observe_paths=frozenset({matched_item.path}))
+            for item in repository.worktrees:
+                if item.path.resolve(strict=False) == matched_item.path.resolve(strict=False):
+                    matched_item = item
+                    break
+    payload = envelope(command)
+    payload["repository"] = _compact_repository_payload(repository, policy, snapshot)
+    if matched_item is not None:
+        row = _worktree_payload(matched_item, matched_record, snapshot)
+        row["lifecycle_observation"] = observe_worktree(
+            matched_item, matched_record, snapshot, policy, namespace_healthy=True
+        )
+        payload["worktrees"] = [_compact_worktree_row(row)]
+    else:
+        payload["worktrees"] = []
+    payload["warnings"] = [dict(item) for item in snapshot.warnings]
+    return payload
+
+
 def compact_status(
     repository_path: Path,
     *,
@@ -964,41 +1009,18 @@ def compact_status(
     repository = inventory(repository_path, observe_paths=observe_paths)
     policy = load_policy(repository.canonical_path)
     store = MetadataStore(repository.common_dir)
-    snapshot = store.load()
-    matched_item: WorktreeGitState | None = None
-    matched_record: MetadataRecord | None = None
-    if target is not None:
-        resolved_target = target.expanduser().resolve(strict=False)
-        for item in repository.worktrees:
-            if item.path.resolve(strict=False) == resolved_target:
-                matched_item = item
-                matched_record = _record_for(item, snapshot)
-                break
-    elif allocation_id is not None:
-        for item in repository.worktrees:
-            rec = _record_for(item, snapshot)
-            if rec is not None and rec.allocation_id == allocation_id:
-                matched_item = item
-                matched_record = rec
-                break
-        if matched_item is not None and matched_item.path.exists():
-            repository = inventory(repository_path, observe_paths=frozenset({matched_item.path}))
-            for item in repository.worktrees:
-                if item.path.resolve(strict=False) == matched_item.path.resolve(strict=False):
-                    matched_item = item
-                    break
-    payload = envelope(command)
-    payload["repository"] = _compact_repository_payload(repository, policy, snapshot)
-    if matched_item is not None:
-        row = _worktree_payload(matched_item, matched_record, snapshot)
-        row["lifecycle_observation"] = observe_worktree(
-            matched_item, matched_record, snapshot, policy, namespace_healthy=True
-        )
-        payload["worktrees"] = [_compact_worktree_row(row)]
-    else:
-        payload["worktrees"] = []
-    payload["warnings"] = [dict(item) for item in snapshot.warnings]
-    return payload
+    snapshot = store.load(
+        include_receipts=False,
+        include_release_intents=(target is not None or allocation_id is not None),
+    )
+    return _compact_status_from_snapshot(
+        repository,
+        policy,
+        snapshot,
+        command=command,
+        target=target,
+        allocation_id=allocation_id,
+    )
 
 
 def compact_observation(
@@ -1016,7 +1038,7 @@ def compact_observation(
     repository = inventory(repository_path, observe_paths=frozenset())
     policy = load_policy(repository.canonical_path)
     store = MetadataStore(repository.common_dir)
-    snapshot = store.load()
+    snapshot = store.load(include_receipts=False, include_release_intents=False)
     payload = envelope(command)
     payload["repository"] = _compact_repository_payload(repository, policy, snapshot)
     payload["worktrees"] = []
@@ -1056,7 +1078,7 @@ def plan(
 ) -> dict[str, Any]:
     repository = inventory(repository_path)
     policy = load_policy(repository.canonical_path)
-    snapshot = MetadataStore(repository.common_dir).load()
+    snapshot = MetadataStore(repository.common_dir).load(include_receipts=False)
     return _plan_from_snapshot(repository, policy, snapshot, task_key=task_key,
         authority_key=authority_key, module=module, role=role, target=target)
 
@@ -1217,16 +1239,31 @@ def guard_write(
     its repository lock) passes them, so the decision uses that same snapshot.
     """
 
-    result = (
-        compact_status(repository_path, command="write-guard", target=target)
-        if observe
-        else envelope("write-guard")
-    )
+    if observe and not _full_status_requested() and state is None and snapshot is None:
+        repository = inventory(repository_path, observe_paths=frozenset({target}))
+        policy = load_policy(repository.canonical_path)
+        store = MetadataStore(repository.common_dir)
+        snapshot = store.load(include_receipts=False)
+        result = _compact_status_from_snapshot(
+            repository, policy, snapshot, command="write-guard", target=target
+        )
+    else:
+        result = (
+            compact_status(repository_path, command="write-guard", target=target)
+            if observe
+            else envelope("write-guard")
+        )
+        repository = (
+            state
+            if state is not None
+            else inventory(repository_path, observe_paths=frozenset({target}))
+        )
+        store = MetadataStore(repository.common_dir)
+        if snapshot is None:
+            snapshot = store.load(
+                include_history=False, include_intents=(operation == "integration-write")
+            )
     result["command"] = "write-guard"
-    repository = state if state is not None else inventory(repository_path)
-    store = MetadataStore(repository.common_dir)
-    if snapshot is None:
-        snapshot = store.load(include_history=False, include_intents=(operation == "integration-write"))
     item = _resolve_target(repository, target)
     requested = {
         "path": str(target.expanduser()),

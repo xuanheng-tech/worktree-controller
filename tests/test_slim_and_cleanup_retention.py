@@ -425,3 +425,106 @@ def test_release_auto_bounds_historical_terminal_cleanup_evidence(monkeypatch) -
         _close_and_release(repository, wt2)
         assert not cr1.exists() and not ca1.exists()
         assert integration_queue(repository.repo)["worktrees"] == []
+
+
+def test_large_topology_evidence_compresses_losslessly_and_remains_prunable(capsys) -> None:
+    from worktree_controller import cleanup_evidence
+
+    with GitRepository(linked=0, policy_text=POLICY_V8) as repository:
+        adopt_canonical(repository)
+        wt, acq = acquire_one(repository, task="gzip-task", authority="gzip-auth")
+        alloc = acq["decision"]["allocation_id"]
+        _close_and_release(repository, wt)
+        store = MetadataStore(inventory(repository.repo).common_dir)
+
+        # Build a synthetic ~250 KiB hardlink_topology payload resembling node_modules cleanup.
+        groups = {
+            f"66306:{idx}": {
+                "classification": "single-link",
+                "content": {"content_sha256": f"{idx:064x}"},
+                "expected_steps": [
+                    {
+                        "deleted_links": [["apps/docs/node_modules", f"pkg-{idx}/index.js"]],
+                        "expected_nlink": 0,
+                        "resource": "apps/docs/node_modules",
+                        "surviving_paths": [],
+                    }
+                ],
+                "identity": [66306, idx, 33204, 128, 1, 1, 1000, 1000, 1],
+                "members": [["apps/docs/node_modules", f"pkg-{idx}/index.js"]],
+            }
+            for idx in range(700)
+        }
+        topology = {"contract": "cleanup-hardlink-topology/v1", "resources": ["apps/docs/node_modules"], "anchors": {}, "groups": groups}
+        raw_json_len = len(json.dumps(topology, separators=(",", ":")).encode("utf-8"))
+        assert raw_json_len > 200_000
+
+        rid = str(uuid.uuid4())
+        action_dir = store.cleanup_actions_dir / rid
+        before_ref = cleanup_evidence.write(
+            action_dir,
+            "0000-before.json",
+            {"phase": "BEFORE", "topology": topology},
+        )
+        before_path = Path(before_ref["path"])
+        before_raw = before_path.read_bytes()
+        assert before_raw.startswith(b"\x1f\x8b")
+        assert len(before_raw) < raw_json_len // 4
+
+        # Lossless roundtrip + exact SHA-256 verification.
+        decoded, actual_sha = cleanup_evidence.read(before_path, before_ref["sha256"])
+        assert actual_sha == before_ref["sha256"]
+        assert decoded["topology"] == topology
+
+        # Large transaction journal and completion receipt compress transparently and roundtrip.
+        tx_id = str(uuid.uuid4())
+        tx_payload = {"transaction_id": tx_id, "allocation_id": alloc, "cleanup_plan": {"hardlink_topology": topology}}
+        store.write_transaction(tx_id, tx_payload)
+        tx_path = store.transactions_dir / f"{tx_id}.json"
+        assert tx_path.read_bytes().startswith(b"\x1f\x8b")
+        assert store._read_json(tx_path) == tx_payload
+        store.remove_transaction(tx_id)
+
+        store.write_completion_receipt(
+            rid,
+            {
+                "schema_version": 1,
+                "receipt_id": rid,
+                "contract": "typed-disposable-resource/v1",
+                "result": "CLEANED",
+                "plan": {
+                    "allocation_id": alloc,
+                    "target_path": str(wt),
+                    "hardlink_topology": topology,
+                },
+                "created_at": now_iso(),
+            },
+        )
+        receipt_path = store.completion_receipts_dir / f"{rid}.json"
+        assert receipt_path.read_bytes().startswith(b"\x1f\x8b")
+        assert len(receipt_path.read_bytes()) < raw_json_len // 4
+        assert cleanup_evidence.read(receipt_path)[0]["plan"]["hardlink_topology"] == topology
+
+        # reconcile cleanup-evidence still reads and prunes compressed RELEASED evidence cleanly.
+        code, applied, _ = _cli_json(
+            capsys, "reconcile", "cleanup-evidence", "--repo", str(repository.repo), "--apply"
+        )
+        assert code == 0
+        assert applied["decision"]["result"]["pruned_receipts"] == 1
+        assert applied["decision"]["result"]["pruned_action_dirs"] == 1
+        assert not receipt_path.exists() and not action_dir.exists()
+
+
+def test_store_load_include_receipts_false_skips_receipt_dirs() -> None:
+    with GitRepository(linked=0, policy_text=POLICY_V8) as repository:
+        adopt_canonical(repository)
+        wt, _ = acquire_one(repository, task="fast-load", authority="fast-load")
+        _close_and_release(repository, wt)
+        store = MetadataStore(inventory(repository.repo).common_dir)
+        full = store.load()
+        light = store.load(include_receipts=False)
+        assert len(full.release_receipts) >= 1
+        assert light.release_receipts == {}
+        assert light.release_plans == {}
+        assert light.records == full.records
+        assert light.bindings == full.bindings

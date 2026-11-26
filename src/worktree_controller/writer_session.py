@@ -149,13 +149,12 @@ def host_check(
 
         verify_holder_lineage(holder, os.getpid())
         # The snapshot loaded under the lock below is the metadata check.
-        governed = governed_target(path, load_metadata=False)
+        governed = _governed_target_with_state(path, load_metadata=False)
         if governed is None:
             raise ControllerError("WRITER_LEASE_REQUIRED", "host-managed writes require governance")
-        repository, root = governed
+        repository, root, state = governed
         if context["repository_path"] != str(repository) or context["worktree_path"] != str(root):
             raise ControllerError("WRITER_LEASE_MISMATCH", "host repository/worktree differs")
-        state = inventory(root)
         store = MetadataStore(state.common_dir)
         if not store.lock_file.is_file() or store.lock_file.is_symlink():
             raise ControllerError("INVALID_METADATA", "host check requires its repository lock")
@@ -394,15 +393,10 @@ def _governance_marker(root: Path, common: Path | None = None) -> bool:
     return False
 
 
-def governed_target(path: Path, *, load_metadata: bool = True) -> tuple[Path, Path] | None:
-    """Separate Git discovery failures from evidence of Controller governance.
-
-    An unrelated broken ancestor marker is not a repository authority. Once a
-    policy, metadata or actual governed Git root is found, all failures propagate.
-    Nested repositories cannot hide an enclosing governed worktree.
-    ``load_metadata=False`` is for callers that load (and so validate) the same
-    metadata themselves before deciding anything.
-    """
+def _governed_target_with_state(
+    path: Path, *, load_metadata: bool = True
+) -> tuple[Path, Path, Any] | None:
+    """Resolve governance target and return its lightweight inventory to avoid duplicate Git scans."""
     resolved = path.expanduser().resolve(strict=True)
     if not resolved.is_dir():
         raise ControllerError("INVALID_TARGET", "writer path must be an existing directory")
@@ -430,7 +424,7 @@ def governed_target(path: Path, *, load_metadata: bool = True) -> tuple[Path, Pa
                 raise ControllerError("GIT_DRIFT", "Git root does not match its discovery marker")
             broken_roots.append(parent)
             continue
-        repository = inventory(root)
+        repository = inventory(root, observe_paths=frozenset())
         if selected is None:
             selected = root
         if explicit or _governance_marker(repository.canonical_path, common):
@@ -445,8 +439,21 @@ def governed_target(path: Path, *, load_metadata: bool = True) -> tuple[Path, Pa
                 raise ControllerError(
                     "UNREGISTERED_WORKTREE", "nested repository lies inside a governed path"
                 )
-            governed = repository.canonical_path, root
+            governed = repository.canonical_path, root, repository
     return governed
+
+
+def governed_target(path: Path, *, load_metadata: bool = True) -> tuple[Path, Path] | None:
+    """Separate Git discovery failures from evidence of Controller governance.
+
+    An unrelated broken ancestor marker is not a repository authority. Once a
+    policy, metadata or actual governed Git root is found, all failures propagate.
+    Nested repositories cannot hide an enclosing governed worktree.
+    ``load_metadata=False`` is for callers that load (and so validate) the same
+    metadata themselves before deciding anything.
+    """
+    result = _governed_target_with_state(path, load_metadata=load_metadata)
+    return None if result is None else (result[0], result[1])
 
 
 def describe(path: Path, *, selector: str | None = None) -> dict[str, Any]:
@@ -465,11 +472,10 @@ def describe(path: Path, *, selector: str | None = None) -> dict[str, Any]:
     from .semantics import managed_record as _managed_record
 
     try:
-        target = governed_target(path)
+        target = _governed_target_with_state(path, load_metadata=False)
         if target is None:
             return {"admission": "NOT_APPLICABLE", "code": "OUTSIDE_CONTROLLER_GOVERNANCE"}
-        repository, root = target
-        state = inventory(root)
+        repository, root, state = target
         store = MetadataStore(state.common_dir)
         if not store.lock_file.is_file() or store.lock_file.is_symlink():
             raise ControllerError("INVALID_METADATA", "governed read requires its repository lock")
@@ -543,11 +549,10 @@ def check(
             raise ValueError("unsupported access class")
         if (access == "write") != (target is not None):
             raise ValueError("a write access check requires exactly one target path")
-        governed = governed_target(path, load_metadata=False)
+        governed = _governed_target_with_state(path, load_metadata=False)
         if governed is None:
             return {"admission": "NOT_APPLICABLE", "code": "OUTSIDE_CONTROLLER_GOVERNANCE"}
-        repository, root = governed
-        state = inventory(root)
+        repository, root, state = governed
         store = MetadataStore(state.common_dir)
         if not store.lock_file.is_file() or store.lock_file.is_symlink():
             raise ControllerError("INVALID_METADATA", "governed check requires its repository lock")

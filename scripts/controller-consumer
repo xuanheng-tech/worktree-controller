@@ -3,9 +3,11 @@
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
+import tomllib
 import uuid
 from pathlib import Path
 
@@ -40,34 +42,637 @@ WRITE_TARGETS = {
     "Write": "file_path",
     "NotebookEdit": "notebook_path",
 }
-READ_TOOLS = frozenset({"Read", "Glob", "Grep", "LS", "NotebookRead"})
+READ_TOOLS = frozenset({
+    "Read",
+    "Glob",
+    "Grep",
+    "LS",
+    "NotebookRead",
+    "ToolSearch",
+    "WebSearch",
+    "WebFetch",
+    "AskUserQuestion",
+    "TodoRead",
+    "TodoWrite",
+    "Skill",
+    "TaskList",
+    "TaskGet",
+    "ListMcpResourcesTool",
+    "ReadMcpResourceTool",
+})
+
+# Grok native + Claude-compatible tool names.
+GROK_WRITE_TOOLS = frozenset({
+    *WRITE_TARGETS,
+    "search_replace",
+    "hashline_edit",
+    "write",
+    "StrReplace",
+    "EditNotebook",
+})
+GROK_SHELL_TOOLS = frozenset({"run_terminal_command", "Bash", "Shell"})
+GROK_READ_TOOLS = frozenset({
+    *READ_TOOLS,
+    "read_file",
+    "hashline_read",
+    "grep",
+    "list_dir",
+    "search_tool",
+    "todo_write",
+    "todo_read",
+    "web_search",
+    "web_fetch",
+})
+_GROK_EVENT_MAP = {
+    "session_start": "SessionStart",
+    "pre_tool_use": "PreToolUse",
+    "session_end": "SessionEnd",
+    "stop": "Stop",
+}
+
+_GITDIR_LIMIT = 4096
+
+# Strictly provably read-only commands (only admitted when the entire command is
+# free of output redirections, command substitution, subshells, and script execs).
+_PURE_READONLY_COMMANDS = frozenset({
+    "pwd", "cd", "ls", "ll", "la", "dir", "tree", "stat", "file", "readlink", "realpath",
+    "basename", "dirname", "wc", "cat", "tac", "nl", "head", "tail", "cut", "tr",
+    "uniq", "comm", "diff", "cmp", "strings", "sha256sum", "md5sum", "b2sum", "cksum",
+    "date", "whoami", "id", "uname", "hostname", "uptime", "df", "du", "free", "ps",
+    "pgrep", "nproc", "true", "false", "echo", "printf", "which", "whereis", "type",
+    "rg", "grep", "egrep", "fgrep", "jq", "journalctl",
+})
+_GIT_READONLY_SUBCMDS = frozenset({
+    "status", "diff", "log", "show", "rev-parse", "symbolic-ref", "ls-files",
+    "ls-remote", "ls-tree", "cat-file", "describe", "shortlog", "blame", "grep",
+    "merge-base", "rev-list", "for-each-ref", "name-rev", "check-ignore",
+    "check-attr", "count-objects", "verify-commit", "verify-tag", "version", "help",
+})
+_GOVERNANCE_CLIS = frozenset({
+    "worktree-controller",
+    "worktree-session-end",
+    "codex-worktree",
+    "codex-worktree-session-end",
+    "codex-worktree-writer-lease",
+    "snapshot-runner",
+    "tool-skill-sync",
+    "tool-temp-dir",
+    "qp-nexus",
+})
+_SAFE_REDIR_RE = re.compile(r"^(?:(?:1|2)?>/dev/null|2>&1|1>&2)(?=$|[\s;|&])")
+_SED_SAFE_SCRIPT_RE = re.compile(r"^[0-9,$;p\s]+$")
+_VAR_ASSIGN_TOKEN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=(.*)$")
+_VAR_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+_ABS_OR_HOME_PATH_RE = re.compile(r"(?:(?<![A-Za-z0-9_.-])(?:/[^\s'\"`<>|;&(),{}]+|~/[^\s'\"`<>|;&(),{}]+))")
 
 
-def access_arguments(event, payload):
+def _present(path):
+    try:
+        path.lstat()
+    except OSError:
+        return False
+    return True
+
+
+def _canonical_protected(root):
+    policy_path = root / ".agents" / "worktree-policy.toml"
+    if not _present(policy_path):
+        return True
+    try:
+        data = tomllib.loads(policy_path.read_text(encoding="utf-8"))
+        canonical = data.get("canonical")
+        if isinstance(canonical, dict) and isinstance(canonical.get("protected"), bool):
+            return canonical["protected"]
+    except (OSError, UnicodeError, ValueError):
+        return True
+    return True
+
+
+def _scan_ancestors_for_governance(candidate):
+    """Inspect ``candidate`` and its ancestors.
+
+    Returns ``("canonical", root, protected)``, ``("linked", root, False)``,
+    ``("outside", None, False)``, or ``("uncertain", None, True)``.
+    """
+    existing = next((p for p in (candidate, *candidate.parents) if _present(p)), None)
+    if existing is None or existing == Path("/"):
+        return "uncertain", None, True
+    for parent in (candidate, *candidate.parents):
+        if not parent.is_dir():
+            continue
+        git_entry = parent / ".git"
+        if not _present(git_entry):
+            if _present(parent / ".agents" / "worktree-policy.toml"):
+                return "uncertain", None, True
+            continue
+        try:
+            st = git_entry.lstat()
+        except OSError:
+            return "uncertain", None, True
+        if os.path.isdir(git_entry) and not os.path.islink(git_entry):
+            if _present(parent / ".agents" / "worktree-policy.toml") or (
+                git_entry / "worktree-controller"
+            ).is_dir():
+                return "canonical", parent, _canonical_protected(parent)
+            return "outside", None, False
+        if os.path.isfile(git_entry) and not os.path.islink(git_entry):
+            try:
+                with git_entry.open("rb") as handle:
+                    pointer = os.fsdecode(handle.read(_GITDIR_LIMIT + 1)).strip()
+            except OSError:
+                return "uncertain", None, True
+            if len(pointer) > _GITDIR_LIMIT or not pointer.startswith("gitdir: "):
+                return "uncertain", None, True
+            admin = (parent / pointer.removeprefix("gitdir: ")).resolve(strict=False)
+            common = admin
+            commondir = admin / "commondir"
+            if _present(commondir):
+                try:
+                    with commondir.open("rb") as handle:
+                        rel = os.fsdecode(handle.read(_GITDIR_LIMIT + 1)).strip()
+                except OSError:
+                    return "uncertain", None, True
+                if not rel or len(rel) > _GITDIR_LIMIT:
+                    return "uncertain", None, True
+                common = (admin / rel).resolve(strict=False)
+            if _present(parent / ".agents" / "worktree-policy.toml") or (
+                common / "worktree-controller"
+            ).is_dir():
+                return "linked", parent, False
+            return "outside", None, False
+        if st:
+            return "uncertain", None, True
+    return "outside", None, False
+
+
+def inspect_governed_root(path):
+    """Classify ``path`` across both its lexical path and symlink-resolved target."""
+    try:
+        expanded = Path(os.path.expanduser(str(path)))
+        if not expanded.is_absolute():
+            return "uncertain", None, True
+        resolved = expanded.resolve(strict=False)
+    except OSError:
+        return "uncertain", None, True
+    lexical_norm = Path(os.path.normpath(str(expanded)))
+    checks = [resolved]
+    if lexical_norm != resolved:
+        checks.append(lexical_norm)
+    best = ("outside", None, False)
+    for candidate in checks:
+        kind, root, protected = _scan_ancestors_for_governance(candidate)
+        if kind == "canonical" and protected:
+            return kind, root, True
+        if kind == "linked":
+            best = (kind, root, False)
+        elif kind == "uncertain" and best[0] == "outside":
+            best = (kind, None, True)
+        elif kind == "canonical" and best[0] == "outside":
+            best = (kind, root, protected)
+    return best
+
+
+def _split_strict_readonly_stages(command):
+    """Return list of simple command stages iff ``command`` has no shell writes/substitutions."""
+    if not isinstance(command, str) or not command.strip() or "\x00" in command:
+        return None
+    stages = []
+    buf = []
+    in_sq = False
+    in_dq = False
+    escaped = False
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if escaped:
+            buf.append(ch)
+            escaped = False
+            i += 1
+            continue
+        if ch == "\\" and not in_sq:
+            buf.append(ch)
+            escaped = True
+            i += 1
+            continue
+        if ch == "'" and not in_dq:
+            in_sq = not in_sq
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_sq:
+            in_dq = not in_dq
+            buf.append(ch)
+            i += 1
+            continue
+        # Command substitution executes inside double quotes too.
+        if not in_sq and (ch == "`" or command[i : i + 2] == "$("):
+            return None
+        if not in_sq and not in_dq:
+            if ch in "(){}<":
+                return None
+            if ch == "#" and (not buf or buf[-1].isspace()):
+                while i < n and command[i] != "\n":
+                    i += 1
+                continue
+            if ch in ";\n":
+                stage = "".join(buf).strip()
+                if stage:
+                    stages.append(stage)
+                buf = []
+                i += 1
+                continue
+            if command[i : i + 2] in ("&&", "||"):
+                stage = "".join(buf).strip()
+                if stage:
+                    stages.append(stage)
+                buf = []
+                i += 2
+                continue
+            if ch == "|":
+                stage = "".join(buf).strip()
+                if not stage:
+                    return None
+                stages.append(stage)
+                buf = []
+                i += 1
+                continue
+            # Allow only exact benign fd dups / /dev/null sinks; reject all other > or &.
+            if ch == ">" or (ch in "12" and command[i + 1 : i + 2] == ">" and (i == 0 or command[i - 1].isspace())):
+                m = _SAFE_REDIR_RE.match(command[i:])
+                if not m:
+                    return None
+                buf.append(" ")
+                i += len(m.group(0))
+                continue
+            if ch == "&":
+                return None
+        buf.append(ch)
+        i += 1
+    if in_sq or in_dq or escaped:
+        return None
+    tail = "".join(buf).strip()
+    if tail:
+        stages.append(tail)
+    return stages if stages else None
+
+
+def _is_readonly_git(args):
+    i = 0
+    subcmd = None
+    sub_args = []
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-C", "--git-dir", "--work-tree"):
+            if i + 1 >= len(args):
+                return False
+            i += 2
+            continue
+        if arg.startswith(("--git-dir=", "--work-tree=")) or arg in (
+            "--no-pager",
+            "--literal-pathspecs",
+            "--bare",
+            "--no-optional-locks",
+        ):
+            i += 1
+            continue
+        if arg.startswith("-"):
+            # Reject -c / --config-env / --exec-path / any unknown global flag.
+            return False
+        subcmd = arg
+        sub_args = args[i + 1 :]
+        break
+    if subcmd is None:
+        return False
+    if subcmd in _GIT_READONLY_SUBCMDS:
+        for arg in sub_args:
+            if arg in ("-o", "--output", "--ext-diff", "--textconv") or arg.startswith("--output="):
+                return False
+        return True
+    if subcmd == "branch":
+        allowed = {
+            "-a", "--all", "-r", "--remotes", "-l", "--list", "-v", "-vv",
+            "--verbose", "--show-current", "--merged", "--no-merged",
+            "--contains", "--points-at", "--color", "--no-color", "--abbrev",
+        }
+        i = 0
+        while i < len(sub_args):
+            arg = sub_args[i]
+            if arg in ("--merged", "--no-merged", "--contains", "--points-at"):
+                i += 2
+                continue
+            if arg in allowed or arg.startswith(("--sort=", "--format=", "--color=", "--abbrev=")):
+                i += 1
+                continue
+            return False
+        return True
+    if subcmd == "tag":
+        if not sub_args:
+            return True
+        return all(
+            a in ("-l", "--list", "-v", "--verify") or a.startswith(("--sort=", "--format=", "-n"))
+            for a in sub_args
+            if a.startswith("-")
+        ) and any(a in ("-l", "--list", "-v", "--verify") for a in sub_args)
+    if subcmd == "config":
+        read_flags = {"--get", "--get-all", "--list", "-l", "--show-origin", "--show-scope", "--null", "-z"}
+        has_read = False
+        positional = 0
+        for arg in sub_args:
+            if arg in read_flags:
+                has_read = True
+            elif arg in ("--local", "--global", "--system", "--worktree"):
+                continue
+            elif arg.startswith("-"):
+                return False
+            else:
+                positional += 1
+        return has_read and positional <= 1
+    return False
+
+
+def _is_readonly_sed(args):
+    has_quiet = False
+    scripts = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-n", "--quiet", "--silent"):
+            has_quiet = True
+            i += 1
+            continue
+        if arg in ("-e", "--expression"):
+            if i + 1 >= len(args):
+                return False
+            scripts.append(args[i + 1])
+            i += 2
+            continue
+        if arg.startswith("-"):
+            return False
+        if not scripts:
+            scripts.append(arg)
+        i += 1
+    return has_quiet and bool(scripts) and all(_SED_SAFE_SCRIPT_RE.fullmatch(s) for s in scripts)
+
+
+def _is_safe_worktree_session(args, cwd):
+    """Allow `worktree-session` fast-path only when `--path` is not a protected canonical checkout."""
+    target = None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            break
+        if arg == "--path" and i + 1 < len(args):
+            target = args[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--path="):
+            target = arg.split("=", 1)[1]
+            i += 1
+            continue
+        i += 1
+    if not target:
+        return False
+    expanded = Path(os.path.expanduser(target))
+    if not expanded.is_absolute():
+        expanded = Path(cwd) / expanded
+    kind, _root, protected = inspect_governed_root(expanded)
+    return not (kind == "canonical" and protected)
+
+
+def _is_strict_readonly_stage(stage, cwd):
+    try:
+        tokens = shlex.split(stage)
+    except ValueError:
+        return False
+    while tokens and _VAR_ASSIGN_TOKEN_RE.match(tokens[0]):
+        tokens = tokens[1:]
+    if not tokens:
+        return False
+    cmd = Path(tokens[0]).name
+    args = tokens[1:]
+    if cmd in _GOVERNANCE_CLIS:
+        return True
+    if cmd == "worktree-session":
+        return _is_safe_worktree_session(args, cwd)
+    if cmd in _PURE_READONLY_COMMANDS:
+        return True
+    if cmd == "sort":
+        return not any(a in ("-o", "--output") or a.startswith("--output=") for a in args)
+    if cmd == "git":
+        return _is_readonly_git(args)
+    if cmd == "sed":
+        return _is_readonly_sed(args)
+    if cmd == "find":
+        mut_flags = {
+            "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0", "-fprintf"
+        }
+        return not any(a in mut_flags for a in args)
+    if cmd == "systemctl":
+        ro_sys = {
+            "status", "list-units", "list-timers", "list-unit-files",
+            "is-active", "is-enabled", "show", "cat",
+        }
+        pos = [a for a in args if not a.startswith("-")]
+        return bool(pos) and pos[0] in ro_sys
+    if cmd == "ruff":
+        return (
+            bool(args)
+            and args[0] == "check"
+            and not any(
+                a in ("--fix", "--unsafe-fixes", "--fix-only", "-o", "--output-file")
+                or a.startswith("--output-file=")
+                for a in args[1:]
+            )
+        )
+    return False
+
+
+def is_strict_readonly_bash(command, cwd):
+    """Return True only when every stage is provably pure read-only."""
+    stages = _split_strict_readonly_stages(command)
+    if not stages:
+        return False
+    cur_cwd = Path(os.path.expanduser(cwd)).resolve(strict=False)
+    for stage in stages:
+        if not _is_strict_readonly_stage(stage, str(cur_cwd)):
+            return False
+        try:
+            words = shlex.split(stage)
+        except ValueError:
+            return False
+        if words and words[0] == "cd" and len(words) >= 2 and words[1] != "-":
+            dest = Path(os.path.expanduser(words[1]))
+            cur_cwd = (dest if dest.is_absolute() else cur_cwd / dest).resolve(strict=False)
+    return True
+
+
+def _expand_simple_vars(text, env_vars):
+    def _sub(match):
+        name = match.group(1) or match.group(2)
+        if name == "HOME":
+            return str(Path.home())
+        return env_vars.get(name, match.group(0))
+
+    prev = text
+    for _ in range(3):
+        nxt = _VAR_REF_RE.sub(_sub, prev)
+        if nxt == prev:
+            break
+        prev = nxt
+    return prev
+
+
+def collect_bash_governed_targets(command, cwd):
+    """Collect governed checkouts touched by ``cwd``, `cd` targets, or path tokens.
+
+    Returns ``(canonical_roots, linked_roots, uncertain)``.
+    """
+    canonical_roots = []
+    linked_roots = []
+    uncertain = False
+
+    def record(candidate_path):
+        nonlocal uncertain
+        kind, root, protected = inspect_governed_root(candidate_path)
+        if kind == "canonical" and protected:
+            if root not in canonical_roots:
+                canonical_roots.append(root)
+        elif kind == "linked":
+            if root not in linked_roots:
+                linked_roots.append(root)
+        elif kind == "uncertain":
+            uncertain = True
+
+    cur_cwd = Path(os.path.expanduser(cwd)).resolve(strict=False)
+    record(cur_cwd)
+    if not isinstance(command, str) or not command.strip():
+        return canonical_roots, linked_roots, uncertain
+
+    env_vars = {}
+    for line in command.splitlines():
+        for raw_seg in re.split(r"(?:&&|\|\||;|\|)", line):
+            seg = raw_seg.strip()
+            if not seg:
+                continue
+            try:
+                tokens = shlex.split(seg)
+            except ValueError:
+                tokens = seg.split()
+            for tok in tokens:
+                m = _VAR_ASSIGN_TOKEN_RE.match(tok)
+                if m:
+                    key, val = tok.split("=", 1)
+                    env_vars[key] = _expand_simple_vars(val, env_vars)
+            if tokens and tokens[0] in ("cd", "pushd"):
+                dest_raw = None
+                if len(tokens) == 1:
+                    dest_raw = str(Path.home())
+                elif tokens[1] == "--":
+                    dest_raw = tokens[2] if len(tokens) > 2 else str(Path.home())
+                elif tokens[1] != "-":
+                    dest_raw = tokens[1]
+                if dest_raw:
+                    expanded = Path(os.path.expanduser(_expand_simple_vars(dest_raw, env_vars)))
+                    cur_cwd = (expanded if expanded.is_absolute() else cur_cwd / expanded).resolve(strict=False)
+                    record(cur_cwd)
+            for tok in tokens:
+                cleaned = _expand_simple_vars(tok, env_vars)
+                if "=" in cleaned and not cleaned.startswith(("/", "~", ".")):
+                    cleaned = cleaned.split("=", 1)[1]
+                cleaned = cleaned.lstrip("><")
+                if not cleaned:
+                    continue
+                if cleaned.startswith(("/", "~/")) or "/" in cleaned:
+                    candidate = Path(os.path.expanduser(cleaned))
+                    if not candidate.is_absolute():
+                        candidate = cur_cwd / candidate
+                    if candidate.is_absolute():
+                        kind, root, protected = inspect_governed_root(candidate)
+                        if kind == "canonical" and protected and root not in canonical_roots:
+                            canonical_roots.append(root)
+                        elif kind == "linked" and root not in linked_roots:
+                            linked_roots.append(root)
+
+    expanded_cmd = _expand_simple_vars(command, env_vars)
+    for raw_path in _ABS_OR_HOME_PATH_RE.findall(expanded_cmd):
+        candidate = Path(os.path.expanduser(raw_path.rstrip(".,;:'\"")))
+        kind, root, protected = inspect_governed_root(candidate)
+        if kind == "canonical" and protected and root not in canonical_roots:
+            canonical_roots.append(root)
+        elif kind == "linked" and root not in linked_roots:
+            linked_roots.append(root)
+
+    return canonical_roots, linked_roots, uncertain
+
+
+def _tool_name(payload, client_id="claude"):
+    if client_id == "grok":
+        return payload.get("toolName", payload.get("tool_name"))
+    return payload.get("tool_name")
+
+
+def _tool_input(payload, client_id="claude"):
+    if client_id == "grok":
+        return payload.get("toolInput", payload.get("tool_input"))
+    return payload.get("tool_input")
+
+
+def _extract_write_target(tool, payload, client_id="claude"):
+    details = _tool_input(payload, client_id)
+    if client_id == "grok":
+        keys = (
+            ("notebook_path", "target_notebook")
+            if tool in {"NotebookEdit", "EditNotebook"}
+            else ("file_path", "path", "target_file")
+        )
+        targets = [details[key] for key in keys if isinstance(details, dict) and key in details]
+        if (
+            not targets
+            or any(not isinstance(p, str) or not p.strip() for p in targets)
+            or len(set(targets)) != 1
+        ):
+            raise ValueError("write tool target is missing or ambiguous")
+        return targets[0]
+    target = details.get(WRITE_TARGETS[tool]) if isinstance(details, dict) else None
+    if not isinstance(target, str) or not target:
+        raise ValueError("write tool target is missing")
+    return target
+
+
+def access_arguments(event, payload, client_id="claude"):
     """Translate one hook payload into a host-check access class and target."""
     if event != "PreToolUse":
         return ["--access", "read"]
-    tool = payload.get("tool_name")
-    if tool in WRITE_TARGETS:
-        details = payload.get("tool_input")
-        target = details.get(WRITE_TARGETS[tool]) if isinstance(details, dict) else None
-        if not isinstance(target, str) or not target:
-            raise ValueError("write tool target is missing")
+    tool = _tool_name(payload, client_id)
+    write_tools = GROK_WRITE_TOOLS if client_id == "grok" else WRITE_TARGETS
+    read_tools = GROK_READ_TOOLS if client_id == "grok" else READ_TOOLS
+    if client_id == "grok" and (not isinstance(tool, str) or not tool):
+        raise ValueError("tool identity is missing")
+    if tool in write_tools:
+        target = _extract_write_target(tool, payload, client_id)
+        if client_id == "grok":
+            p = Path(os.path.expanduser(target))
+            if not p.is_absolute():
+                p = Path(payload["cwd"]) / p
+            target = str(p)
         return ["--access", "write", "--target", target]
-    return ["--access", "read" if tool in READ_TOOLS else "exec"]
+    return ["--access", "read" if tool in read_tools else "exec"]
 
 
-def change_directory_target(payload, cwd):
+def change_directory_target(payload, cwd, client_id="claude"):
     """Return the destination of a Bash call that only changes directory.
 
     Such a call changes nothing in the current directory; it reads its
     destination. Checking that destination lets a session leave a checkout it
     does not hold instead of being locked out of every tool.
     """
-    details = payload.get("tool_input")
+    shell_tools = GROK_SHELL_TOOLS if client_id == "grok" else frozenset({"Bash"})
+    details = _tool_input(payload, client_id)
     command = (
         details.get("command")
-        if payload.get("tool_name") == "Bash" and isinstance(details, dict)
+        if _tool_name(payload, client_id) in shell_tools and isinstance(details, dict)
         else None
     )
     if not isinstance(command, str) or any(
@@ -83,38 +688,22 @@ def change_directory_target(payload, cwd):
     return str(Path(cwd, os.path.expanduser(words[1])))
 
 
-def hook(event):
-    if event not in {"SessionStart", "PreToolUse", "Stop", "SessionEnd"}:
-        raise ValueError("unsupported hook event")
-    payload = json.load(sys.stdin)
-    if not isinstance(payload, dict) or payload.get("hook_event_name") != event:
-        raise ValueError("hook event identity is missing or mismatched")
-    path, session = payload.get("cwd"), payload.get("session_id")
-    if not isinstance(path, str) or not path or not isinstance(session, str) or not session:
-        raise ValueError("hook path/session identity is missing")
-    hosted = "CONTROLLER_WRITER_MODE" in os.environ or "CONTROLLER_WRITER_CONTEXT" in os.environ
-    if event == "Stop" and not hosted:
-        return end_session(
-            path,
-            session,
-            checking=True,
-            already_continued=payload.get("stop_hook_active") is True,
-        )
-    if event == "SessionEnd" and not hosted:
-        return end_session(path, session)
-    if hosted:
-        arguments = ["host-check", path, *access_arguments(event, payload)]
-    else:
-        destination = change_directory_target(payload, path) if event == "PreToolUse" else None
-        arguments = [
-            "check",
-            "claude",
-            destination or path,
-            "ancestor:claude",
-            "--session-id",
-            session,
-            *(["--access", "read"] if destination else access_arguments(event, payload)),
-        ]
+def _format_refusal(stdout):
+    base = (
+        "Controller entitlement check refused; leave with a Bash call of only "
+        "`cd <directory outside this checkout>`, or use worktree-session for a governed Terminal"
+    )
+    try:
+        decision = json.loads(stdout).get("decision", {})
+        code, message = decision.get("code"), decision.get("reason")
+        if isinstance(code, str) and isinstance(message, str):
+            return f"{base} ({code}: {message[:240]})"
+    except (ValueError, AttributeError):
+        pass
+    return base
+
+
+def _run_writer_session(arguments):
     result = subprocess.run(
         [str(Path.home() / ".local/bin/worktree-controller"), "writer-session", *arguments],
         capture_output=True,
@@ -123,14 +712,201 @@ def hook(event):
     )
     if result.returncode:
         # Do not echo hook payloads or issue a permission override.
-        raise ValueError(
-            "Controller entitlement check refused; leave with a Bash call of only "
-            "`cd <directory outside this checkout>`, or use worktree-session for a governed Terminal"
+        raise ValueError(_format_refusal(result.stdout))
+
+
+def _resolve_hook_event(payload, expected, client_id):
+    if not isinstance(payload, dict):
+        raise ValueError("hook event identity is missing or mismatched")
+    event_name = payload.get("hook_event_name")
+    if client_id == "grok" and event_name not in {"SessionStart", "PreToolUse", "Stop", "SessionEnd"}:
+        camel = payload.get("hookEventName", "")
+        event_name = _GROK_EVENT_MAP.get(camel)
+    if event_name != expected:
+        raise ValueError("hook event identity is missing or mismatched")
+
+
+def hook(event, client_id="claude"):
+    if event not in {"SessionStart", "PreToolUse", "Stop", "SessionEnd"}:
+        raise ValueError("unsupported hook event")
+    payload = json.load(sys.stdin)
+    _resolve_hook_event(payload, event, client_id)
+    path = payload.get("cwd")
+    session = (
+        payload.get("sessionId") or payload.get("session_id")
+        if client_id == "grok"
+        else payload.get("session_id")
+    )
+    if not isinstance(path, str) or not path or not isinstance(session, str) or not session:
+        raise ValueError("hook path/session identity is missing")
+    holder_selector = f"ancestor:{client_id}"
+    hosted = "CONTROLLER_WRITER_MODE" in os.environ or "CONTROLLER_WRITER_CONTEXT" in os.environ
+    if event == "Stop" and not hosted:
+        return end_session(
+            path,
+            session,
+            client_id=client_id,
+            checking=True,
+            already_continued=payload.get("stop_hook_active") is True,
         )
+    if event == "SessionEnd" and not hosted:
+        return end_session(path, session, client_id=client_id)
+
+    if event == "PreToolUse":
+        tool = _tool_name(payload, client_id)
+        write_tools = GROK_WRITE_TOOLS if client_id == "grok" else WRITE_TARGETS
+        shell_tools = GROK_SHELL_TOOLS if client_id == "grok" else frozenset({"Bash"})
+        read_tools = GROK_READ_TOOLS if client_id == "grok" else READ_TOOLS
+
+        if client_id == "grok" and (not isinstance(tool, str) or not tool):
+            raise ValueError("tool identity is missing")
+
+        if tool in read_tools and not hosted:
+            return 0
+
+        if tool in write_tools:
+            raw_target = _extract_write_target(tool, payload, client_id)
+            target_path = Path(os.path.expanduser(raw_target))
+            if not target_path.is_absolute():
+                target_path = Path(path) / target_path
+            kind, target_root, protected = inspect_governed_root(target_path)
+            if kind == "canonical" and protected:
+                raise ValueError(
+                    f"Controller canonical guard refused: direct {tool} into protected canonical "
+                    f"checkout '{target_root}' is forbidden; acquire a linked worktree via "
+                    f"`worktree-controller acquire`."
+                )
+            if hosted:
+                _run_writer_session(
+                    ["host-check", path, *access_arguments(event, payload, client_id)]
+                )
+                return 0
+            if kind == "linked":
+                resolved_target = str(target_path.resolve(strict=False))
+                _run_writer_session([
+                    "check",
+                    client_id,
+                    str(target_root),
+                    holder_selector,
+                    "--session-id",
+                    session,
+                    "--access",
+                    "write",
+                    "--target",
+                    resolved_target,
+                ])
+                return 0
+            if kind == "outside":
+                return 0
+            # Fail closed on uncertain paths or unprotected canonical: defer to Controller.
+            _run_writer_session([
+                "check",
+                client_id,
+                path,
+                holder_selector,
+                "--session-id",
+                session,
+                *access_arguments(event, payload, client_id),
+            ])
+            return 0
+
+        if tool in shell_tools:
+            details = _tool_input(payload, client_id)
+            command = details.get("command") if isinstance(details, dict) else None
+            if not hosted:
+                destination = change_directory_target(payload, path, client_id)
+                if destination is not None:
+                    _run_writer_session([
+                        "check",
+                        client_id,
+                        destination,
+                        holder_selector,
+                        "--session-id",
+                        session,
+                        "--access",
+                        "read",
+                    ])
+                    return 0
+                if isinstance(command, str) and is_strict_readonly_bash(command, path):
+                    return 0
+                canonical_roots, linked_roots, uncertain = collect_bash_governed_targets(
+                    command or "", path
+                )
+                if canonical_roots:
+                    raise ValueError(
+                        f"Controller canonical guard refused: non-readonly shell command touches "
+                        f"protected canonical checkout '{canonical_roots[0]}'; acquire a linked "
+                        f"worktree via `worktree-controller acquire`."
+                    )
+                if linked_roots:
+                    for linked_root in linked_roots:
+                        _run_writer_session([
+                            "check",
+                            client_id,
+                            str(linked_root),
+                            holder_selector,
+                            "--session-id",
+                            session,
+                            "--access",
+                            "exec",
+                        ])
+                    return 0
+                if uncertain:
+                    _run_writer_session([
+                        "check",
+                        client_id,
+                        path,
+                        holder_selector,
+                        "--session-id",
+                        session,
+                        "--access",
+                        "exec",
+                    ])
+                    return 0
+                return 0
+            # Hosted shell call: enforce canonical protection and host-check (plus any foreign linked worktree).
+            if isinstance(command, str) and not is_strict_readonly_bash(command, path):
+                canonical_roots, linked_roots, _uncertain = collect_bash_governed_targets(
+                    command, path
+                )
+                if canonical_roots:
+                    raise ValueError(
+                        f"Controller canonical guard refused: non-readonly shell command touches "
+                        f"protected canonical checkout '{canonical_roots[0]}'; acquire a linked "
+                        f"worktree via `worktree-controller acquire`."
+                    )
+                _run_writer_session(["host-check", path, "--access", "exec"])
+                cwd_kind, cwd_root, _ = inspect_governed_root(Path(path))
+                for linked_root in linked_roots:
+                    if cwd_kind != "linked" or linked_root != cwd_root:
+                        _run_writer_session(["host-check", str(linked_root), "--access", "exec"])
+                return 0
+
+    if hosted:
+        arguments = ["host-check", path, *access_arguments(event, payload, client_id)]
+    else:
+        destination = (
+            change_directory_target(payload, path, client_id) if event == "PreToolUse" else None
+        )
+        arguments = [
+            "check",
+            client_id,
+            destination or path,
+            holder_selector,
+            "--session-id",
+            session,
+            *(
+                ["--access", "read"]
+                if destination
+                else access_arguments(event, payload, client_id)
+            ),
+        ]
+    _run_writer_session(arguments)
     if event == "Stop" and hosted:
         return end_session(
             path,
             session,
+            client_id=client_id,
             checking=True,
             hosted=True,
             already_continued=payload.get("stop_hook_active") is True,
@@ -138,14 +914,21 @@ def hook(event):
     return 0
 
 
-def end_session(path, session, checking=False, already_continued=False, hosted=False):
+def end_session(
+    path,
+    session,
+    checking=False,
+    already_continued=False,
+    hosted=False,
+    client_id="claude",
+):
     """Hand this session's own leased checkouts back through Controller; never fail exit.
 
-    Direct ending calls select this live Claude process. Hosted preparation uses
+    Direct ending calls select this live client process. Hosted preparation uses
     its verified host identity and is always read-only. Controller decides each row.
     """
     try:
-        client_id, holder_selector, run_id = "claude", "ancestor:claude", None
+        holder_selector, run_id = f"ancestor:{client_id}", None
         expected_allocations = []
         if hosted:
             if not checking:
@@ -173,7 +956,7 @@ def end_session(path, session, checking=False, already_continued=False, hosted=F
                     "writer-session",
                     "describe",
                     path,
-                    "ancestor:claude",
+                    holder_selector,
                 ],
                 capture_output=True,
                 text=True,
@@ -303,7 +1086,9 @@ def main(argv):
     name = Path(argv[0]).name
     local = Path.home() / ".local/bin"
     if name == "claude-worktree-hook":
-        return hook(argv[1] if len(argv) == 2 else "")
+        return hook(argv[1] if len(argv) == 2 else "", client_id="claude")
+    if name == "grok-worktree-hook":
+        return hook(argv[1] if len(argv) == 2 else "", client_id="grok")
     if name == "claude-worktree":
         arguments = [
             str(local / "worktree-session"),
@@ -315,6 +1100,19 @@ def main(argv):
             str(uuid.uuid4()),
             "--",
             "claude",
+            *argv[1:],
+        ]
+    elif name == "grok-worktree":
+        arguments = [
+            str(local / "worktree-session"),
+            "--path",
+            str(Path.cwd()),
+            "--client-id",
+            "grok",
+            "--session-id",
+            str(uuid.uuid4()),
+            "--",
+            "grok",
             *argv[1:],
         ]
     elif name == "codex-worktree-writer-lease":

@@ -15,6 +15,8 @@ never observes an unbound cleanup-actions directory.
 
 from __future__ import annotations
 
+import gzip
+import io
 import json
 import os
 import stat
@@ -40,6 +42,17 @@ PRUNABLE_CLEANUP_CONTRACTS = frozenset(
 TERMINAL_INTENT_STATES = frozenset({"RELEASED", "ABANDONED"})
 DEFAULT_AUTO_KEEP_RECENT = 5
 DEFAULT_AUTO_MAX_BYTES = 64 * 1024 * 1024
+_MAX_DECOMPRESSED_RECEIPT_BYTES = 64 * 1024 * 1024
+
+
+def _load_json_bytes(raw: bytes) -> Any:
+    if raw.startswith(b"\x1f\x8b"):
+        with gzip.GzipFile(fileobj=io.BytesIO(raw), mode="rb") as stream:
+            data = stream.read(_MAX_DECOMPRESSED_RECEIPT_BYTES + 1)
+        if len(data) > _MAX_DECOMPRESSED_RECEIPT_BYTES:
+            raise ValueError("compressed receipt exceeds its bound")
+        return json.loads(data)
+    return json.loads(raw)
 
 
 @dataclass(frozen=True)
@@ -94,8 +107,8 @@ def _protected_receipt_ids(store: MetadataStore) -> set[str]:
                 if candidate.is_symlink() or not candidate.is_file():
                     continue
                 try:
-                    doc = json.loads(candidate.read_bytes())
-                except (OSError, UnicodeError, json.JSONDecodeError):
+                    doc = _load_json_bytes(candidate.read_bytes())
+                except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
                     # Fail closed: unreadable recovery evidence protects its subtree.
                     protected.add(candidate.stem)
                     continue
@@ -244,8 +257,8 @@ def plan_terminal_cleanup_retention_locked(
                 skip("referenced_by_transaction_or_recovery")
                 continue
             try:
-                doc = json.loads(path.read_bytes())
-            except (OSError, UnicodeError, json.JSONDecodeError):
+                doc = _load_json_bytes(path.read_bytes())
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
                 skip("unreadable")
                 continue
             if not isinstance(doc, dict):

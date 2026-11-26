@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 
 from worktree_controller.models import ControllerError
-from worktree_controller.snapshot_receipt import verify_candidate_snapshot
+from worktree_controller.snapshot_receipt import (
+    repository_display_name,
+    verify_candidate_snapshot,
+)
 
 DIGEST = "a" * 64
 HEAD = "b" * 40
@@ -100,3 +103,80 @@ def test_unreadable_snapshot_fails_before_preparation(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fail)
     with pytest.raises(ControllerError, match="could not verify"):
         verify()
+
+
+def test_repository_display_name_sanitization_matches_snapshot_runner(monkeypatch):
+    special_checkout = Path("/test/my repo (v2)+中文")
+    expected_repo = repository_display_name(special_checkout.name)
+    assert expected_repo != special_checkout.name
+    assert expected_repo.startswith("my_repo__v2-")
+    response = {
+        "evidence_schema_version": 1,
+        "command": "branch-review",
+        "snapshot_id": DIGEST,
+        "repository": expected_repo,
+        "status": "complete",
+        "truncated": False,
+        "evidence_gap": False,
+        "evidence": {
+            "fields": {
+                "target_ref": "refs/heads/" + BRANCH,
+                "target_head": HEAD,
+                "base_commit": BASE,
+                "merge_base_commit": BASE,
+            }
+        },
+    }
+
+    def read(argv, **kwargs):
+        assert kwargs.get("timeout") == 60
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(response).encode())
+
+    monkeypatch.setattr(subprocess, "run", read)
+    receipt = verify_candidate_snapshot("snapshot-runner:" + DIGEST, special_checkout, BRANCH, HEAD, BASE)
+    assert receipt["status"] == "complete"
+
+
+@pytest.mark.parametrize(
+    ("branch", "head", "base"),
+    [
+        (None, HEAD, BASE),
+        ("", HEAD, BASE),
+        ("refs/heads/main", HEAD, BASE),
+        (BRANCH, "short", BASE),
+        (BRANCH, HEAD, "not-a-sha"),
+    ],
+)
+def test_rejects_invalid_candidate_identity_before_invoking_runner(monkeypatch, branch, head, base):
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: pytest.fail("should reject invalid identity before read")
+    )
+    with pytest.raises(ControllerError) as exc:
+        verify_candidate_snapshot("snapshot-runner:" + DIGEST, CHECKOUT, branch, head, base)
+    assert exc.value.code == "SNAPSHOT_CANDIDATE_MISMATCH"
+
+
+def test_rejects_inconsistent_gap_with_complete_status_and_never_auto_accepts_bounded(review):
+    review.update(status="complete", truncated=False, evidence_gap=True)
+    with pytest.raises(ControllerError) as exc:
+        verify("snapshot-runner:" + DIGEST)
+    assert exc.value.code == "INVALID_SNAPSHOT_RECEIPT"
+    with pytest.raises(ControllerError) as exc_bounded:
+        verify("snapshot-runner:bounded:" + DIGEST)
+    assert exc_bounded.value.code == "INVALID_SNAPSHOT_RECEIPT"
+
+    # Complete snapshot must reject bounded prefix too.
+    review.update(status="complete", truncated=False, evidence_gap=False)
+    with pytest.raises(ControllerError) as exc_mismatch:
+        verify("snapshot-runner:bounded:" + DIGEST)
+    assert exc_mismatch.value.code == "SNAPSHOT_COVERAGE_MISMATCH"
+
+
+def test_timeout_fails_closed_as_invalid_snapshot_receipt(monkeypatch):
+    def timeout(argv, **_kwargs):
+        raise subprocess.TimeoutExpired(argv, 60)
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    with pytest.raises(ControllerError) as exc:
+        verify()
+    assert exc.value.code == "INVALID_SNAPSHOT_RECEIPT"
