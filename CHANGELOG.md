@@ -2,9 +2,9 @@
 
 ## 1.36.6
 
-- **Host write-fence hardening (`scripts/controller-consumer`)**:
-  - Replace AST/command-blacklist heuristics with a fail-closed host write fence for Claude and Grok hooks that checks lexical and `realpath` targets against protected canonical checkouts and routes linked-worktree writes and non-readonly shell executions through `writer-session check` / `host-check`.
-  - Complete Grok `SessionEnd` routing through `worktree-session-end` when exiting a governed repository.
+- **Host write-fence hardening (`scripts/controller-consumer`, `scripts/install-controller-consumers`)**:
+  - Replace AST/command-blacklist heuristics with a fail-closed host write fence for Claude, Grok, Codex, and Antigravity (AGY) hooks that checks lexical and `realpath` targets against protected canonical checkouts and routes linked-worktree writes and non-readonly shell executions through `writer-session check` / `host-check`.
+  - Add thin protocol codecs for `codex-worktree-hook` (`PreToolUse`/`Stop`/`SessionEnd`) and `agy-worktree-hook` (`camelCase` protojson `PreToolUse`/`Stop`), complete Grok `SessionEnd` routing through `worktree-session-end`, and synchronize `grok-worktree-hook`, `codex-worktree-hook`, and `agy-worktree-hook` in `scripts/install-controller-consumers`.
 - **Snapshot receipt verification hardening (`snapshot_receipt.py`)**:
   - Align `repository_display_name()` with Snapshot Runner `2.7.1`, enforce strict `branch` and 40-hex commit identity prechecks, add a 60-second fail-closed timeout on `snapshot-runner read`, and reject contradictory `evidence_gap=True` / `status="complete"` coverage receipts.
 - **Rollback-safe performance and storage optimizations (storage layout `5` unchanged)**:

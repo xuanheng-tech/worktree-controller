@@ -4,8 +4,8 @@
 Governance stays in Worktree Controller. This installer verifies the installed
 Controller's published capabilities against ``CONTROLLER_REQUIREMENTS`` declared
 in ``scripts/controller-consumer``, preflights every destination before writing
-(refusing symlinks or unrelated user files), and atomically writes the five
-consumer shims with mode 0755.
+(refusing symlinks or unrelated user files), and atomically writes the consumer
+shims with mode 0755.
 """
 
 from __future__ import annotations
@@ -32,6 +32,9 @@ CONSUMER_TARGETS = (
     "bin/codex-worktree-writer-lease",
     "bin/claude-worktree-hook",
     "bin/claude-worktree",
+    "bin/grok-worktree-hook",
+    "bin/codex-worktree-hook",
+    "bin/agy-worktree-hook",
 )
 
 
@@ -188,7 +191,7 @@ def install_consumers(
     dry_run: bool = False,
     capabilities_probe: Callable[[Path], Mapping[str, object]] = probe_controller_capabilities,
 ) -> dict[str, object]:
-    """Install the five consumer entry points after capability and ownership preflight."""
+    """Install the consumer entry points after capability and ownership preflight."""
     content = source.read_bytes()
     required = consumer_requirements(source)
     controller_path = controller or (home / ".local/bin/worktree-controller")

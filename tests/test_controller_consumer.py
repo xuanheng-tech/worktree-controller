@@ -650,13 +650,14 @@ def test_installer_installs_upgrades_legacy_marker_and_checks_cleanly(
         encoding="utf-8",
     )
 
+    expected_count = len(installer["CONSUMER_TARGETS"])
     dry = installer["install_consumers"](
         home=tmp_path,
         source=source,
         dry_run=True,
         capabilities_probe=lambda _: caps,
     )
-    assert len(dry["written"]) == 5
+    assert len(dry["written"]) == expected_count
     assert "legacy" in legacy_target.read_text(encoding="utf-8")
 
     installed = installer["install_consumers"](
@@ -664,7 +665,7 @@ def test_installer_installs_upgrades_legacy_marker_and_checks_cleanly(
         source=source,
         capabilities_probe=lambda _: caps,
     )
-    assert len(installed["written"]) == 5
+    assert len(installed["written"]) == expected_count
     for relative in installer["CONSUMER_TARGETS"]:
         path = tmp_path / relative
         assert path.read_bytes() == source.read_bytes()
@@ -684,7 +685,7 @@ def test_installer_installs_upgrades_legacy_marker_and_checks_cleanly(
         capabilities_probe=lambda _: caps,
     )
     assert repeat["written"] == []
-    assert len(repeat["unchanged"]) == 5
+    assert len(repeat["unchanged"]) == expected_count
 
 
 def test_installer_refuses_symlinks_unowned_files_and_missing_capabilities(

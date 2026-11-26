@@ -24,7 +24,13 @@ def consumer():
     return runpy.run_path(str(CONSUMER_SCRIPT))
 
 
-def _make_fake_wc_home(tmp_path: Path, wc_src: Path, *, allow_paths: set[str] | None = None) -> tuple[Path, Path]:
+def _make_fake_wc_home(
+    tmp_path: Path,
+    wc_src: Path,
+    *,
+    allow_paths: set[str] | None = None,
+    pending_closeout: bool = False,
+) -> tuple[Path, Path]:
     """Create a fake HOME/.local/bin with spy/delegating worktree-controller & worktree-session-end."""
     fake_home = tmp_path / "home"
     local_bin = fake_home / ".local/bin"
@@ -64,6 +70,39 @@ raise SystemExit(0)
     )
     wc_stub.chmod(0o755)
 
+    end_payload = (
+        {
+            "selection_complete": True,
+            "allocations": [
+                {
+                    "allocation_id": "11111111-1111-4111-8111-111111111111",
+                    "terminal_complete": False,
+                    "decision": {"code": "NO_TERMINAL_ACTION"},
+                }
+            ],
+            "previous_allocations": [],
+            "expected_allocations": [],
+            "summary": {
+                "contract": "session-closeout/v1",
+                "selected": 1,
+                "pending": 1,
+                "terminal_complete": False,
+            },
+        }
+        if pending_closeout
+        else {
+            "selection_complete": True,
+            "allocations": [],
+            "previous_allocations": [],
+            "expected_allocations": [],
+            "summary": {
+                "contract": "session-closeout/v1",
+                "selected": 0,
+                "pending": 0,
+                "terminal_complete": True,
+            },
+        }
+    )
     end_stub = local_bin / "worktree-session-end"
     end_stub.write_text(
         f"""#!/usr/bin/env python3
@@ -71,13 +110,7 @@ import json, sys
 args = sys.argv[1:]
 with open({str(log_file)!r}, "a", encoding="utf-8") as fh:
     fh.write(json.dumps({{"bin": "worktree-session-end", "args": args}}) + "\\n")
-print(json.dumps({{
-    "selection_complete": True,
-    "allocations": [],
-    "previous_allocations": [],
-    "expected_allocations": [],
-    "summary": {{"contract": "session-closeout/v1", "selected": 0, "pending": 0, "terminal_complete": True}},
-}}))
+print({json.dumps(json.dumps(end_payload))})
 """,
         encoding="utf-8",
     )
@@ -90,9 +123,10 @@ def _invoke_hook(
     *,
     entry_name: str,
     event: str,
-    payload: dict,
+    payload: dict | str,
     fake_home: Path,
     extra_env: dict[str, str] | None = None,
+    proc_cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     entry = tmp_path / entry_name
     if not entry.exists():
@@ -102,12 +136,14 @@ def _invoke_hook(
     env["HOME"] = str(fake_home)
     if extra_env:
         env.update(extra_env)
+    stdin_text = payload if isinstance(payload, str) else json.dumps(payload)
     return subprocess.run(
         [str(entry), event],
-        input=json.dumps(payload),
+        input=stdin_text,
         capture_output=True,
         text=True,
         env=env,
+        cwd=str(proc_cwd) if proc_cwd is not None else None,
         check=False,
     )
 
@@ -482,3 +518,471 @@ def test_real_controller_lease_enforced_end_to_end(tmp_path: Path) -> None:
             target=other_wt / "README.md",
         )
         assert unleased["admission"] == "REFUSED"
+
+
+def test_codex_hook_pretool_stop_and_session_end(tmp_path: Path) -> None:
+    """Verify codex-worktree-hook PreToolUse/Stop/SessionEnd protocol and fail-closed guards."""
+    with GitRepository(linked=0, policy_text=POLICY_V8) as repository:
+        adopt_canonical(repository)
+        leased_wt, _ = acquire_one(repository, task="codex-mine", authority="codex-mine")
+        other_wt, _ = acquire_one(repository, task="codex-other", authority="codex-other")
+        fake_home, log_file = _make_fake_wc_home(
+            tmp_path, ROOT, allow_paths={str(leased_wt.resolve())}
+        )
+
+        # 1. Legitimate readonly Bash and exec_command on canonical -> exit 0, stdout "{}" (no permissionDecision: allow).
+        for tool, tool_input in (
+            ("Bash", {"command": "git status --short"}),
+            ("exec_command", {"cmd": "rg -n README ."}),
+        ):
+            res = _invoke_hook(
+                tmp_path,
+                entry_name="codex-worktree-hook",
+                event="PreToolUse",
+                payload={
+                    "hook_event_name": "PreToolUse",
+                    "cwd": str(repository.repo),
+                    "session_id": "codex-s1",
+                    "tool_name": tool,
+                    "tool_input": tool_input,
+                },
+                fake_home=fake_home,
+            )
+            assert res.returncode == 0
+            out = json.loads(res.stdout)
+            assert out == {}
+            assert "permissionDecision" not in out
+
+        # 2. Legitimate exec_command and apply_patch in leased_wt -> exit 0, stdout "{}".
+        res_ok_exec = _invoke_hook(
+            tmp_path,
+            entry_name="codex-worktree-hook",
+            event="PreToolUse",
+            payload={
+                "hook_event_name": "PreToolUse",
+                "cwd": str(leased_wt),
+                "session_id": "codex-s1",
+                "tool_name": "exec_command",
+                "tool_input": {"cmd": "pytest -q"},
+            },
+            fake_home=fake_home,
+        )
+        assert res_ok_exec.returncode == 0
+        assert json.loads(res_ok_exec.stdout) == {}
+
+        res_ok_patch = _invoke_hook(
+            tmp_path,
+            entry_name="codex-worktree-hook",
+            event="PreToolUse",
+            payload={
+                "hook_event_name": "PreToolUse",
+                "cwd": str(leased_wt),
+                "session_id": "codex-s1",
+                "tool_name": "apply_patch",
+                "tool_input": {
+                    "input": "*** Begin Patch\n*** Update File: README.md\n@@\n+ok\n*** End Patch\n"
+                },
+            },
+            fake_home=fake_home,
+        )
+        assert res_ok_patch.returncode == 0
+        assert json.loads(res_ok_patch.stdout) == {}
+
+        # 3. Canonical mutation via Bash / exec_command / apply_patch -> exit 2 + clear stderr.
+        for tool, tool_input in (
+            ("Bash", {"command": "echo x > README.md"}),
+            ("exec_command", {"cmd": "python3 -c 'open(\"README.md\",\"w\").write(\"x\")'"}),
+            (
+                "apply_patch",
+                {"input": f"*** Begin Patch\n*** Update File: {repository.repo}/README.md\n*** End Patch"},
+            ),
+        ):
+            res = _invoke_hook(
+                tmp_path,
+                entry_name="codex-worktree-hook",
+                event="PreToolUse",
+                payload={
+                    "hook_event_name": "PreToolUse",
+                    "cwd": str(repository.repo),
+                    "session_id": "codex-s1",
+                    "tool_name": tool,
+                    "tool_input": tool_input,
+                },
+                fake_home=fake_home,
+            )
+            assert res.returncode == 2
+            assert "canonical" in res.stderr.lower()
+
+        # 4. Unleased other linked worktree via exec_command and multi-target apply_patch -> exit 2.
+        res_other_exec = _invoke_hook(
+            tmp_path,
+            entry_name="codex-worktree-hook",
+            event="PreToolUse",
+            payload={
+                "hook_event_name": "PreToolUse",
+                "cwd": str(other_wt),
+                "session_id": "codex-s1",
+                "tool_name": "exec_command",
+                "tool_input": {"cmd": "touch leaked.txt"},
+            },
+            fake_home=fake_home,
+        )
+        assert res_other_exec.returncode == 2
+
+        res_other_patch = _invoke_hook(
+            tmp_path,
+            entry_name="codex-worktree-hook",
+            event="PreToolUse",
+            payload={
+                "hook_event_name": "PreToolUse",
+                "cwd": str(leased_wt),
+                "session_id": "codex-s1",
+                "tool_name": "apply_patch",
+                "tool_input": {
+                    "input": (
+                        "*** Begin Patch\n"
+                        "*** Update File: README.md\n"
+                        f"*** Update File: {other_wt}/README.md\n"
+                        "*** End Patch\n"
+                    )
+                },
+            },
+            fake_home=fake_home,
+        )
+        assert res_other_patch.returncode == 2
+
+        # 5. SessionEnd routes to worktree-session-end with codex identity and exits 0.
+        log_file.unlink(missing_ok=True)
+        res_end = _invoke_hook(
+            tmp_path,
+            entry_name="codex-worktree-hook",
+            event="SessionEnd",
+            payload={
+                "hook_event_name": "SessionEnd",
+                "cwd": str(leased_wt),
+                "session_id": "codex-s1",
+                "reason": "other",
+            },
+            fake_home=fake_home,
+        )
+        assert res_end.returncode == 0
+        calls = _read_calls(log_file)
+        assert calls[1] == {
+            "bin": "worktree-session-end",
+            "args": [
+                "--path",
+                str(leased_wt),
+                "--client-id",
+                "codex",
+                "--session-id",
+                "codex-s1",
+                "--holder",
+                "ancestor:codex",
+                "--trigger",
+                "task-terminal",
+            ],
+        }
+
+        # 6. Stop: clean exits 0 with "{}"; pending blocks once then yields systemMessage on stop_hook_active.
+        res_stop_clean = _invoke_hook(
+            tmp_path,
+            entry_name="codex-worktree-hook",
+            event="Stop",
+            payload={
+                "hook_event_name": "Stop",
+                "cwd": str(leased_wt),
+                "session_id": "codex-s1",
+                "stop_hook_active": False,
+            },
+            fake_home=fake_home,
+        )
+        assert res_stop_clean.returncode == 0
+        assert json.loads(res_stop_clean.stdout) == {}
+
+        pending_home, _ = _make_fake_wc_home(
+            tmp_path / "pending", ROOT, allow_paths={str(leased_wt.resolve())}, pending_closeout=True
+        )
+        res_stop_block = _invoke_hook(
+            tmp_path,
+            entry_name="codex-worktree-hook",
+            event="Stop",
+            payload={
+                "hook_event_name": "Stop",
+                "cwd": str(leased_wt),
+                "session_id": "codex-s1",
+                "stop_hook_active": False,
+            },
+            fake_home=pending_home,
+        )
+        assert res_stop_block.returncode == 0
+        assert json.loads(res_stop_block.stdout)["decision"] == "block"
+
+        res_stop_active = _invoke_hook(
+            tmp_path,
+            entry_name="codex-worktree-hook",
+            event="Stop",
+            payload={
+                "hook_event_name": "Stop",
+                "cwd": str(leased_wt),
+                "session_id": "codex-s1",
+                "stop_hook_active": True,
+            },
+            fake_home=pending_home,
+        )
+        assert res_stop_active.returncode == 0
+        active_out = json.loads(res_stop_active.stdout)
+        assert "decision" not in active_out and "systemMessage" in active_out
+
+        # 7. Abnormal recovery: malformed apply_patch fails closed (rc=2); SessionEnd never blocks exit on controller error.
+        res_bad_patch = _invoke_hook(
+            tmp_path,
+            entry_name="codex-worktree-hook",
+            event="PreToolUse",
+            payload={
+                "hook_event_name": "PreToolUse",
+                "cwd": str(leased_wt),
+                "session_id": "codex-s1",
+                "tool_name": "apply_patch",
+                "tool_input": {"input": "not a valid patch"},
+            },
+            fake_home=fake_home,
+        )
+        assert res_bad_patch.returncode == 2
+        broken_home = tmp_path / "broken-codex-home"
+        broken_home.mkdir()
+        res_broken_end = _invoke_hook(
+            tmp_path,
+            entry_name="codex-worktree-hook",
+            event="SessionEnd",
+            payload={
+                "hook_event_name": "SessionEnd",
+                "cwd": str(leased_wt),
+                "session_id": "codex-s1",
+                "reason": "other",
+            },
+            fake_home=broken_home,
+        )
+        assert res_broken_end.returncode == 0
+        assert "unverified" in res_broken_end.stderr.lower()
+
+
+def test_agy_hook_camel_case_pretool_and_stop(tmp_path: Path) -> None:
+    """Verify agy-worktree-hook camelCase protojson parsing, payload cwd precedence, and contracts."""
+    with GitRepository(linked=0, policy_text=POLICY_V8) as repository:
+        adopt_canonical(repository)
+        leased_wt, _ = acquire_one(repository, task="agy-mine", authority="agy-mine")
+        other_wt, _ = acquire_one(repository, task="agy-other", authority="agy-other")
+        config_dir = tmp_path / "gemini-config"
+        config_dir.mkdir()
+        fake_home, log_file = _make_fake_wc_home(
+            tmp_path, ROOT, allow_paths={str(leased_wt.resolve())}
+        )
+
+        # 1. Legitimate operations (payload cwd != process cwd) -> exit 0, {"decision": "allow"}.
+        for tool_name, args, payload_cwd in (
+            ("run_command", {"CommandLine": "git status --short"}, repository.repo),
+            ("write_file", {"Path": str(leased_wt / "README.md"), "Content": "ok"}, leased_wt),
+            ("edit_file", {"Path": "README.md"}, leased_wt),
+            ("write_to_file", {"TargetFile": str(leased_wt / "README.md")}, leased_wt),
+            ("replace_file_content", {"TargetFile": str(leased_wt / "README.md")}, leased_wt),
+            ("multi_replace_file_content", {"TargetFile": str(leased_wt / "README.md")}, leased_wt),
+            ("delete_file", {"AbsolutePath": str(leased_wt / "README.md")}, leased_wt),
+            ("edit_notebook", {"TargetNotebook": str(leased_wt / "nb.ipynb")}, leased_wt),
+            (
+                "apply_patch",
+                {"input": "*** Begin Patch\n*** Update File: README.md\n*** End Patch"},
+                leased_wt,
+            ),
+            ("run_command", {"CommandLine": "pytest -q"}, leased_wt),
+            ("send_command_input", {"Input": "y\n"}, leased_wt),
+        ):
+            res = _invoke_hook(
+                tmp_path,
+                entry_name="agy-worktree-hook",
+                event="PreToolUse",
+                payload={
+                    "hookEventName": "PreToolUse",
+                    "cwd": str(payload_cwd),
+                    "conversationId": "agy-conv-1",
+                    "toolCall": {"id": "tc-1", "name": tool_name, "args": args},
+                },
+                fake_home=fake_home,
+                proc_cwd=config_dir,
+            )
+            assert res.returncode == 0, f"agy {tool_name} failed: {res.stderr}"
+            assert json.loads(res.stdout) == {"decision": "allow"}, f"agy {tool_name}: {res.stdout}"
+
+        # 2. Protected canonical violations -> exit 0, {"decision": "deny", "reason": ...}.
+        for tool_name, args, payload_cwd in (
+            ("write_file", {"Path": str(repository.repo / "README.md")}, config_dir),
+            ("edit_file", {"Path": "README.md"}, repository.repo),
+            ("delete_file", {"Path": str(repository.repo / "README.md")}, leased_wt),
+            ("run_command", {"CommandLine": "echo x > README.md"}, repository.repo),
+            ("run_command", {"CommandLine": "touch x", "Cwd": str(repository.repo)}, config_dir),
+            ("send_command_input", {"Input": "rm -rf .\n"}, repository.repo),
+            (
+                "apply_patch",
+                {"patch": f"*** Begin Patch\n*** Update File: {repository.repo}/README.md\n*** End Patch"},
+                leased_wt,
+            ),
+        ):
+            res = _invoke_hook(
+                tmp_path,
+                entry_name="agy-worktree-hook",
+                event="PreToolUse",
+                payload={
+                    "hookEventName": "PreToolUse",
+                    "cwd": str(payload_cwd),
+                    "conversationId": "agy-conv-1",
+                    "toolCall": {"id": "tc-2", "name": tool_name, "args": args},
+                },
+                fake_home=fake_home,
+                proc_cwd=config_dir,
+            )
+            assert res.returncode == 0
+            out = json.loads(res.stdout)
+            assert out["decision"] == "deny", f"agy failed to deny canonical {tool_name}: {out}"
+            assert "canonical" in out["reason"].lower()
+
+        # 3. Unleased foreign linked worktree -> exit 0, {"decision": "deny", "reason": ...}.
+        for tool_name, args, payload_cwd in (
+            ("edit_file", {"Path": str(other_wt / "README.md")}, leased_wt),
+            ("run_command", {"CommandLine": "pytest -q"}, other_wt),
+            ("send_command_input", {"Input": "echo hi\n"}, other_wt),
+        ):
+            log_file.unlink(missing_ok=True)
+            res = _invoke_hook(
+                tmp_path,
+                entry_name="agy-worktree-hook",
+                event="PreToolUse",
+                payload={
+                    "hookEventName": "PreToolUse",
+                    "cwd": str(payload_cwd),
+                    "conversationId": "agy-conv-1",
+                    "toolCall": {"id": "tc-3", "name": tool_name, "args": args},
+                },
+                fake_home=fake_home,
+                proc_cwd=config_dir,
+            )
+            assert res.returncode == 0
+            out = json.loads(res.stdout)
+            assert out["decision"] == "deny"
+            assert _read_calls(log_file)[0]["args"][:4] == [
+                "writer-session",
+                "check",
+                "agy",
+                str(other_wt.resolve()),
+            ]
+
+        # 4. Malformed stdin JSON fails closed with {"decision": "deny"}.
+        res_bad = _invoke_hook(
+            tmp_path,
+            entry_name="agy-worktree-hook",
+            event="PreToolUse",
+            payload="{not-json",
+            fake_home=fake_home,
+            proc_cwd=config_dir,
+        )
+        assert res_bad.returncode == 0
+        assert json.loads(res_bad.stdout)["decision"] == "deny"
+
+        # 5. Stop: continue ONLY when NO_TOOL_CALL and continuationActive != true and pending lease exists.
+        pending_home, _ = _make_fake_wc_home(
+            tmp_path / "agy-pending",
+            ROOT,
+            allow_paths={str(leased_wt.resolve())},
+            pending_closeout=True,
+        )
+        res_stop_continue = _invoke_hook(
+            tmp_path,
+            entry_name="agy-worktree-hook",
+            event="Stop",
+            payload={
+                "hookEventName": "Stop",
+                "cwd": str(leased_wt),
+                "conversationId": "agy-conv-1",
+                "terminationReason": "NO_TOOL_CALL",
+                "continuationActive": False,
+            },
+            fake_home=pending_home,
+            proc_cwd=config_dir,
+        )
+        assert res_stop_continue.returncode == 0
+        stop_out = json.loads(res_stop_continue.stdout)
+        assert stop_out["decision"] == "continue" and "reason" in stop_out
+
+        # Already continued -> {}.
+        res_stop_loop_guard = _invoke_hook(
+            tmp_path,
+            entry_name="agy-worktree-hook",
+            event="Stop",
+            payload={
+                "hookEventName": "Stop",
+                "cwd": str(leased_wt),
+                "conversationId": "agy-conv-1",
+                "terminationReason": "NO_TOOL_CALL",
+                "continuationActive": True,
+            },
+            fake_home=pending_home,
+            proc_cwd=config_dir,
+        )
+        assert res_stop_loop_guard.returncode == 0
+        assert json.loads(res_stop_loop_guard.stdout) == {}
+
+        # Non-NO_TOOL_CALL termination (e.g. USER_CANCELED / ERROR) -> {}.
+        for term in ("USER_CANCELED", "ERROR", "MAX_INVOCATIONS"):
+            res_term = _invoke_hook(
+                tmp_path,
+                entry_name="agy-worktree-hook",
+                event="Stop",
+                payload={
+                    "hookEventName": "Stop",
+                    "cwd": str(leased_wt),
+                    "conversationId": "agy-conv-1",
+                    "terminationReason": term,
+                    "continuationActive": False,
+                },
+                fake_home=pending_home,
+                proc_cwd=config_dir,
+            )
+            assert res_term.returncode == 0
+            assert json.loads(res_term.stdout) == {}
+
+        # Clean session (no pending lease) or outside governance -> {}.
+        for stop_cwd in (leased_wt, config_dir):
+            res_clean = _invoke_hook(
+                tmp_path,
+                entry_name="agy-worktree-hook",
+                event="Stop",
+                payload={
+                    "hookEventName": "Stop",
+                    "cwd": str(stop_cwd),
+                    "conversationId": "agy-conv-1",
+                    "terminationReason": "NO_TOOL_CALL",
+                    "continuationActive": False,
+                },
+                fake_home=fake_home,
+                proc_cwd=config_dir,
+            )
+            assert res_clean.returncode == 0
+            assert json.loads(res_clean.stdout) == {}
+
+        # Abnormal controller failure during non-hosted Stop returns {} without trapping exit.
+        broken_agy_home = tmp_path / "broken-agy-home"
+        broken_agy_home.mkdir()
+        res_broken_stop = _invoke_hook(
+            tmp_path,
+            entry_name="agy-worktree-hook",
+            event="Stop",
+            payload={
+                "hookEventName": "Stop",
+                "cwd": str(leased_wt),
+                "conversationId": "agy-conv-1",
+                "terminationReason": "NO_TOOL_CALL",
+                "continuationActive": False,
+            },
+            fake_home=broken_agy_home,
+            proc_cwd=config_dir,
+        )
+        assert res_broken_stop.returncode == 0
+        assert json.loads(res_broken_stop.stdout) == {}

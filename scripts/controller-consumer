@@ -90,6 +90,44 @@ _GROK_EVENT_MAP = {
     "stop": "Stop",
 }
 
+# Codex and Antigravity (AGY) thin protocol mappings; governance stays in Controller.
+CODEX_SHELL_TOOLS = frozenset({"Bash", "exec_command"})
+CODEX_WRITE_TOOLS = frozenset({*WRITE_TARGETS, "apply_patch"})
+AGY_WRITE_TOOLS = frozenset({
+    "write_file",
+    "edit_file",
+    "write_to_file",
+    "replace_file_content",
+    "multi_replace_file_content",
+    "delete_file",
+    "edit_notebook",
+    "apply_patch",
+})
+AGY_SHELL_TOOLS = frozenset({"run_command", "send_command_input"})
+AGY_READ_TOOLS = frozenset({
+    "read_file",
+    "view_file",
+    "view_file_outline",
+    "view_code_item",
+    "find_by_name",
+    "grep_search",
+    "list_dir",
+    "read_terminal",
+    "command_status",
+    "search_web",
+    "read_url_content",
+    "read_board",
+    "swarm_wait",
+    "ask_question",
+    "update_steps",
+})
+_AGY_PATH_KEYS = ("Path", "AbsolutePath", "TargetFile", "file_path", "path")
+_AGY_NOTEBOOK_KEYS = ("Path", "TargetNotebook", "notebook_path", "file_path")
+_PATCH_TARGET_RE = re.compile(
+    r"^\*\*\*\s+(?:Update File|Add File|Delete File|Move to):\s*(.+?)\s*$",
+    re.MULTILINE,
+)
+
 _GITDIR_LIMIT = 4096
 
 # Strictly provably read-only commands (only admitted when the entire command is
@@ -117,7 +155,6 @@ _GOVERNANCE_CLIS = frozenset({
     "snapshot-runner",
     "tool-skill-sync",
     "tool-temp-dir",
-    "qp-nexus",
 })
 _SAFE_REDIR_RE = re.compile(r"^(?:(?:1|2)?>/dev/null|2>&1|1>&2)(?=$|[\s;|&])")
 _SED_SAFE_SCRIPT_RE = re.compile(r"^[0-9,$;p\s]+$")
@@ -607,16 +644,58 @@ def collect_bash_governed_targets(command, cwd):
     return canonical_roots, linked_roots, uncertain
 
 
+def _client_tools(client_id="claude"):
+    if client_id == "grok":
+        return GROK_WRITE_TOOLS, GROK_SHELL_TOOLS, GROK_READ_TOOLS
+    if client_id == "codex":
+        return CODEX_WRITE_TOOLS, CODEX_SHELL_TOOLS, READ_TOOLS
+    if client_id == "agy":
+        return AGY_WRITE_TOOLS, AGY_SHELL_TOOLS, AGY_READ_TOOLS
+    return WRITE_TARGETS, frozenset({"Bash"}), READ_TOOLS
+
+
 def _tool_name(payload, client_id="claude"):
+    if client_id == "agy":
+        call = payload.get("toolCall")
+        return call.get("name") if isinstance(call, dict) else None
     if client_id == "grok":
         return payload.get("toolName", payload.get("tool_name"))
     return payload.get("tool_name")
 
 
 def _tool_input(payload, client_id="claude"):
+    if client_id == "agy":
+        call = payload.get("toolCall")
+        return call.get("args") if isinstance(call, dict) else None
     if client_id == "grok":
         return payload.get("toolInput", payload.get("tool_input"))
     return payload.get("tool_input")
+
+
+def _extract_patch_targets(details):
+    patch_text = None
+    if isinstance(details, str):
+        patch_text = details
+    elif isinstance(details, dict):
+        for key in ("input", "patch", "patchText", "content"):
+            val = details.get(key)
+            if isinstance(val, str) and val.strip():
+                patch_text = val
+                break
+        if patch_text is None:
+            for key in _AGY_PATH_KEYS:
+                val = details.get(key)
+                if isinstance(val, str) and val.strip():
+                    return [val.strip()]
+    targets = []
+    if isinstance(patch_text, str):
+        for raw in _PATCH_TARGET_RE.findall(patch_text):
+            cleaned = raw.strip()
+            if cleaned and cleaned not in targets:
+                targets.append(cleaned)
+    if not targets:
+        raise ValueError("apply_patch target is missing")
+    return targets
 
 
 def _extract_write_target(tool, payload, client_id="claude"):
@@ -635,10 +714,54 @@ def _extract_write_target(tool, payload, client_id="claude"):
         ):
             raise ValueError("write tool target is missing or ambiguous")
         return targets[0]
+    if client_id == "agy":
+        keys = _AGY_NOTEBOOK_KEYS if tool == "edit_notebook" else _AGY_PATH_KEYS
+        targets = [details[key] for key in keys if isinstance(details, dict) and key in details]
+        if (
+            not targets
+            or any(not isinstance(p, str) or not p.strip() for p in targets)
+            or len(set(targets)) != 1
+        ):
+            raise ValueError("write tool target is missing or ambiguous")
+        return targets[0]
     target = details.get(WRITE_TARGETS[tool]) if isinstance(details, dict) else None
     if not isinstance(target, str) or not target:
         raise ValueError("write tool target is missing")
     return target
+
+
+def _extract_write_targets(tool, payload, client_id="claude"):
+    if tool == "apply_patch":
+        return _extract_patch_targets(_tool_input(payload, client_id))
+    return [_extract_write_target(tool, payload, client_id)]
+
+
+def _extract_shell_command(tool, details, client_id="claude"):
+    if not isinstance(details, dict):
+        return None
+    if client_id == "agy":
+        if tool == "send_command_input":
+            return None
+        return details.get("CommandLine") or details.get("command")
+    if client_id == "codex":
+        return details.get("command") or details.get("cmd")
+    return details.get("command")
+
+
+def _effective_shell_cwd(details, path, client_id="claude"):
+    if client_id == "agy" and isinstance(details, dict):
+        override = details.get("Cwd") or details.get("cwd")
+        if isinstance(override, str) and override.strip():
+            return override
+    return path
+
+
+def _finish_pretool_allow(client_id):
+    if client_id == "agy":
+        print(json.dumps({"decision": "allow"}))
+    elif client_id == "codex":
+        print("{}")
+    return 0
 
 
 def access_arguments(event, payload, client_id="claude"):
@@ -646,13 +769,12 @@ def access_arguments(event, payload, client_id="claude"):
     if event != "PreToolUse":
         return ["--access", "read"]
     tool = _tool_name(payload, client_id)
-    write_tools = GROK_WRITE_TOOLS if client_id == "grok" else WRITE_TARGETS
-    read_tools = GROK_READ_TOOLS if client_id == "grok" else READ_TOOLS
-    if client_id == "grok" and (not isinstance(tool, str) or not tool):
+    write_tools, _shell_tools, read_tools = _client_tools(client_id)
+    if client_id in {"grok", "agy"} and (not isinstance(tool, str) or not tool):
         raise ValueError("tool identity is missing")
     if tool in write_tools:
-        target = _extract_write_target(tool, payload, client_id)
-        if client_id == "grok":
+        target = _extract_write_targets(tool, payload, client_id)[0]
+        if client_id in {"grok", "agy", "codex"}:
             p = Path(os.path.expanduser(target))
             if not p.is_absolute():
                 p = Path(payload["cwd"]) / p
@@ -668,11 +790,12 @@ def change_directory_target(payload, cwd, client_id="claude"):
     destination. Checking that destination lets a session leave a checkout it
     does not hold instead of being locked out of every tool.
     """
-    shell_tools = GROK_SHELL_TOOLS if client_id == "grok" else frozenset({"Bash"})
+    _write_tools, shell_tools, _read_tools = _client_tools(client_id)
+    tool = _tool_name(payload, client_id)
     details = _tool_input(payload, client_id)
     command = (
-        details.get("command")
-        if _tool_name(payload, client_id) in shell_tools and isinstance(details, dict)
+        _extract_shell_command(tool, details, client_id)
+        if tool in shell_tools and isinstance(details, dict)
         else None
     )
     if not isinstance(command, str) or any(
@@ -685,7 +808,8 @@ def change_directory_target(payload, cwd, client_id="claude"):
         return None
     if len(words) != 2 or words[0] != "cd":
         return None
-    return str(Path(cwd, os.path.expanduser(words[1])))
+    base_cwd = _effective_shell_cwd(details, cwd, client_id)
+    return str(Path(base_cwd, os.path.expanduser(words[1])))
 
 
 def _format_refusal(stdout):
@@ -718,10 +842,13 @@ def _run_writer_session(arguments):
 def _resolve_hook_event(payload, expected, client_id):
     if not isinstance(payload, dict):
         raise ValueError("hook event identity is missing or mismatched")
-    event_name = payload.get("hook_event_name")
-    if client_id == "grok" and event_name not in {"SessionStart", "PreToolUse", "Stop", "SessionEnd"}:
-        camel = payload.get("hookEventName", "")
-        event_name = _GROK_EVENT_MAP.get(camel)
+    if client_id == "agy":
+        event_name = payload.get("hookEventName")
+    else:
+        event_name = payload.get("hook_event_name")
+        if client_id == "grok" and event_name not in {"SessionStart", "PreToolUse", "Stop", "SessionEnd"}:
+            camel = payload.get("hookEventName", "")
+            event_name = _GROK_EVENT_MAP.get(camel)
     if event_name != expected:
         raise ValueError("hook event identity is missing or mismatched")
 
@@ -732,87 +859,111 @@ def hook(event, client_id="claude"):
     payload = json.load(sys.stdin)
     _resolve_hook_event(payload, event, client_id)
     path = payload.get("cwd")
-    session = (
-        payload.get("sessionId") or payload.get("session_id")
-        if client_id == "grok"
-        else payload.get("session_id")
-    )
+    if client_id == "agy":
+        session = payload.get("conversationId")
+    elif client_id == "grok":
+        session = payload.get("sessionId") or payload.get("session_id")
+    else:
+        session = payload.get("session_id")
     if not isinstance(path, str) or not path or not isinstance(session, str) or not session:
         raise ValueError("hook path/session identity is missing")
     holder_selector = f"ancestor:{client_id}"
     hosted = "CONTROLLER_WRITER_MODE" in os.environ or "CONTROLLER_WRITER_CONTEXT" in os.environ
     if event == "Stop" and not hosted:
+        if client_id == "agy" and (
+            payload.get("terminationReason") != "NO_TOOL_CALL"
+            or payload.get("continuationActive") is True
+            or inspect_governed_root(path)[0] == "outside"
+        ):
+            print("{}")
+            return 0
         return end_session(
             path,
             session,
             client_id=client_id,
             checking=True,
-            already_continued=payload.get("stop_hook_active") is True,
+            already_continued=(
+                payload.get("continuationActive") is True
+                if client_id == "agy"
+                else payload.get("stop_hook_active") is True
+            ),
         )
     if event == "SessionEnd" and not hosted:
         return end_session(path, session, client_id=client_id)
 
     if event == "PreToolUse":
         tool = _tool_name(payload, client_id)
-        write_tools = GROK_WRITE_TOOLS if client_id == "grok" else WRITE_TARGETS
-        shell_tools = GROK_SHELL_TOOLS if client_id == "grok" else frozenset({"Bash"})
-        read_tools = GROK_READ_TOOLS if client_id == "grok" else READ_TOOLS
+        write_tools, shell_tools, read_tools = _client_tools(client_id)
 
-        if client_id == "grok" and (not isinstance(tool, str) or not tool):
+        if client_id in {"grok", "agy"} and (not isinstance(tool, str) or not tool):
             raise ValueError("tool identity is missing")
 
         if tool in read_tools and not hosted:
-            return 0
+            return _finish_pretool_allow(client_id)
 
         if tool in write_tools:
-            raw_target = _extract_write_target(tool, payload, client_id)
-            target_path = Path(os.path.expanduser(raw_target))
-            if not target_path.is_absolute():
-                target_path = Path(path) / target_path
-            kind, target_root, protected = inspect_governed_root(target_path)
-            if kind == "canonical" and protected:
-                raise ValueError(
-                    f"Controller canonical guard refused: direct {tool} into protected canonical "
-                    f"checkout '{target_root}' is forbidden; acquire a linked worktree via "
-                    f"`worktree-controller acquire`."
-                )
+            raw_targets = _extract_write_targets(tool, payload, client_id)
+            classified = []
+            for raw_target in raw_targets:
+                target_path = Path(os.path.expanduser(raw_target))
+                if not target_path.is_absolute():
+                    target_path = Path(path) / target_path
+                kind, target_root, protected = inspect_governed_root(target_path)
+                if kind == "canonical" and protected:
+                    raise ValueError(
+                        f"Controller canonical guard refused: direct {tool} into protected canonical "
+                        f"checkout '{target_root}' is forbidden; acquire a linked worktree via "
+                        f"`worktree-controller acquire`."
+                    )
+                classified.append((raw_target, target_path, kind, target_root))
             if hosted:
-                _run_writer_session(
-                    ["host-check", path, *access_arguments(event, payload, client_id)]
-                )
-                return 0
-            if kind == "linked":
-                resolved_target = str(target_path.resolve(strict=False))
-                _run_writer_session([
-                    "check",
-                    client_id,
-                    str(target_root),
-                    holder_selector,
-                    "--session-id",
-                    session,
-                    "--access",
-                    "write",
-                    "--target",
-                    resolved_target,
-                ])
-                return 0
-            if kind == "outside":
-                return 0
-            # Fail closed on uncertain paths or unprotected canonical: defer to Controller.
-            _run_writer_session([
-                "check",
-                client_id,
-                path,
-                holder_selector,
-                "--session-id",
-                session,
-                *access_arguments(event, payload, client_id),
-            ])
-            return 0
+                for raw_target, target_path, _kind, _target_root in classified:
+                    target_arg = (
+                        str(target_path)
+                        if client_id in {"grok", "agy", "codex"} or tool == "apply_patch"
+                        else raw_target
+                    )
+                    _run_writer_session(["host-check", path, "--access", "write", "--target", target_arg])
+                return _finish_pretool_allow(client_id)
+            for raw_target, target_path, kind, target_root in classified:
+                if kind == "linked":
+                    resolved_target = str(target_path.resolve(strict=False))
+                    _run_writer_session([
+                        "check",
+                        client_id,
+                        str(target_root),
+                        holder_selector,
+                        "--session-id",
+                        session,
+                        "--access",
+                        "write",
+                        "--target",
+                        resolved_target,
+                    ])
+                elif kind != "outside":
+                    target_arg = (
+                        str(target_path)
+                        if client_id in {"grok", "agy", "codex"} or tool == "apply_patch"
+                        else raw_target
+                    )
+                    _run_writer_session([
+                        "check",
+                        client_id,
+                        path,
+                        holder_selector,
+                        "--session-id",
+                        session,
+                        "--access",
+                        "write",
+                        "--target",
+                        target_arg,
+                    ])
+            return _finish_pretool_allow(client_id)
 
         if tool in shell_tools:
             details = _tool_input(payload, client_id)
-            command = details.get("command") if isinstance(details, dict) else None
+            command = _extract_shell_command(tool, details, client_id)
+            shell_cwd = _effective_shell_cwd(details, path, client_id)
             if not hosted:
                 destination = change_directory_target(payload, path, client_id)
                 if destination is not None:
@@ -826,11 +977,11 @@ def hook(event, client_id="claude"):
                         "--access",
                         "read",
                     ])
-                    return 0
-                if isinstance(command, str) and is_strict_readonly_bash(command, path):
-                    return 0
+                    return _finish_pretool_allow(client_id)
+                if isinstance(command, str) and is_strict_readonly_bash(command, shell_cwd):
+                    return _finish_pretool_allow(client_id)
                 canonical_roots, linked_roots, uncertain = collect_bash_governed_targets(
-                    command or "", path
+                    command or "", shell_cwd
                 )
                 if canonical_roots:
                     raise ValueError(
@@ -850,24 +1001,24 @@ def hook(event, client_id="claude"):
                             "--access",
                             "exec",
                         ])
-                    return 0
+                    return _finish_pretool_allow(client_id)
                 if uncertain:
                     _run_writer_session([
                         "check",
                         client_id,
-                        path,
+                        shell_cwd,
                         holder_selector,
                         "--session-id",
                         session,
                         "--access",
                         "exec",
                     ])
-                    return 0
-                return 0
+                    return _finish_pretool_allow(client_id)
+                return _finish_pretool_allow(client_id)
             # Hosted shell call: enforce canonical protection and host-check (plus any foreign linked worktree).
-            if isinstance(command, str) and not is_strict_readonly_bash(command, path):
+            if not (isinstance(command, str) and is_strict_readonly_bash(command, shell_cwd)):
                 canonical_roots, linked_roots, _uncertain = collect_bash_governed_targets(
-                    command, path
+                    command or "", shell_cwd
                 )
                 if canonical_roots:
                     raise ValueError(
@@ -880,7 +1031,7 @@ def hook(event, client_id="claude"):
                 for linked_root in linked_roots:
                     if cwd_kind != "linked" or linked_root != cwd_root:
                         _run_writer_session(["host-check", str(linked_root), "--access", "exec"])
-                return 0
+                return _finish_pretool_allow(client_id)
 
     if hosted:
         arguments = ["host-check", path, *access_arguments(event, payload, client_id)]
@@ -903,14 +1054,28 @@ def hook(event, client_id="claude"):
         ]
     _run_writer_session(arguments)
     if event == "Stop" and hosted:
+        if client_id == "agy" and (
+            payload.get("terminationReason") != "NO_TOOL_CALL"
+            or payload.get("continuationActive") is True
+        ):
+            print("{}")
+            return 0
         return end_session(
             path,
             session,
             client_id=client_id,
             checking=True,
             hosted=True,
-            already_continued=payload.get("stop_hook_active") is True,
+            already_continued=(
+                payload.get("continuationActive") is True
+                if client_id == "agy"
+                else payload.get("stop_hook_active") is True
+            ),
         )
+    if event == "PreToolUse":
+        return _finish_pretool_allow(client_id)
+    if event == "SessionStart" and client_id in {"agy", "codex"}:
+        print("{}")
     return 0
 
 
@@ -966,6 +1131,8 @@ def end_session(
             if described.returncode or not isinstance(projection, dict):
                 raise ValueError("Controller session projection is unavailable")
             if projection.get("code") == "OUTSIDE_CONTROLLER_GOVERNANCE":
+                if checking and client_id in {"codex", "agy"}:
+                    print("{}")
                 return 0
             if projection.get("code") != "WRITER_SESSION_DESCRIBED":
                 raise ValueError("Controller session projection is invalid")
@@ -1050,13 +1217,22 @@ def end_session(
             )
             # Stop is a turn boundary, not process exit. Give one preparation
             # turn without trapping user questions or an unresolved dependency.
-            print(
-                json.dumps(
-                    {"systemMessage": "Closeout remains pending. " + reason}
-                    if already_continued
-                    else {"decision": "block", "reason": reason}
+            if client_id == "agy":
+                print(
+                    json.dumps(
+                        {} if already_continued else {"decision": "continue", "reason": reason}
+                    )
                 )
-            )
+            else:
+                print(
+                    json.dumps(
+                        {"systemMessage": "Closeout remains pending. " + reason}
+                        if already_continued
+                        else {"decision": "block", "reason": reason}
+                    )
+                )
+        elif checking and client_id in {"codex", "agy"}:
+            print("{}")
         elif not checking:
             # SessionEnd is advisory; the caller gets the actual per-tree result.
             print(json.dumps(payload, sort_keys=True), file=sys.stderr)
@@ -1066,13 +1242,22 @@ def end_session(
                 "Controller could not verify task preservation; keep the checkout and retry "
                 "the session check."
             )
-            print(
-                json.dumps(
-                    {"systemMessage": reason}
-                    if already_continued
-                    else {"decision": "block", "reason": reason}
+            if client_id == "agy":
+                print(
+                    json.dumps(
+                        {"decision": "continue", "reason": reason}
+                        if hosted and not already_continued
+                        else {}
+                    )
                 )
-            )
+            else:
+                print(
+                    json.dumps(
+                        {"systemMessage": reason}
+                        if already_continued
+                        else {"decision": "block", "reason": reason}
+                    )
+                )
         else:
             print(
                 "Controller session closeout is unverified; preserve the task and retry with "
@@ -1089,6 +1274,22 @@ def main(argv):
         return hook(argv[1] if len(argv) == 2 else "", client_id="claude")
     if name == "grok-worktree-hook":
         return hook(argv[1] if len(argv) == 2 else "", client_id="grok")
+    if name == "codex-worktree-hook":
+        return hook(argv[1] if len(argv) == 2 else "", client_id="codex")
+    if name == "agy-worktree-hook":
+        event = argv[1] if len(argv) == 2 else ""
+        try:
+            return hook(event, client_id="agy")
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+            if event == "Stop":
+                print("{}")
+            else:
+                print(
+                    json.dumps(
+                        {"decision": "deny", "reason": f"Controller consumer blocked: {exc}"}
+                    )
+                )
+            return 0
     if name == "claude-worktree":
         arguments = [
             str(local / "worktree-session"),
