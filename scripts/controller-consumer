@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Worktree Controller consumer adapter; governance stays in Controller."""
 
+import grp
 import json
 import os
+import pwd
 import re
 import shlex
+import shutil
+import stat
 import subprocess
 import sys
 import tomllib
@@ -161,6 +165,81 @@ _SED_SAFE_SCRIPT_RE = re.compile(r"^[0-9,$;p\s]+$")
 _VAR_ASSIGN_TOKEN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=(.*)$")
 _VAR_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
 _ABS_OR_HOME_PATH_RE = re.compile(r"(?:(?<![A-Za-z0-9_.-])(?:/[^\s'\"`<>|;&(),{}]+|~/[^\s'\"`<>|;&(),{}]+))")
+
+# Strictly closed allowlist for structured host-mediated research job commands.
+# Policy administration and low-level workspace mutation commands are excluded.
+_RESEARCH_JOB_FORBIDDEN_CHARS = frozenset(";&|<>`$(){}\n\r\x00*?[]\\#")
+_RESEARCH_JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_RESEARCH_JOB_IDEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_RESEARCH_JOB_B64_RE = re.compile(r"^[A-Za-z0-9+/=_-]{4,65536}$")
+_RESEARCH_JOB_STATE_RE = re.compile(r"^[A-Z0-9_]{1,40}$")
+_RESEARCH_JOB_POSINT_RE = re.compile(r"^[1-9][0-9]{0,3}$")
+_RESEARCH_JOB_REASON_RE = re.compile(r"^[A-Za-z0-9._:/ -]{1,120}$")
+_RESEARCH_JOB_ACTIONS = {
+    "submit": {
+        "value_flags": {
+            "--request-file": "request_file",
+            "--request-b64": "b64",
+            "--policy-id": "id",
+            "--task-id": "id",
+            "--idempotency-key": "idem",
+            "--max-segments": "posint",
+        },
+        "bool_flags": frozenset({"--run", "--json", "--wait", "--no-deliver"}),
+        "required_flags": frozenset(),
+        "xor_flags": ("--request-file", "--request-b64"),
+    },
+    "status": {
+        "value_flags": {"--job-id": "id"},
+        "bool_flags": frozenset({"--json", "--verbose"}),
+        "required_flags": frozenset({"--job-id"}),
+        "xor_flags": None,
+    },
+    "run": {
+        "value_flags": {"--job-id": "id", "--max-segments": "posint"},
+        "bool_flags": frozenset({"--json", "--wait", "--no-deliver"}),
+        "required_flags": frozenset({"--job-id"}),
+        "xor_flags": None,
+    },
+    "recover": {
+        "value_flags": {"--job-id": "id", "--max-segments": "posint"},
+        "bool_flags": frozenset({"--json", "--resume", "--deliver"}),
+        "required_flags": frozenset({"--job-id"}),
+        "xor_flags": None,
+    },
+    "cancel": {
+        "value_flags": {"--job-id": "id", "--reason": "reason"},
+        "bool_flags": frozenset({"--json"}),
+        "required_flags": frozenset({"--job-id"}),
+        "xor_flags": None,
+    },
+    "result": {
+        "value_flags": {"--job-id": "id"},
+        "bool_flags": frozenset({"--json"}),
+        "required_flags": frozenset({"--job-id"}),
+        "xor_flags": None,
+    },
+    "list": {
+        "value_flags": {
+            "--task-id": "id",
+            "--policy-id": "id",
+            "--state": "state",
+            "--limit": "posint",
+        },
+        "bool_flags": frozenset({"--json"}),
+        "required_flags": frozenset(),
+        "xor_flags": None,
+    },
+}
+_SENSITIVE_REQUEST_BASENAMES = frozenset({
+    "rclone.conf",
+    "credentials.json",
+    "token.json",
+    "id_rsa",
+    "id_ed25519",
+    ".authority.key",
+    "authority.key",
+})
 
 
 def _present(path):
@@ -542,6 +621,211 @@ def is_strict_readonly_bash(command, cwd):
         if words and words[0] == "cd" and len(words) >= 2 and words[1] != "-":
             dest = Path(os.path.expanduser(words[1]))
             cur_cwd = (dest if dest.is_absolute() else cur_cwd / dest).resolve(strict=False)
+    return True
+
+
+def _path_within(child, root):
+    try:
+        child.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_safe_owner_and_mode(st):
+    uid = os.getuid()
+    gid = os.getgid()
+    if st.st_uid not in (uid, 0):
+        return False
+    if (st.st_mode & 0o002) != 0:
+        return False
+    if (st.st_mode & 0o020) != 0:
+        if st.st_uid != uid or st.st_gid != gid:
+            return False
+        try:
+            user_name = pwd.getpwuid(uid).pw_name
+            group_members = set(grp.getgrgid(gid).gr_mem)
+        except KeyError:
+            return False
+        if not group_members.issubset({user_name}):
+            return False
+    return True
+
+
+def _is_trusted_research_workspace_exe(token):
+    """Verify ``token`` resolves to the user's trusted installed ``research-workspace`` CLI."""
+    if not token or "=" in token:
+        return False
+    home = Path.home().resolve(strict=False)
+    allowed_link_dirs = (home / "bin", home / ".local" / "bin")
+    allowed_target_dirs = (
+        home / "bin",
+        home / ".local" / "bin",
+        home / ".local" / "share" / "uv" / "tools",
+    )
+    if token == "research-workspace":
+        located = shutil.which("research-workspace")
+        if not located:
+            return False
+        candidate = Path(located)
+    else:
+        if not (token.startswith("/") or token.startswith("~/")):
+            return False
+        candidate = Path(os.path.expanduser(token))
+        if candidate.name != "research-workspace":
+            return False
+    try:
+        lexical_parent = candidate.parent.resolve(strict=True)
+    except OSError:
+        return False
+    if not any(_path_within(lexical_parent, d.resolve(strict=False)) for d in allowed_link_dirs):
+        return False
+    try:
+        resolved = candidate.resolve(strict=True)
+        st = resolved.stat()
+    except OSError:
+        return False
+    if not any(_path_within(resolved, d.resolve(strict=False)) for d in allowed_target_dirs):
+        return False
+    if not stat.S_ISREG(st.st_mode) or not os.access(resolved, os.X_OK):
+        return False
+    if not _is_safe_owner_and_mode(st):
+        return False
+    cur = resolved.parent
+    while True:
+        try:
+            pst = cur.stat()
+        except OSError:
+            return False
+        if not _is_safe_owner_and_mode(pst):
+            return False
+        if cur == home or cur == cur.parent:
+            break
+        cur = cur.parent
+    return True
+
+
+def _is_safe_research_request_file(raw_path):
+    """Allow only non-symlink absolute JSON files outside credential and internal state roots."""
+    if not raw_path or not (raw_path.startswith("/") or raw_path.startswith("~/")):
+        return False
+    expanded = Path(os.path.expanduser(raw_path))
+    if not expanded.is_absolute():
+        return False
+    try:
+        if expanded.is_symlink():
+            return False
+    except OSError:
+        return False
+    lexical = Path(os.path.normpath(str(expanded)))
+    try:
+        resolved = expanded.resolve(strict=False)
+    except OSError:
+        return False
+    home = Path.home().resolve(strict=False)
+    blocked_roots = (
+        home / ".ssh",
+        home / ".gnupg",
+        home / ".aws",
+        home / ".config" / "rclone",
+        home / ".local" / "state" / "agent-toolchain",
+        home / ".kube",
+        home / ".docker",
+        Path("/etc"),
+        Path("/proc"),
+        Path("/sys"),
+        Path("/dev"),
+        Path("/root"),
+    )
+    for candidate in (lexical, resolved):
+        if candidate.suffix != ".json":
+            return False
+        lower_name = candidate.name.lower()
+        if lower_name.startswith(".env") or lower_name in _SENSITIVE_REQUEST_BASENAMES:
+            return False
+        for blocked in blocked_roots:
+            if _path_within(candidate, blocked):
+                return False
+    return True
+
+
+def _validate_research_job_flag_value(kind, value):
+    if kind == "request_file":
+        return _is_safe_research_request_file(value)
+    if kind == "b64":
+        return bool(_RESEARCH_JOB_B64_RE.fullmatch(value))
+    if kind == "id":
+        return bool(_RESEARCH_JOB_ID_RE.fullmatch(value))
+    if kind == "idem":
+        return bool(_RESEARCH_JOB_IDEM_RE.fullmatch(value))
+    if kind == "state":
+        return bool(_RESEARCH_JOB_STATE_RE.fullmatch(value))
+    if kind == "posint":
+        return bool(_RESEARCH_JOB_POSINT_RE.fullmatch(value))
+    if kind == "reason":
+        return bool(_RESEARCH_JOB_REASON_RE.fullmatch(value))
+    return False
+
+
+def is_safe_research_job_call(command):
+    """Return True iff ``command`` is a single structured ``research-workspace job`` call."""
+    if not isinstance(command, str) or not command.strip():
+        return False
+    if any(ch in _RESEARCH_JOB_FORBIDDEN_CHARS for ch in command):
+        return False
+    try:
+        tokens = shlex.split(command, comments=False)
+    except ValueError:
+        return False
+    if len(tokens) < 3:
+        return False
+    if not _is_trusted_research_workspace_exe(tokens[0]):
+        return False
+    if tokens[1] != "job":
+        return False
+    spec = _RESEARCH_JOB_ACTIONS.get(tokens[2])
+    if spec is None:
+        return False
+    value_flags = spec["value_flags"]
+    bool_flags = spec["bool_flags"]
+    seen = set()
+    i = 3
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--" or not tok.startswith("--"):
+            return False
+        if "=" in tok:
+            flag, val = tok.split("=", 1)
+            if flag not in value_flags or flag in seen:
+                return False
+            if not _validate_research_job_flag_value(value_flags[flag], val):
+                return False
+            seen.add(flag)
+            i += 1
+            continue
+        if tok in bool_flags:
+            if tok in seen:
+                return False
+            seen.add(tok)
+            i += 1
+            continue
+        if tok in value_flags:
+            if tok in seen or i + 1 >= len(tokens):
+                return False
+            val = tokens[i + 1]
+            if not _validate_research_job_flag_value(value_flags[tok], val):
+                return False
+            seen.add(tok)
+            i += 2
+            continue
+        return False
+    if not spec["required_flags"].issubset(seen):
+        return False
+    xor_flags = spec["xor_flags"]
+    if xor_flags is not None:
+        present = sum(1 for flag in xor_flags if flag in seen)
+        if present != 1:
+            return False
     return True
 
 
@@ -978,7 +1262,10 @@ def hook(event, client_id="claude"):
                         "read",
                     ])
                     return _finish_pretool_allow(client_id)
-                if isinstance(command, str) and is_strict_readonly_bash(command, shell_cwd):
+                if isinstance(command, str) and (
+                    is_strict_readonly_bash(command, shell_cwd)
+                    or is_safe_research_job_call(command)
+                ):
                     return _finish_pretool_allow(client_id)
                 canonical_roots, linked_roots, uncertain = collect_bash_governed_targets(
                     command or "", shell_cwd
@@ -1016,7 +1303,13 @@ def hook(event, client_id="claude"):
                     return _finish_pretool_allow(client_id)
                 return _finish_pretool_allow(client_id)
             # Hosted shell call: enforce canonical protection and host-check (plus any foreign linked worktree).
-            if not (isinstance(command, str) and is_strict_readonly_bash(command, shell_cwd)):
+            if not (
+                isinstance(command, str)
+                and (
+                    is_strict_readonly_bash(command, shell_cwd)
+                    or is_safe_research_job_call(command)
+                )
+            ):
                 canonical_roots, linked_roots, _uncertain = collect_bash_governed_targets(
                     command or "", shell_cwd
                 )

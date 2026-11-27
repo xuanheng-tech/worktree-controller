@@ -986,3 +986,211 @@ def test_agy_hook_camel_case_pretool_and_stop(tmp_path: Path) -> None:
         )
         assert res_broken_stop.returncode == 0
         assert json.loads(res_broken_stop.stdout) == {}
+
+
+def _install_fake_research_workspace(fake_home: Path, *, mode: int = 0o755) -> Path:
+    rw_bin = fake_home / ".local/bin/research-workspace"
+    rw_bin.parent.mkdir(parents=True, exist_ok=True)
+    rw_bin.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
+    rw_bin.chmod(mode)
+    return rw_bin
+
+
+def _build_shell_hook_payload(client: str, cwd: Path, command: str) -> tuple[str, dict]:
+    if client == "agy":
+        return (
+            "agy-worktree-hook",
+            {
+                "hookEventName": "PreToolUse",
+                "cwd": str(cwd),
+                "conversationId": "agy-conv-job",
+                "toolCall": {"id": "tc-job", "name": "run_command", "args": {"CommandLine": command}},
+            },
+        )
+    if client == "claude":
+        return (
+            "claude-worktree-hook",
+            {
+                "hook_event_name": "PreToolUse",
+                "cwd": str(cwd),
+                "session_id": "s-job",
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+            },
+        )
+    if client == "codex":
+        return (
+            "codex-worktree-hook",
+            {
+                "hook_event_name": "PreToolUse",
+                "cwd": str(cwd),
+                "session_id": "c-job",
+                "tool_name": "exec_command",
+                "tool_input": {"cmd": command},
+            },
+        )
+    return (
+        "grok-worktree-hook",
+        {
+            "hookEventName": "pre_tool_use",
+            "cwd": str(cwd),
+            "sessionId": "g-job",
+            "toolName": "run_terminal_command",
+            "toolInput": {"command": command},
+        },
+    )
+
+
+def _assert_hook_decision(client: str, res: subprocess.CompletedProcess[str], *, allow: bool) -> None:
+    if client == "agy":
+        assert res.returncode == 0, f"agy hook crashed: {res.stderr}"
+        decision = json.loads(res.stdout)["decision"]
+        assert decision == ("allow" if allow else "deny"), f"agy unexpected decision: {res.stdout}"
+    elif allow:
+        assert res.returncode == 0, f"{client} unexpectedly denied: {res.stderr}"
+    else:
+        assert res.returncode == 2, f"{client} unexpectedly allowed: stdout={res.stdout} stderr={res.stderr}"
+        assert "canonical" in res.stderr.lower()
+
+
+@pytest.mark.parametrize("client", ["agy", "claude", "codex", "grok"])
+def test_canonical_research_job_entry_allowlist_and_denials(tmp_path: Path, client: str) -> None:
+    with GitRepository(linked=0, policy_text=POLICY_V8) as repository:
+        adopt_canonical(repository)
+        fake_home, log_file = _make_fake_wc_home(tmp_path, ROOT)
+        rw_bin = _install_fake_research_workspace(fake_home)
+        user_bin_link = fake_home / "bin/research-workspace"
+        user_bin_link.parent.mkdir(parents=True, exist_ok=True)
+        user_bin_link.symlink_to(rw_bin)
+
+        safe_req = tmp_path / "safe_request.json"
+        safe_req.write_text('{"task_id":"u3-2a-r1"}\n', encoding="utf-8")
+        symlink_req = tmp_path / "link_request.json"
+        symlink_req.symlink_to(safe_req)
+
+        extra_env = {"PATH": f"{fake_home / '.local/bin'}:{os.environ.get('PATH', '')}"}
+
+        allowed_commands = [
+            "research-workspace job submit --request-b64 eyJ0YXNrX2lkIjogInUzIn0= --run --json",
+            f"research-workspace job submit --request-file {safe_req} --policy-id u3-policy --task-id u3-2a-r1 --idempotency-key run-1 --max-segments 2 --json",
+            f"{rw_bin} job status --job-id job-20261128-01 --json",
+            "~/bin/research-workspace job run --job-id job-20261128-01 --wait --json",
+            "research-workspace job recover --job-id job-20261128-01 --resume --json",
+            "research-workspace job cancel --job-id job-20261128-01 --reason manual_stop --json",
+            "research-workspace job result --job-id job-20261128-01 --json",
+            "research-workspace job list --state VERIFIED_DELIVERED --limit 20 --json",
+        ]
+        for command in allowed_commands:
+            entry_name, payload = _build_shell_hook_payload(client, repository.repo, command)
+            res = _invoke_hook(
+                tmp_path,
+                entry_name=entry_name,
+                event="PreToolUse",
+                payload=payload,
+                fake_home=fake_home,
+                extra_env=extra_env,
+            )
+            _assert_hook_decision(client, res, allow=True)
+            assert _read_calls(log_file) == []
+
+        fake_evil_bin = tmp_path / "evil/research-workspace"
+        fake_evil_bin.parent.mkdir(parents=True, exist_ok=True)
+        fake_evil_bin.write_text("#!/bin/sh\necho pwn\n", encoding="utf-8")
+        fake_evil_bin.chmod(0o755)
+
+        denied_commands = [
+            # Excluded subcommands (policy admin and direct workspace ops)
+            "research-workspace policy register --policy-file /tmp/p.json",
+            "research-workspace register --task-id t1 --client agy",
+            "research-workspace exec --workspace-id ws1 -- python3 -c 1",
+            "research-workspace deliver --workspace-id ws1 --dest gdrive:foo",
+            # Shell metacharacters / chaining / redirection / substitution / comments
+            "research-workspace job status --job-id j1 && rm tracked.txt",
+            "research-workspace job status --job-id j1; touch pwn",
+            "research-workspace job status --job-id j1 | cat",
+            "research-workspace job status --job-id j1 > out.txt",
+            "research-workspace job status --job-id $(whoami)",
+            "research-workspace job status --job-id `id`",
+            "research-workspace job status --job-id j1 # comment",
+            # Environment override and untrusted binary path
+            "PATH=/tmp research-workspace job status --job-id j1",
+            f"{fake_evil_bin} job status --job-id j1",
+            "./research-workspace job status --job-id j1",
+            # Flag validation, passthrough, missing/duplicate/conflicting flags
+            "research-workspace job submit --json",
+            f"research-workspace job submit --request-file {safe_req} --request-b64 e30=",
+            "research-workspace job status --job-id j1 -- --extra",
+            "research-workspace job status --job-id j1 --unknown x",
+            "research-workspace job status --job-id j1 extra",
+            "research-workspace job status --job-id j1 --job-id j2",
+            "research-workspace job status --json",
+            # Unsafe request file paths
+            f"research-workspace job submit --request-file {symlink_req}",
+            "research-workspace job submit --request-file relative.json",
+            f"research-workspace job submit --request-file {fake_home}/.ssh/req.json",
+            f"research-workspace job submit --request-file {fake_home}/.config/rclone/rclone.conf",
+            f"research-workspace job submit --request-file {fake_home}/.local/state/agent-toolchain/research-jobs/v1/policies/p.json",
+            "research-workspace job submit --request-file /etc/passwd.json",
+            f"research-workspace job submit --request-file {tmp_path}/.env.json",
+            # Non-readonly tools stay blocked in canonical
+            "rclone copy /tmp/a gdrive:b",
+            "python3 /tmp/script.py",
+            "agent-session launch --workspace-id ws1",
+        ]
+        for command in denied_commands:
+            entry_name, payload = _build_shell_hook_payload(client, repository.repo, command)
+            res = _invoke_hook(
+                tmp_path,
+                entry_name=entry_name,
+                event="PreToolUse",
+                payload=payload,
+                fake_home=fake_home,
+                extra_env=extra_env,
+            )
+            _assert_hook_decision(client, res, allow=False)
+
+        # Untrusted PATH shadowing bare `research-workspace` must fail closed.
+        shadow_env = {"PATH": f"{fake_evil_bin.parent}:{fake_home / '.local/bin'}:{os.environ.get('PATH', '')}"}
+        entry_name, payload = _build_shell_hook_payload(
+            client, repository.repo, "research-workspace job status --job-id j1 --json"
+        )
+        res_shadow = _invoke_hook(
+            tmp_path,
+            entry_name=entry_name,
+            event="PreToolUse",
+            payload=payload,
+            fake_home=fake_home,
+            extra_env=shadow_env,
+        )
+        _assert_hook_decision(client, res_shadow, allow=False)
+
+        # Symlink inside ~/bin pointing outside trusted dirs (e.g. /bin/sh) must fail closed.
+        user_bin_link.unlink()
+        user_bin_link.symlink_to("/bin/sh")
+        entry_name, payload = _build_shell_hook_payload(
+            client, repository.repo, "~/bin/research-workspace job status --job-id j1 --json"
+        )
+        res_bad_link = _invoke_hook(
+            tmp_path,
+            entry_name=entry_name,
+            event="PreToolUse",
+            payload=payload,
+            fake_home=fake_home,
+            extra_env=extra_env,
+        )
+        _assert_hook_decision(client, res_bad_link, allow=False)
+
+        # World-writable binary must fail closed.
+        rw_bin.chmod(0o777)
+        entry_name, payload = _build_shell_hook_payload(
+            client, repository.repo, f"{rw_bin} job status --job-id j1 --json"
+        )
+        res_writable = _invoke_hook(
+            tmp_path,
+            entry_name=entry_name,
+            event="PreToolUse",
+            payload=payload,
+            fake_home=fake_home,
+            extra_env=extra_env,
+        )
+        _assert_hook_decision(client, res_writable, allow=False)
