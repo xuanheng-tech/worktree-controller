@@ -1194,3 +1194,504 @@ def test_canonical_research_job_entry_allowlist_and_denials(tmp_path: Path, clie
             extra_env=extra_env,
         )
         _assert_hook_decision(client, res_writable, allow=False)
+
+
+def _install_fake_user_cli(fake_home: Path, rel_dir: str, name: str, *, mode: int = 0o755) -> Path:
+    cli_path = fake_home / rel_dir / name
+    cli_path.parent.mkdir(parents=True, exist_ok=True)
+    cli_path.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
+    cli_path.chmod(mode)
+    return cli_path
+
+
+def _refusal_text(client: str, res: subprocess.CompletedProcess[str]) -> str:
+    if client == "agy":
+        return json.loads(res.stdout)["reason"]
+    return res.stderr
+
+
+@pytest.mark.parametrize("client", ["agy", "claude", "codex", "grok"])
+def test_canonical_compound_readonly_discovery_and_refusal_guidance(
+    tmp_path: Path, client: str
+) -> None:
+    with GitRepository(linked=0, policy_text=POLICY_V8) as repository:
+        adopt_canonical(repository)
+        fake_home, log_file = _make_fake_wc_home(tmp_path, ROOT)
+        rw_bin = _install_fake_research_workspace(fake_home)
+        tss_bin = _install_fake_user_cli(fake_home, ".local/bin", "tool-skill-sync")
+        extra_env = {"PATH": f"{fake_home / '.local/bin'}:{os.environ.get('PATH', '')}"}
+
+        allowed_commands = [
+            # Compound readonly pipelines, chaining, fd dups, /dev/null sinks
+            "git status | head -n 20",
+            "git status; git log -n 5 --oneline",
+            "git status 2>&1 || true",
+            "git status 2>&1 | head -n 20",
+            "git status > /dev/null",
+            "git status 2> /dev/null",
+            "git status 1> /dev/null",
+            "git status > /dev/null 2>&1 || true",
+            "git status &>/dev/null",
+            "git status &> /dev/null",
+            "git status >&2",
+            "git status |& head -n 20",
+            # Expanded strictly readonly git subcommands
+            "git remote",
+            "git remote -v",
+            "git remote get-url origin",
+            "git worktree list",
+            "git worktree list --porcelain",
+            "git stash list",
+            "git submodule status",
+            "git tag -n5",
+            "git config --get-regexp ^remote",
+            # Pure readonly POSIX predicates, printf/uniq/cd safe forms, and safe locale env prefixes
+            "test -f README.md && cat README.md | head -n 5 || true",
+            "[ -f README.md ] && echo ok",
+            "printf '%s\\n' ok",
+            "sort README.md | uniq -c",
+            "echo hi | uniq -",
+            "git grep -o README",
+            "git ls-files -o",
+            "systemctl --user -p ActiveState show foo.service",
+            "systemctl --user status foo.service",
+            "LC_ALL=C git status --short",
+            # Strictly readonly tool-skill-sync commands
+            "tool-skill-sync --version",
+            "tool-skill-sync --help",
+            "tool-skill-sync doctor --summary",
+            "tool-skill-sync doctor --repo . --summary",
+            f"tool-skill-sync doctor --repo {repository.repo} --summary",
+            "tool-skill-sync doctor --repo=. --summary --previous-fingerprint sha256:abc123",
+            "tool-skill-sync doctor --repo . --summary 2>&1 || true",
+            f"{tss_bin} doctor --summary | head -n 20",
+            "tool-skill-sync status",
+            "tool-skill-sync skill-check --strict-clients",
+            "tool-skill-sync check --source-only worktree-controller",
+            # Strictly readonly research-workspace discovery commands
+            "research-workspace --help",
+            "research-workspace -h",
+            "research-workspace --version",
+            f"{rw_bin} job --help",
+            "research-workspace job submit --help",
+            "research-workspace job list -h",
+            "research-workspace --help | head -n 20",
+            "research-workspace --version 2>&1 || true",
+        ]
+        for command in allowed_commands:
+            entry_name, payload = _build_shell_hook_payload(client, repository.repo, command)
+            res = _invoke_hook(
+                tmp_path,
+                entry_name=entry_name,
+                event="PreToolUse",
+                payload=payload,
+                fake_home=fake_home,
+                extra_env=extra_env,
+            )
+            _assert_hook_decision(client, res, allow=True)
+            assert _read_calls(log_file) == []
+
+        denied_commands = [
+            # Redirects, backgrounding, dangling operators, mutating git/rg/tree flags
+            "git status > out.txt",
+            "git status >> /dev/null",
+            "git status &> out.txt",
+            "git status >&3",
+            "git status &",
+            "git status |",
+            "git status && ",
+            "git remote add evil https://example.invalid/repo.git",
+            "git worktree add /tmp/wt",
+            "git stash pop",
+            "git submodule update",
+            "git tag v9.9.9",
+            "git grep -O sh README",
+            "git grep -Osh README",
+            "git grep -iOsh README",
+            "git diff -opwn.txt",
+            "git stash show -Osh",
+            "git ls-remote --upload-pack='touch /tmp/pwn' .",
+            "git ls-remote --exec='touch /tmp/pwn' .",
+            "git ls-remote --upload='touch /tmp/pwn' .",
+            "git diff --out=pwn.txt",
+            "git cat-file --filters HEAD:README.md",
+            "git help -w status",
+            "rg --pre sh README .",
+            "tree -o out.txt",
+            "tree -ao out.txt",
+            "sort -opwn.txt README.md",
+            "sort -uo pwn.txt README.md",
+            "sort --ou=pwn.txt README.md",
+            "sort --compress-program=/tmp/helper.sh README.md",
+            "sort --com=/tmp/helper.sh README.md",
+            "ruff check -opwn.txt src/",
+            "ruff check -qo pwn.txt src/",
+            "ruff check --add-noqa src/",
+            "ruff check --config 'fix = true' src/",
+            "ruff check --config=/tmp/fix.toml src/",
+            "ruff check --cache-dir /tmp/c src/",
+            "ruff check -w src/",
+            "ruff check -qw src/",
+            "uniq README.md pwn.txt",
+            "echo pwn | uniq - tracked.txt",
+            # systemctl flag-value smuggling and remote host/root flags
+            "systemctl --user -p status stop foo.service",
+            "systemctl --user --property status stop foo.service",
+            "systemctl --user --unknown status foo.service",
+            # ANSI-C / locale quoting, line-continuation \<LF>, \r, "${...}" var mutation, printf -v
+            r"echo $'\'' && touch pwn #'",
+            'echo $"hello"',
+            'echo "$\\\n(echo PWNED)"',
+            "echo $\\\n'\\'' && touch pwn #'",
+            "echo ok\rgit status",
+            f'cd /tmp && echo "${{CDPATH:={repository.repo.parent}}}" && cd {repository.repo.name} && worktree-session --path . --client-id claude --session-id s -- rm tracked.txt',
+            'echo "$[1+1]"',
+            "printf -v PATH /tmp/evil && ls",
+            "printf -vPATH /tmp/evil && ls",
+            # Untracked / flag-smuggled cd into canonical + worktree-session --path .
+            "cd - && worktree-session --path . --client-id claude --session-id s -- rm tracked.txt",
+            f"cd /tmp && cd -- {repository.repo} && worktree-session --path . --client-id claude --session-id s -- rm tracked.txt",
+            f"cd /tmp && cd -P {repository.repo} && worktree-session --path . --client-id claude --session-id s -- rm tracked.txt",
+            # Untrusted relative / arbitrary executable paths spoofing readonly names
+            "./ls",
+            "/tmp/evil/git status",
+            "/tmp/evil/worktree-controller status --json",
+            # Dangerous env var injection
+            "LD_PRELOAD=/tmp/evil.so git status",
+            "GIT_EXEC_PATH=/tmp/evil git status",
+            "GIT_EXTERNAL_DIFF=/tmp/evil git diff",
+            "PAGER=sh git log -n 1",
+            "PATH=/tmp/evil ls",
+            # tool-skill-sync RCE override flags and mutating subcommands
+            "tool-skill-sync --bin-dir /tmp/evil doctor --summary",
+            "tool-skill-sync doctor --controller /tmp/evil --summary",
+            "tool-skill-sync --source-root /tmp/evil status",
+            "tool-skill-sync doctor --codex-home /tmp/evil",
+            "tool-skill-sync skill-check --claude-home /tmp/evil",
+            "tool-skill-sync install",
+            "tool-skill-sync upgrade",
+            "tool-skill-sync rollback",
+            "tool-skill-sync skill-install",
+            "PATH=/tmp tool-skill-sync doctor --summary",
+            "./tool-skill-sync doctor --summary",
+            # rclone and forbidden research-workspace subcommands stay strictly blocked
+            "rclone listremotes",
+            "cd /tmp && rclone listremotes",
+            "research-workspace policy --help",
+            "research-workspace deliver --help",
+            "research-workspace register --help",
+            "research-workspace exec --workspace-id ws1 -- ls",
+            "research-workspace inspect --workspace-id ws1",
+            "research-workspace guard-hook",
+        ]
+        for command in denied_commands:
+            entry_name, payload = _build_shell_hook_payload(client, repository.repo, command)
+            res = _invoke_hook(
+                tmp_path,
+                entry_name=entry_name,
+                event="PreToolUse",
+                payload=payload,
+                fake_home=fake_home,
+                extra_env=extra_env,
+            )
+            _assert_hook_decision(client, res, allow=False)
+            reason = _refusal_text(client, res)
+            assert "worktree-controller acquire" in reason
+            assert "research-workspace" in reason
+            assert "research-workspace job" in reason
+            assert "rclone" in reason
+
+
+@pytest.mark.parametrize("client", ["agy", "claude", "codex", "grok"])
+def test_canonical_host_configured_readonly_clis_allowlist_and_isolation(
+    tmp_path: Path, client: str
+) -> None:
+    with (
+        GitRepository(linked=0, policy_text=POLICY_V8) as repo_a,
+        GitRepository(linked=0, policy_text=POLICY_V8) as repo_b,
+    ):
+        adopt_canonical(repo_a)
+        adopt_canonical(repo_b)
+        fake_home, log_file = _make_fake_wc_home(tmp_path, ROOT)
+        scope_bin = _install_fake_user_cli(fake_home, "bin", "gov-scope")
+        nexus_bin = _install_fake_user_cli(fake_home, ".local/bin", "gov-nexus")
+        extra_env = {
+            "PATH": f"{fake_home / 'bin'}:{fake_home / '.local/bin'}:{os.environ.get('PATH', '')}"
+        }
+
+        config_dir = fake_home / ".config/worktree-controller"
+        config_dir.mkdir(parents=True)
+        config_path = config_dir / "canonical-readonly-clis.toml"
+        config_path.write_text(
+            f"""schema_version = 1
+
+[[commands]]
+executable = "gov-scope"
+repos = [{str(repo_a.repo.resolve())!r}]
+[[commands.profiles]]
+subcommand = ["show"]
+bool_flags = ["--json", "-h", "--help"]
+value_flags = ["--repo"]
+allow_positional = false
+[[commands.profiles]]
+subcommand = []
+bool_flags = ["-h", "--help"]
+
+[[commands]]
+executable = "gov-nexus"
+repos = [{str(repo_a.repo.resolve())!r}]
+[[commands.profiles]]
+subcommand = ["brief"]
+bool_flags = ["--json", "-h", "--help"]
+value_flags = ["--repo", "--max-bytes", "--state", "--bundle-dir", "--studio-root"]
+allow_positional = false
+[[commands.profiles]]
+subcommand = ["read"]
+bool_flags = ["-h", "--help"]
+value_flags = ["--state", "--snapshot", "--module"]
+allow_positional = false
+""",
+            encoding="utf-8",
+        )
+        config_path.chmod(0o600)
+
+        allowed_in_repo_a = [
+            "gov-scope show",
+            "gov-scope show --json",
+            "gov-scope show --repo .",
+            "cd /tmp && gov-scope show",
+            "gov-scope --help",
+            f"{scope_bin} show | head -n 20",
+            "gov-nexus brief --repo .",
+            "gov-nexus brief --repo . --max-bytes 1500 --json",
+            "gov-nexus brief --repo . 2>&1 || true",
+            "gov-nexus read --module core",
+            f"{nexus_bin} brief --repo . 2> /dev/null | head -n 30",
+        ]
+        for command in allowed_in_repo_a:
+            entry_name, payload = _build_shell_hook_payload(client, repo_a.repo, command)
+            res = _invoke_hook(
+                tmp_path,
+                entry_name=entry_name,
+                event="PreToolUse",
+                payload=payload,
+                fake_home=fake_home,
+                extra_env=extra_env,
+            )
+            _assert_hook_decision(client, res, allow=True)
+            assert _read_calls(log_file) == []
+
+        denied_in_repo_a = [
+            # Mutating / disallowed subcommands
+            "gov-scope apply --input /tmp/p.json --expect abc",
+            "gov-scope grok",
+            "gov-nexus refresh",
+            "gov-nexus install-schedule",
+            "gov-nexus progress --goal x",
+            "gov-nexus serve",
+            # Disallowed / RCE / smuggling flags
+            "gov-nexus read --systemctl /tmp/evil",
+            "gov-nexus brief --controller /tmp/evil",
+            "gov-scope show --unknown",
+            "gov-scope show extra-arg",
+            "gov-scope show --repo -evil",
+            "gov-scope show -- --extra",
+            # Cross-repo scope violation
+            f"gov-nexus brief --repo {repo_b.repo}",
+            f"gov-scope show --repo {repo_b.repo}",
+            # Shell escapes and env prefixes
+            "gov-scope show > tracked.txt",
+            "gov-scope show && rm tracked.txt",
+            "gov-scope show --repo \"$(whoami)\"",
+            "PATH=/tmp gov-scope show",
+            "LC_ALL=C gov-scope show",
+            "./gov-scope show",
+        ]
+        for command in denied_in_repo_a:
+            entry_name, payload = _build_shell_hook_payload(client, repo_a.repo, command)
+            res = _invoke_hook(
+                tmp_path,
+                entry_name=entry_name,
+                event="PreToolUse",
+                payload=payload,
+                fake_home=fake_home,
+                extra_env=extra_env,
+            )
+            _assert_hook_decision(client, res, allow=False)
+
+        # Repo-scoped rule for repo_a must NEVER admit commands in repo_b.
+        for command in ("gov-scope show", "gov-nexus brief --repo ."):
+            entry_name, payload = _build_shell_hook_payload(client, repo_b.repo, command)
+            res = _invoke_hook(
+                tmp_path,
+                entry_name=entry_name,
+                event="PreToolUse",
+                payload=payload,
+                fake_home=fake_home,
+                extra_env=extra_env,
+            )
+            _assert_hook_decision(client, res, allow=False)
+
+        # Canonical session cannot modify hook config or trusted bin dirs via write tools (direct or symlink).
+        outside_link = tmp_path / "sneaky-config.toml"
+        outside_link.symlink_to(config_path)
+        for target_cfg in (config_path, outside_link, scope_bin, nexus_bin):
+            if client == "agy":
+                w_entry, w_payload = (
+                    "agy-worktree-hook",
+                    {
+                        "hookEventName": "PreToolUse",
+                        "cwd": str(repo_a.repo),
+                        "conversationId": "agy-cfg",
+                        "toolCall": {
+                            "id": "tc-cfg",
+                            "name": "write_file",
+                            "args": {"Path": str(target_cfg), "Content": "x"},
+                        },
+                    },
+                )
+            elif client == "grok":
+                w_entry, w_payload = (
+                    "grok-worktree-hook",
+                    {
+                        "hookEventName": "pre_tool_use",
+                        "cwd": str(repo_a.repo),
+                        "sessionId": "g-cfg",
+                        "toolName": "write",
+                        "toolInput": {"file_path": str(target_cfg)},
+                    },
+                )
+            else:
+                w_entry = f"{client}-worktree-hook"
+                w_payload = {
+                    "hook_event_name": "PreToolUse",
+                    "cwd": str(repo_a.repo),
+                    "session_id": f"{client}-cfg",
+                    "tool_name": "Write",
+                    "tool_input": {"file_path": str(target_cfg)},
+                }
+            res_cfg_write = _invoke_hook(
+                tmp_path,
+                entry_name=w_entry,
+                event="PreToolUse",
+                payload=w_payload,
+                fake_home=fake_home,
+                extra_env=extra_env,
+            )
+            _assert_hook_decision(client, res_cfg_write, allow=False)
+
+
+def test_canonical_host_config_security_invariants_fail_closed(tmp_path: Path) -> None:
+    with GitRepository(linked=0, policy_text=POLICY_V8) as repository:
+        adopt_canonical(repository)
+        fake_home, _ = _make_fake_wc_home(tmp_path, ROOT)
+        _install_fake_user_cli(fake_home, "bin", "gov-scope")
+        _install_fake_user_cli(fake_home, "bin", "rclone")
+        extra_env = {
+            "PATH": f"{fake_home / 'bin'}:{fake_home / '.local/bin'}:{os.environ.get('PATH', '')}"
+        }
+        config_dir = fake_home / ".config/worktree-controller"
+        config_dir.mkdir(parents=True)
+        config_path = config_dir / "canonical-readonly-clis.toml"
+
+        # 1. Forbidden executables (rclone, bash, python3, python3.12, research-workspace) always rejected.
+        for bad_exe in ("rclone", "bash", "python3", "python3.12", "research-workspace", "tool-skill-sync"):
+            config_path.write_text(
+                f"""schema_version = 1
+[[commands]]
+executable = {bad_exe!r}
+[[commands.profiles]]
+subcommand = ["show"]
+""",
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+            entry, payload = _build_shell_hook_payload("agy", repository.repo, f"{bad_exe} show")
+            res = _invoke_hook(
+                tmp_path,
+                entry_name=entry,
+                event="PreToolUse",
+                payload=payload,
+                fake_home=fake_home,
+                extra_env=extra_env,
+            )
+            _assert_hook_decision("agy", res, allow=False)
+
+        # 2. World-writable config file fails closed.
+        valid_toml = """schema_version = 1
+[[commands]]
+executable = "gov-scope"
+[[commands.profiles]]
+subcommand = ["show"]
+"""
+        config_path.write_text(valid_toml, encoding="utf-8")
+        config_path.chmod(0o666)
+        entry, payload = _build_shell_hook_payload("agy", repository.repo, "gov-scope show")
+        res_ww = _invoke_hook(
+            tmp_path,
+            entry_name=entry,
+            event="PreToolUse",
+            payload=payload,
+            fake_home=fake_home,
+            extra_env=extra_env,
+        )
+        _assert_hook_decision("agy", res_ww, allow=False)
+
+        # 3. Symlinked config file fails closed.
+        real_cfg = tmp_path / "external.toml"
+        real_cfg.write_text(valid_toml, encoding="utf-8")
+        real_cfg.chmod(0o600)
+        config_path.unlink()
+        config_path.symlink_to(real_cfg)
+        res_sym = _invoke_hook(
+            tmp_path,
+            entry_name=entry,
+            event="PreToolUse",
+            payload=payload,
+            fake_home=fake_home,
+            extra_env=extra_env,
+        )
+        _assert_hook_decision("agy", res_sym, allow=False)
+
+        # 4. Empty subcommand with non-help flags fails closed.
+        config_path.unlink()
+        config_path.write_text(
+            """schema_version = 1
+[[commands]]
+executable = "gov-scope"
+[[commands.profiles]]
+subcommand = []
+bool_flags = ["--json"]
+""",
+            encoding="utf-8",
+        )
+        config_path.chmod(0o600)
+        entry_j, payload_j = _build_shell_hook_payload("agy", repository.repo, "gov-scope --json")
+        res_empty_sub = _invoke_hook(
+            tmp_path,
+            entry_name=entry_j,
+            event="PreToolUse",
+            payload=payload_j,
+            fake_home=fake_home,
+            extra_env=extra_env,
+        )
+        _assert_hook_decision("agy", res_empty_sub, allow=False)
+
+        # 5. Untrusted PATH shadowing bare `gov-scope` fails closed even with valid config.
+        config_path.write_text(valid_toml, encoding="utf-8")
+        config_path.chmod(0o600)
+        evil_dir = tmp_path / "evil-bin"
+        evil_dir.mkdir()
+        evil_cli = evil_dir / "gov-scope"
+        evil_cli.write_text("#!/bin/sh\necho pwn\n", encoding="utf-8")
+        evil_cli.chmod(0o755)
+        shadow_env = {"PATH": f"{evil_dir}:{fake_home / 'bin'}:{os.environ.get('PATH', '')}"}
+        res_shadow = _invoke_hook(
+            tmp_path,
+            entry_name=entry,
+            event="PreToolUse",
+            payload=payload,
+            fake_home=fake_home,
+            extra_env=shadow_env,
+        )
+        _assert_hook_decision("agy", res_shadow, allow=False)

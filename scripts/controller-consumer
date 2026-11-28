@@ -137,12 +137,16 @@ _GITDIR_LIMIT = 4096
 # Strictly provably read-only commands (only admitted when the entire command is
 # free of output redirections, command substitution, subshells, and script execs).
 _PURE_READONLY_COMMANDS = frozenset({
-    "pwd", "cd", "ls", "ll", "la", "dir", "tree", "stat", "file", "readlink", "realpath",
+    "pwd", "ls", "ll", "la", "dir", "stat", "file", "readlink", "realpath",
     "basename", "dirname", "wc", "cat", "tac", "nl", "head", "tail", "cut", "tr",
-    "uniq", "comm", "diff", "cmp", "strings", "sha256sum", "md5sum", "b2sum", "cksum",
+    "comm", "diff", "cmp", "strings", "sha256sum", "md5sum", "b2sum", "cksum",
     "date", "whoami", "id", "uname", "hostname", "uptime", "df", "du", "free", "ps",
-    "pgrep", "nproc", "true", "false", "echo", "printf", "which", "whereis", "type",
-    "rg", "grep", "egrep", "fgrep", "jq", "journalctl",
+    "pgrep", "nproc", "true", "false", "echo", "which", "whereis", "type",
+    "grep", "egrep", "fgrep", "jq", "journalctl", "test", "[",
+})
+_SAFE_ENV_PREFIX_VARS = frozenset({
+    "LC_ALL", "LC_CTYPE", "LC_COLLATE", "LC_MESSAGES", "LANG",
+    "TZ", "NO_COLOR", "CLICOLOR", "TERM", "COLUMNS",
 })
 _GIT_READONLY_SUBCMDS = frozenset({
     "status", "diff", "log", "show", "rev-parse", "symbolic-ref", "ls-files",
@@ -157,14 +161,37 @@ _GOVERNANCE_CLIS = frozenset({
     "codex-worktree-session-end",
     "codex-worktree-writer-lease",
     "snapshot-runner",
-    "tool-skill-sync",
     "tool-temp-dir",
 })
-_SAFE_REDIR_RE = re.compile(r"^(?:(?:1|2)?>/dev/null|2>&1|1>&2)(?=$|[\s;|&])")
+_SAFE_REDIR_RE = re.compile(
+    r"^(?:(?:(?:1|2|&)?>(?:[ \t]*)/dev/null)|(?:(?:1|2)?>&(?:1|2)))(?=$|[\s;|&])"
+)
 _SED_SAFE_SCRIPT_RE = re.compile(r"^[0-9,$;p\s]+$")
-_VAR_ASSIGN_TOKEN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=(.*)$")
+_VAR_ASSIGN_TOKEN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 _VAR_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
 _ABS_OR_HOME_PATH_RE = re.compile(r"(?:(?<![A-Za-z0-9_.-])(?:/[^\s'\"`<>|;&(),{}]+|~/[^\s'\"`<>|;&(),{}]+))")
+_TOOL_SKILL_SYNC_FINGERPRINT_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_TOOL_SKILL_SYNC_TOOL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+# Generic host-owned read-only governance CLI allowlist (`~/.config/worktree-controller/canonical-readonly-clis.toml`).
+_CONFIG_MAX_BYTES = 65536
+_CONFIG_MAX_COMMANDS = 64
+_CONFIG_EXE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_CONFIG_SUBCMD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_CONFIG_FLAG_RE = re.compile(r"^--?[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_CONFIG_PYTHON_EXE_RE = re.compile(r"^python[0-9.]*$")
+_FORBIDDEN_CONFIG_EXECUTABLES = frozenset({
+    "sh", "bash", "dash", "zsh", "ksh", "fish", "csh", "tcsh",
+    "python", "python3", "perl", "ruby", "node", "deno", "bun", "php", "lua",
+    "awk", "gawk", "mawk", "sed", "find", "env", "xargs", "sudo", "su", "pkexec", "doas",
+    "rclone", "curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "socat",
+    "git", "rm", "mv", "cp", "ln", "mkdir", "rmdir", "touch", "chmod", "chown", "chgrp",
+    "tee", "dd", "truncate", "install", "make", "just", "ninja", "cmake",
+    "uv", "pip", "pip3", "npm", "npx", "pnpm", "yarn", "cargo", "go",
+    "docker", "podman", "bwrap",
+    "research-workspace", "agent-session", "worktree-controller", "worktree-session",
+    "tool-skill-sync", "claude", "codex", "grok", "agy",
+})
 
 # Strictly closed allowlist for structured host-mediated research job commands.
 # Policy administration and low-level workspace mutation commands are excluded.
@@ -350,13 +377,14 @@ def inspect_governed_root(path):
 
 def _split_strict_readonly_stages(command):
     """Return list of simple command stages iff ``command`` has no shell writes/substitutions."""
-    if not isinstance(command, str) or not command.strip() or "\x00" in command:
+    if not isinstance(command, str) or not command.strip() or "\x00" in command or "\r" in command:
         return None
     stages = []
     buf = []
     in_sq = False
     in_dq = False
     escaped = False
+    need_next_stage = False
     i = 0
     n = len(command)
     while i < n:
@@ -367,10 +395,17 @@ def _split_strict_readonly_stages(command):
             i += 1
             continue
         if ch == "\\" and not in_sq:
+            # Reject bash line continuation (\<LF>), which deletes \<LF> before expansion
+            # and can re-form $( / $' / ${ across lines inside or outside double quotes.
+            if command[i + 1 : i + 2] == "\n":
+                return None
             buf.append(ch)
             escaped = True
             i += 1
             continue
+        # Reject bash ANSI-C / locale quoting ($'...' / $"...") which desyncs quote parity.
+        if not in_sq and not in_dq and command[i : i + 2] in ("$'", '$"'):
+            return None
         if ch == "'" and not in_dq:
             in_sq = not in_sq
             buf.append(ch)
@@ -381,8 +416,9 @@ def _split_strict_readonly_stages(command):
             buf.append(ch)
             i += 1
             continue
-        # Command substitution executes inside double quotes too.
-        if not in_sq and (ch == "`" or command[i : i + 2] == "$("):
+        # Command/parameter/arithmetic substitution executes inside double quotes too
+        # (e.g. "${CDPATH:=...}" mutates shell variables).
+        if not in_sq and (ch == "`" or command[i : i + 2] in ("$(", "${", "$[")):
             return None
         if not in_sq and not in_dq:
             if ch in "(){}<":
@@ -393,16 +429,21 @@ def _split_strict_readonly_stages(command):
                 continue
             if ch in ";\n":
                 stage = "".join(buf).strip()
+                if need_next_stage and not stage:
+                    return None
                 if stage:
                     stages.append(stage)
+                    need_next_stage = False
                 buf = []
                 i += 1
                 continue
-            if command[i : i + 2] in ("&&", "||"):
+            if command[i : i + 2] in ("&&", "||", "|&"):
                 stage = "".join(buf).strip()
-                if stage:
-                    stages.append(stage)
+                if not stage:
+                    return None
+                stages.append(stage)
                 buf = []
+                need_next_stage = True
                 i += 2
                 continue
             if ch == "|":
@@ -411,10 +452,19 @@ def _split_strict_readonly_stages(command):
                     return None
                 stages.append(stage)
                 buf = []
+                need_next_stage = True
                 i += 1
                 continue
             # Allow only exact benign fd dups / /dev/null sinks; reject all other > or &.
-            if ch == ">" or (ch in "12" and command[i + 1 : i + 2] == ">" and (i == 0 or command[i - 1].isspace())):
+            if (
+                ch == ">"
+                or (
+                    ch in "12"
+                    and command[i + 1 : i + 2] == ">"
+                    and (i == 0 or command[i - 1] in " \t;|&")
+                )
+                or (ch == "&" and command[i + 1 : i + 2] == ">")
+            ):
                 m = _SAFE_REDIR_RE.match(command[i:])
                 if not m:
                     return None
@@ -430,7 +480,38 @@ def _split_strict_readonly_stages(command):
     tail = "".join(buf).strip()
     if tail:
         stages.append(tail)
+    elif need_next_stage:
+        return None
     return stages if stages else None
+
+
+def _has_forbidden_git_output_or_exec_flag(args, *, allow_short_o=False):
+    for arg in args:
+        if arg == "--":
+            break
+        if (
+            arg in ("--output", "--ext-diff", "--textconv", "--filters", "-O", "--open-files-in-pager", "--upload-pack", "--exec")
+            or arg.startswith(
+                (
+                    "--out",
+                    "--ext-d",
+                    "--textc",
+                    "--filters",
+                    "--open-files",
+                    "--upload",
+                    "--exec",
+                    "-O",
+                )
+            )
+        ):
+            return True
+        if arg.startswith("-") and not arg.startswith("--"):
+            short = arg[1:]
+            if "O" in short:
+                return True
+            if not allow_short_o and "o" in short:
+                return True
+    return False
 
 
 def _is_readonly_git(args):
@@ -461,10 +542,11 @@ def _is_readonly_git(args):
     if subcmd is None:
         return False
     if subcmd in _GIT_READONLY_SUBCMDS:
-        for arg in sub_args:
-            if arg in ("-o", "--output", "--ext-diff", "--textconv") or arg.startswith("--output="):
-                return False
-        return True
+        if subcmd == "help" and any(a.startswith("-") for a in sub_args):
+            return False
+        return not _has_forbidden_git_output_or_exec_flag(
+            sub_args, allow_short_o=subcmd in ("grep", "ls-files")
+        )
     if subcmd == "branch":
         allowed = {
             "-a", "--all", "-r", "--remotes", "-l", "--list", "-v", "-vv",
@@ -485,13 +567,48 @@ def _is_readonly_git(args):
     if subcmd == "tag":
         if not sub_args:
             return True
-        return all(
-            a in ("-l", "--list", "-v", "--verify") or a.startswith(("--sort=", "--format=", "-n"))
-            for a in sub_args
-            if a.startswith("-")
-        ) and any(a in ("-l", "--list", "-v", "--verify") for a in sub_args)
+        val_flags = {"--contains", "--no-contains", "--points-at", "--merged", "--no-merged"}
+        has_read_selector = False
+        i = 0
+        while i < len(sub_args):
+            arg = sub_args[i]
+            if arg in val_flags:
+                if i + 1 >= len(sub_args):
+                    return False
+                has_read_selector = True
+                i += 2
+                continue
+            if arg in ("-l", "--list", "-v", "--verify", "-n") or re.fullmatch(r"-n[0-9]+", arg):
+                has_read_selector = True
+                i += 1
+                continue
+            if arg in ("--color", "--no-color", "-i", "--ignore-case") or arg.startswith(
+                (
+                    "--sort=",
+                    "--format=",
+                    "--color=",
+                    "--contains=",
+                    "--no-contains=",
+                    "--points-at=",
+                    "--merged=",
+                    "--no-merged=",
+                )
+            ):
+                if arg.startswith(
+                    ("--contains=", "--no-contains=", "--points-at=", "--merged=", "--no-merged=")
+                ):
+                    has_read_selector = True
+                i += 1
+                continue
+            if arg.startswith("-"):
+                return False
+            i += 1
+        return has_read_selector
     if subcmd == "config":
-        read_flags = {"--get", "--get-all", "--list", "-l", "--show-origin", "--show-scope", "--null", "-z"}
+        read_flags = {
+            "--get", "--get-all", "--get-regexp", "--get-urlmatch",
+            "--list", "-l", "--show-origin", "--show-scope", "--null", "-z",
+        }
         has_read = False
         positional = 0
         for arg in sub_args:
@@ -504,6 +621,34 @@ def _is_readonly_git(args):
             else:
                 positional += 1
         return has_read and positional <= 1
+    if subcmd == "remote":
+        if not sub_args:
+            return True
+        if all(a in ("-v", "--verbose") for a in sub_args):
+            return True
+        if sub_args[0] == "get-url":
+            pos = 0
+            for arg in sub_args[1:]:
+                if arg in ("--push", "--all"):
+                    continue
+                if arg.startswith("-"):
+                    return False
+                pos += 1
+            return pos == 1
+        return False
+    if subcmd == "worktree":
+        return bool(sub_args) and sub_args[0] == "list" and all(
+            a in ("--porcelain", "-v", "--verbose", "-z") for a in sub_args[1:]
+        )
+    if subcmd == "stash":
+        if not sub_args or sub_args[0] not in ("list", "show"):
+            return False
+        return not _has_forbidden_git_output_or_exec_flag(sub_args[1:], allow_short_o=False)
+    if subcmd == "submodule":
+        return bool(sub_args) and sub_args[0] == "status" and all(
+            a in ("--cached", "--recursive", "--") or not a.startswith("-")
+            for a in sub_args[1:]
+        )
     return False
 
 
@@ -529,6 +674,285 @@ def _is_readonly_sed(args):
             scripts.append(arg)
         i += 1
     return has_quiet and bool(scripts) and all(_SED_SAFE_SCRIPT_RE.fullmatch(s) for s in scripts)
+
+
+def _match_closed_cli_flags(
+    rest,
+    *,
+    bool_flags,
+    value_flags,
+    allow_positional=False,
+    max_positional=None,
+    value_validators=None,
+    positional_validator=None,
+):
+    seen = set()
+    positional_count = 0
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if not tok or any(ch in tok for ch in "\x00\n\r"):
+            return False
+        if tok == "--":
+            return False
+        if tok.startswith("-"):
+            if "=" in tok:
+                flag, val = tok.split("=", 1)
+                if flag not in value_flags or flag in seen or not val or val.startswith("-"):
+                    return False
+                if any(ch in val for ch in "\x00\n\r"):
+                    return False
+                if value_validators and flag in value_validators and not value_validators[flag](val):
+                    return False
+                seen.add(flag)
+                i += 1
+                continue
+            if tok in bool_flags:
+                if tok in seen:
+                    return False
+                seen.add(tok)
+                i += 1
+                continue
+            if tok in value_flags:
+                if tok in seen or i + 1 >= len(rest):
+                    return False
+                val = rest[i + 1]
+                if not val or val.startswith("-") or any(ch in val for ch in "\x00\n\r"):
+                    return False
+                if value_validators and tok in value_validators and not value_validators[tok](val):
+                    return False
+                seen.add(tok)
+                i += 2
+                continue
+            return False
+        if not allow_positional:
+            return False
+        if positional_validator and not positional_validator(tok):
+            return False
+        positional_count += 1
+        if max_positional is not None and positional_count > max_positional:
+            return False
+        i += 1
+    return True
+
+
+def _is_readonly_tool_skill_sync(tokens, *, had_env_prefix):
+    """Allow only strictly read-only, non-override ``tool-skill-sync`` invocations."""
+    if had_env_prefix or not tokens:
+        return False
+    if not _is_trusted_user_exe(tokens[0], "tool-skill-sync"):
+        return False
+    args = tokens[1:]
+    if len(args) == 1 and args[0] in ("-h", "--help", "--version"):
+        return True
+    if not args or args[0].startswith("-"):
+        return False
+    sub = args[0]
+    rest = args[1:]
+    if sub == "doctor":
+        return _match_closed_cli_flags(
+            rest,
+            bool_flags=frozenset({"--summary", "-h", "--help"}),
+            value_flags=frozenset({"--repo", "--previous-fingerprint"}),
+            value_validators={
+                "--previous-fingerprint": lambda v: bool(
+                    _TOOL_SKILL_SYNC_FINGERPRINT_RE.fullmatch(v)
+                ),
+            },
+            allow_positional=False,
+        )
+    if sub == "status":
+        return _match_closed_cli_flags(
+            rest,
+            bool_flags=frozenset({"-h", "--help"}),
+            value_flags=frozenset(),
+            allow_positional=False,
+        )
+    if sub == "skill-check":
+        return _match_closed_cli_flags(
+            rest,
+            bool_flags=frozenset({"--strict-clients", "-h", "--help"}),
+            value_flags=frozenset(),
+            allow_positional=False,
+        )
+    if sub == "check":
+        return _match_closed_cli_flags(
+            rest,
+            bool_flags=frozenset({"--source-only", "-h", "--help"}),
+            value_flags=frozenset(),
+            allow_positional=True,
+            max_positional=1,
+            positional_validator=lambda v: bool(_TOOL_SKILL_SYNC_TOOL_RE.fullmatch(v)),
+        )
+    return False
+
+
+def _is_readonly_research_workspace_help(tokens, *, had_env_prefix):
+    """Allow only pure argparse ``--help``/``-h``/``--version`` discovery for ``research-workspace``."""
+    if had_env_prefix or not tokens:
+        return False
+    if not _is_trusted_user_exe(tokens[0], "research-workspace"):
+        return False
+    args = tokens[1:]
+    if len(args) == 1 and args[0] in ("-h", "--help", "--version"):
+        return True
+    if len(args) == 2 and args[0] == "job" and args[1] in ("-h", "--help"):
+        return True
+    return (
+        len(args) == 3
+        and args[0] == "job"
+        and args[1] in _RESEARCH_JOB_ACTIONS
+        and args[2] in ("-h", "--help")
+    )
+
+
+def _canonical_readonly_config_dir():
+    return Path.home().resolve(strict=False) / ".config" / "worktree-controller"
+
+
+def _canonical_readonly_config_path():
+    return _canonical_readonly_config_dir() / "canonical-readonly-clis.toml"
+
+
+def _load_canonical_readonly_cli_rules():
+    """Load validated host-owned read-only CLI rules, failing closed on any defect."""
+    home = Path.home().resolve(strict=False)
+    config_path = _canonical_readonly_config_path()
+    try:
+        st = config_path.lstat()
+    except OSError:
+        return ()
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        return ()
+    if st.st_size <= 0 or st.st_size > _CONFIG_MAX_BYTES:
+        return ()
+    if not _is_safe_owner_and_mode(st):
+        return ()
+    if not _is_safe_dir_chain(config_path.parent, home, reject_symlinks=True):
+        return ()
+    try:
+        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    if type(data.get("schema_version")) is not int or data.get("schema_version") != 1:
+        return ()
+    if not set(data) <= {"schema_version", "commands"}:
+        return ()
+    raw_commands = data.get("commands", [])
+    if not isinstance(raw_commands, list) or len(raw_commands) > _CONFIG_MAX_COMMANDS:
+        return ()
+    rules = []
+    for entry in raw_commands:
+        if not isinstance(entry, dict) or not set(entry) <= {"executable", "repos", "profiles"}:
+            return ()
+        exe = entry.get("executable")
+        if (
+            not isinstance(exe, str)
+            or not _CONFIG_EXE_NAME_RE.fullmatch(exe)
+            or exe in _FORBIDDEN_CONFIG_EXECUTABLES
+            or _CONFIG_PYTHON_EXE_RE.fullmatch(exe)
+        ):
+            return ()
+        raw_repos = entry.get("repos", [])
+        if not isinstance(raw_repos, list):
+            return ()
+        repos = []
+        for raw_repo in raw_repos:
+            if not isinstance(raw_repo, str) or not raw_repo or any(c in raw_repo for c in "\x00\n\r"):
+                return ()
+            expanded = Path(os.path.expanduser(raw_repo))
+            if not expanded.is_absolute():
+                return ()
+            repos.append(expanded.resolve(strict=False))
+        raw_profiles = entry.get("profiles")
+        if not isinstance(raw_profiles, list) or not raw_profiles:
+            return ()
+        profiles = []
+        for prof in raw_profiles:
+            if not isinstance(prof, dict) or not set(prof) <= {
+                "subcommand",
+                "bool_flags",
+                "value_flags",
+                "allow_positional",
+            }:
+                return ()
+            sub = prof.get("subcommand")
+            if (
+                not isinstance(sub, list)
+                or len(sub) > 4
+                or not all(isinstance(tok, str) and _CONFIG_SUBCMD_RE.fullmatch(tok) for tok in sub)
+            ):
+                return ()
+            raw_bool = prof.get("bool_flags", [])
+            raw_val = prof.get("value_flags", [])
+            allow_pos = prof.get("allow_positional", False)
+            if (
+                not isinstance(raw_bool, list)
+                or not isinstance(raw_val, list)
+                or type(allow_pos) is not bool
+                or not all(isinstance(f, str) and _CONFIG_FLAG_RE.fullmatch(f) for f in raw_bool)
+                or not all(isinstance(f, str) and _CONFIG_FLAG_RE.fullmatch(f) for f in raw_val)
+            ):
+                return ()
+            bool_set = frozenset(raw_bool)
+            val_set = frozenset(raw_val)
+            if not bool_set.isdisjoint(val_set):
+                return ()
+            if not sub and (
+                not bool_set
+                or not bool_set <= {"-h", "--help", "--version"}
+                or val_set
+                or allow_pos
+            ):
+                return ()
+            profiles.append({
+                "subcommand": tuple(sub),
+                "bool_flags": bool_set,
+                "value_flags": val_set,
+                "allow_positional": allow_pos,
+            })
+        rules.append({
+            "executable": exe,
+            "repos": frozenset(repos),
+            "profiles": tuple(profiles),
+        })
+    return tuple(rules)
+
+
+def _is_configured_readonly_cli(tokens, touched_canonical_roots, *, had_env_prefix, rules):
+    if had_env_prefix or not tokens or not rules:
+        return False
+    exe_name = Path(tokens[0]).name
+    matching = [rule for rule in rules if rule["executable"] == exe_name]
+    if not matching:
+        return False
+    if not _is_trusted_user_exe(tokens[0], exe_name):
+        return False
+    args = tokens[1:]
+    resolved_touched = frozenset(root.resolve(strict=False) for root in touched_canonical_roots)
+    for rule in matching:
+        allowed_repos = rule["repos"]
+        if allowed_repos and (not resolved_touched or not resolved_touched <= allowed_repos):
+            continue
+        for prof in rule["profiles"]:
+            sub = prof["subcommand"]
+            if tuple(args[: len(sub)]) != sub:
+                continue
+            rest = args[len(sub) :]
+            if not sub:
+                if len(rest) == 1 and rest[0] in prof["bool_flags"]:
+                    return True
+                continue
+            if _match_closed_cli_flags(
+                rest,
+                bool_flags=prof["bool_flags"],
+                value_flags=prof["value_flags"],
+                allow_positional=prof["allow_positional"],
+            ):
+                return True
+    return False
 
 
 def _is_safe_worktree_session(args, cwd):
@@ -557,50 +981,269 @@ def _is_safe_worktree_session(args, cwd):
     return not (kind == "canonical" and protected)
 
 
-def _is_strict_readonly_stage(stage, cwd):
+def _is_safe_system_cmd_token(raw_token):
+    """Allow bare command names or standard system paths; reject relative or untrusted paths."""
+    if not raw_token or "/" not in raw_token:
+        return bool(raw_token) and raw_token not in (".", "..")
+    if not raw_token.startswith("/"):
+        return False
+    norm = Path(os.path.normpath(raw_token))
+    return norm.parent in (Path("/bin"), Path("/usr/bin"), Path("/usr/local/bin"))
+
+
+def _is_safe_governance_cmd_token(raw_token):
+    """Allow bare command names or trusted user bin paths; reject relative or untrusted paths."""
+    if not raw_token or "/" not in raw_token:
+        return bool(raw_token) and raw_token not in (".", "..")
+    if not (raw_token.startswith("/") or raw_token.startswith("~/")):
+        return False
+    norm = Path(os.path.normpath(os.path.expanduser(raw_token)))
+    home = Path.home().resolve(strict=False)
+    allowed_dirs = (
+        home / "bin",
+        home / ".local" / "bin",
+        Path("/usr/local/bin"),
+        Path("/usr/bin"),
+    )
+    return any(norm.parent == d.resolve(strict=False) for d in allowed_dirs)
+
+
+def _parse_readonly_cd_target(args):
+    """Return destination for safe `cd` forms, or None if untracked/unsupported."""
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            i += 1
+            break
+        if arg in ("-L", "-P"):
+            i += 1
+            continue
+        if arg.startswith("-"):
+            return None
+        break
+    rest = args[i:]
+    if not rest:
+        return str(Path.home())
+    if len(rest) == 1 and rest[0] != "-":
+        return rest[0]
+    return None
+
+
+def _is_readonly_uniq(args):
+    """Allow `uniq` only with at most one positional operand (never an output file)."""
+    val_flags = {"-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"}
+    positional = 0
+    after_dd = False
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if not after_dd and arg == "--":
+            after_dd = True
+            i += 1
+            continue
+        if not after_dd and arg in val_flags:
+            if i + 1 >= len(args):
+                return False
+            i += 2
+            continue
+        if not after_dd and arg.startswith("-") and arg != "-":
+            i += 1
+            continue
+        positional += 1
+        if positional > 1:
+            return False
+        i += 1
+    return True
+
+
+def _has_long_flag_prefix(args, prefixes):
+    for a in args:
+        if a == "--":
+            break
+        if a.startswith(prefixes):
+            return True
+    return False
+
+
+def _is_readonly_systemctl(args):
+    """Explicitly parse leading systemctl options so flag values cannot spoof a readonly verb."""
+    ro_sys = frozenset({
+        "status", "list-units", "list-timers", "list-unit-files",
+        "is-active", "is-enabled", "show", "cat",
+    })
+    bool_flags = frozenset({
+        "--user", "--system", "--no-pager", "--no-legend", "--full", "-l",
+        "--all", "-a", "--plain", "--quiet", "-q", "--value", "--failed",
+        "--reverse", "--recursive", "-r", "--show-types",
+    })
+    val_long = frozenset({"--property", "--type", "--state", "--lines", "--output"})
+    val_short = ("-p", "-t", "-n", "-o")
+    verb = None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            if i + 1 < len(args):
+                verb = args[i + 1]
+                rest = args[i + 2 :]
+            else:
+                return False
+            break
+        if arg in bool_flags:
+            i += 1
+            continue
+        if arg in val_long:
+            if i + 1 >= len(args):
+                return False
+            i += 2
+            continue
+        if any(arg.startswith(f"{flag}=") for flag in val_long):
+            i += 1
+            continue
+        if arg in val_short:
+            if i + 1 >= len(args):
+                return False
+            i += 2
+            continue
+        if any(arg.startswith(flag) and len(arg) > 2 for flag in val_short):
+            i += 1
+            continue
+        if arg.startswith("-"):
+            return False
+        verb = arg
+        rest = args[i + 1 :]
+        break
+    if verb not in ro_sys:
+        return False
+    return not any(
+        a in ("--root", "--host", "-H", "--machine", "-M", "--image")
+        or a.startswith(("--root=", "--host=", "--machine=", "--image=", "-H", "-M"))
+        for a in rest
+    )
+
+
+def _has_short_flag_char(args, char):
+    for a in args:
+        if a == "--":
+            break
+        if a.startswith("-") and not a.startswith("--") and char in a[1:]:
+            return True
+    return False
+
+
+def _is_strict_readonly_stage(stage, cwd, *, get_canonical_roots=None, configured_rules=None):
     try:
         tokens = shlex.split(stage)
     except ValueError:
         return False
-    while tokens and _VAR_ASSIGN_TOKEN_RE.match(tokens[0]):
+    had_env_prefix = False
+    while tokens:
+        m = _VAR_ASSIGN_TOKEN_RE.match(tokens[0])
+        if not m:
+            break
+        if m.group(1) not in _SAFE_ENV_PREFIX_VARS:
+            return False
+        had_env_prefix = True
         tokens = tokens[1:]
     if not tokens:
         return False
-    cmd = Path(tokens[0]).name
+    raw_cmd = tokens[0]
+    cmd = Path(raw_cmd).name
     args = tokens[1:]
     if cmd in _GOVERNANCE_CLIS:
-        return True
+        return not had_env_prefix and _is_safe_governance_cmd_token(raw_cmd)
+    if cmd == "tool-skill-sync":
+        return _is_readonly_tool_skill_sync(tokens, had_env_prefix=had_env_prefix)
+    if cmd == "research-workspace":
+        return _is_readonly_research_workspace_help(tokens, had_env_prefix=had_env_prefix)
     if cmd == "worktree-session":
-        return _is_safe_worktree_session(args, cwd)
+        return (
+            not had_env_prefix
+            and _is_safe_governance_cmd_token(raw_cmd)
+            and _is_safe_worktree_session(args, cwd)
+        )
+    if cmd == "cd":
+        return (
+            not had_env_prefix
+            and raw_cmd == "cd"
+            and _parse_readonly_cd_target(args) is not None
+        )
+    if cmd == "printf":
+        return _is_safe_system_cmd_token(raw_cmd) and (
+            not args or not (args[0].startswith("-") and args[0] != "--")
+        )
+    if cmd == "uniq":
+        return _is_safe_system_cmd_token(raw_cmd) and _is_readonly_uniq(args)
     if cmd in _PURE_READONLY_COMMANDS:
-        return True
+        return _is_safe_system_cmd_token(raw_cmd)
+    if cmd == "rg":
+        return _is_safe_system_cmd_token(raw_cmd) and not any(
+            a == "--pre" or a.startswith("--pre=") for a in args
+        )
+    if cmd == "tree":
+        return (
+            _is_safe_system_cmd_token(raw_cmd)
+            and not _has_short_flag_char(args, "o")
+            and not any(a == "--output" or a.startswith("--output=") for a in args)
+        )
     if cmd == "sort":
-        return not any(a in ("-o", "--output") or a.startswith("--output=") for a in args)
+        return (
+            _is_safe_system_cmd_token(raw_cmd)
+            and not _has_short_flag_char(args, "o")
+            and not _has_long_flag_prefix(args, ("--ou", "--com"))
+        )
     if cmd == "git":
-        return _is_readonly_git(args)
+        return _is_safe_system_cmd_token(raw_cmd) and _is_readonly_git(args)
     if cmd == "sed":
-        return _is_readonly_sed(args)
+        return _is_safe_system_cmd_token(raw_cmd) and _is_readonly_sed(args)
     if cmd == "find":
         mut_flags = {
             "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0", "-fprintf"
         }
-        return not any(a in mut_flags for a in args)
+        return _is_safe_system_cmd_token(raw_cmd) and not any(a in mut_flags for a in args)
     if cmd == "systemctl":
-        ro_sys = {
-            "status", "list-units", "list-timers", "list-unit-files",
-            "is-active", "is-enabled", "show", "cat",
-        }
-        pos = [a for a in args if not a.startswith("-")]
-        return bool(pos) and pos[0] in ro_sys
+        return _is_safe_system_cmd_token(raw_cmd) and _is_readonly_systemctl(args)
     if cmd == "ruff":
         return (
-            bool(args)
+            _is_safe_governance_cmd_token(raw_cmd)
+            and bool(args)
             and args[0] == "check"
+            and not _has_short_flag_char(args[1:], "o")
+            and not _has_short_flag_char(args[1:], "w")
             and not any(
-                a in ("--fix", "--unsafe-fixes", "--fix-only", "-o", "--output-file")
-                or a.startswith("--output-file=")
+                a in (
+                    "--fix",
+                    "--unsafe-fixes",
+                    "--fix-only",
+                    "--add-noqa",
+                    "--output-file",
+                    "--config",
+                    "--cache-dir",
+                    "--watch",
+                    "--fixable",
+                    "--unfixable",
+                )
+                or a.startswith(
+                    (
+                        "--fix=",
+                        "--unsafe-fixes=",
+                        "--fix-only=",
+                        "--add-noqa=",
+                        "--output-file=",
+                        "--config=",
+                        "--cache-dir=",
+                        "--fixable=",
+                        "--unfixable=",
+                    )
+                )
                 for a in args[1:]
             )
+        )
+    if configured_rules:
+        touched = get_canonical_roots() if get_canonical_roots is not None else ()
+        return _is_configured_readonly_cli(
+            tokens, touched, had_env_prefix=had_env_prefix, rules=configured_rules
         )
     return False
 
@@ -610,16 +1253,34 @@ def is_strict_readonly_bash(command, cwd):
     stages = _split_strict_readonly_stages(command)
     if not stages:
         return False
+    configured_rules = _load_canonical_readonly_cli_rules()
+    cached_roots = None
+
+    def get_canonical_roots():
+        nonlocal cached_roots
+        if cached_roots is None:
+            roots, _, _ = collect_bash_governed_targets(command, cwd)
+            cached_roots = tuple(roots)
+        return cached_roots
+
     cur_cwd = Path(os.path.expanduser(cwd)).resolve(strict=False)
     for stage in stages:
-        if not _is_strict_readonly_stage(stage, str(cur_cwd)):
+        if not _is_strict_readonly_stage(
+            stage,
+            str(cur_cwd),
+            get_canonical_roots=get_canonical_roots,
+            configured_rules=configured_rules,
+        ):
             return False
         try:
             words = shlex.split(stage)
         except ValueError:
             return False
-        if words and words[0] == "cd" and len(words) >= 2 and words[1] != "-":
-            dest = Path(os.path.expanduser(words[1]))
+        if words and words[0] == "cd":
+            cd_target = _parse_readonly_cd_target(words[1:])
+            if cd_target is None:
+                return False
+            dest = Path(os.path.expanduser(cd_target))
             cur_cwd = (dest if dest.is_absolute() else cur_cwd / dest).resolve(strict=False)
     return True
 
@@ -652,8 +1313,25 @@ def _is_safe_owner_and_mode(st):
     return True
 
 
-def _is_trusted_research_workspace_exe(token):
-    """Verify ``token`` resolves to the user's trusted installed ``research-workspace`` CLI."""
+def _is_safe_dir_chain(start_dir, stop_dir, *, reject_symlinks=False):
+    cur = start_dir
+    while True:
+        try:
+            pst = cur.lstat() if reject_symlinks else cur.stat()
+        except OSError:
+            return False
+        if reject_symlinks and stat.S_ISLNK(pst.st_mode):
+            return False
+        if not stat.S_ISDIR(pst.st_mode) or not _is_safe_owner_and_mode(pst):
+            return False
+        if cur == stop_dir or cur == cur.parent:
+            break
+        cur = cur.parent
+    return True
+
+
+def _is_trusted_user_exe(token, expected_name):
+    """Verify ``token`` resolves to the user's trusted installed ``expected_name`` CLI."""
     if not token or "=" in token:
         return False
     home = Path.home().resolve(strict=False)
@@ -663,8 +1341,8 @@ def _is_trusted_research_workspace_exe(token):
         home / ".local" / "bin",
         home / ".local" / "share" / "uv" / "tools",
     )
-    if token == "research-workspace":
-        located = shutil.which("research-workspace")
+    if token == expected_name:
+        located = shutil.which(expected_name)
         if not located:
             return False
         candidate = Path(located)
@@ -672,13 +1350,15 @@ def _is_trusted_research_workspace_exe(token):
         if not (token.startswith("/") or token.startswith("~/")):
             return False
         candidate = Path(os.path.expanduser(token))
-        if candidate.name != "research-workspace":
+        if candidate.name != expected_name:
             return False
     try:
         lexical_parent = candidate.parent.resolve(strict=True)
     except OSError:
         return False
     if not any(_path_within(lexical_parent, d.resolve(strict=False)) for d in allowed_link_dirs):
+        return False
+    if not _is_safe_dir_chain(lexical_parent, home):
         return False
     try:
         resolved = candidate.resolve(strict=True)
@@ -691,18 +1371,12 @@ def _is_trusted_research_workspace_exe(token):
         return False
     if not _is_safe_owner_and_mode(st):
         return False
-    cur = resolved.parent
-    while True:
-        try:
-            pst = cur.stat()
-        except OSError:
-            return False
-        if not _is_safe_owner_and_mode(pst):
-            return False
-        if cur == home or cur == cur.parent:
-            break
-        cur = cur.parent
-    return True
+    return _is_safe_dir_chain(resolved.parent, home)
+
+
+def _is_trusted_research_workspace_exe(token):
+    """Verify ``token`` resolves to the user's trusted installed ``research-workspace`` CLI."""
+    return _is_trusted_user_exe(token, "research-workspace")
 
 
 def _is_safe_research_request_file(raw_path):
@@ -1096,6 +1770,26 @@ def change_directory_target(payload, cwd, client_id="claude"):
     return str(Path(base_cwd, os.path.expanduser(words[1])))
 
 
+def _canonical_write_refusal_message(tool, target_root):
+    return (
+        f"Controller canonical guard refused: direct {tool} into protected canonical "
+        f"checkout '{target_root}' is forbidden. For repository edits, acquire a linked "
+        f"worktree via `worktree-controller acquire`; for off-repo research outputs, "
+        f"use the host `research-workspace` / `research-workspace job` entry instead."
+    )
+
+
+def _canonical_shell_refusal_message(canonical_root):
+    return (
+        f"Controller canonical guard refused: non-readonly shell command touches "
+        f"protected canonical checkout '{canonical_root}'. For repository edits, "
+        f"acquire a linked worktree via `worktree-controller acquire`. For pure "
+        f"read-only research or off-repo Drive delivery, do not acquire a business "
+        f"worktree—use the host `research-workspace` / `research-workspace job` entry "
+        f"(direct `rclone` stays blocked in canonical guard by design)."
+    )
+
+
 def _format_refusal(stdout):
     base = (
         "Controller entitlement check refused; leave with a Bash call of only "
@@ -1187,6 +1881,14 @@ def hook(event, client_id="claude"):
 
         if tool in write_tools:
             raw_targets = _extract_write_targets(tool, payload, client_id)
+            cwd_kind, _cwd_root, cwd_protected = inspect_governed_root(Path(path))
+            home = Path.home().resolve(strict=False)
+            protected_host_dirs = (
+                _canonical_readonly_config_dir(),
+                home / "bin",
+                home / ".local" / "bin",
+                home / ".local" / "share" / "uv" / "tools",
+            )
             classified = []
             for raw_target in raw_targets:
                 target_path = Path(os.path.expanduser(raw_target))
@@ -1194,11 +1896,18 @@ def hook(event, client_id="claude"):
                     target_path = Path(path) / target_path
                 kind, target_root, protected = inspect_governed_root(target_path)
                 if kind == "canonical" and protected:
-                    raise ValueError(
-                        f"Controller canonical guard refused: direct {tool} into protected canonical "
-                        f"checkout '{target_root}' is forbidden; acquire a linked worktree via "
-                        f"`worktree-controller acquire`."
-                    )
+                    raise ValueError(_canonical_write_refusal_message(tool, target_root))
+                if cwd_kind == "canonical" and cwd_protected:
+                    lexical_target = Path(os.path.normpath(str(target_path)))
+                    resolved_target = target_path.resolve(strict=False)
+                    for host_dir in protected_host_dirs:
+                        if _path_within(lexical_target, host_dir) or _path_within(
+                            resolved_target, host_dir
+                        ):
+                            raise ValueError(
+                                f"Controller canonical guard refused: modifying trusted host "
+                                f"directory '{host_dir}' from protected canonical checkout is forbidden."
+                            )
                 classified.append((raw_target, target_path, kind, target_root))
             if hosted:
                 for raw_target, target_path, _kind, _target_root in classified:
@@ -1271,11 +1980,7 @@ def hook(event, client_id="claude"):
                     command or "", shell_cwd
                 )
                 if canonical_roots:
-                    raise ValueError(
-                        f"Controller canonical guard refused: non-readonly shell command touches "
-                        f"protected canonical checkout '{canonical_roots[0]}'; acquire a linked "
-                        f"worktree via `worktree-controller acquire`."
-                    )
+                    raise ValueError(_canonical_shell_refusal_message(canonical_roots[0]))
                 if linked_roots:
                     for linked_root in linked_roots:
                         _run_writer_session([
@@ -1314,11 +2019,7 @@ def hook(event, client_id="claude"):
                     command or "", shell_cwd
                 )
                 if canonical_roots:
-                    raise ValueError(
-                        f"Controller canonical guard refused: non-readonly shell command touches "
-                        f"protected canonical checkout '{canonical_roots[0]}'; acquire a linked "
-                        f"worktree via `worktree-controller acquire`."
-                    )
+                    raise ValueError(_canonical_shell_refusal_message(canonical_roots[0]))
                 _run_writer_session(["host-check", path, "--access", "exec"])
                 cwd_kind, cwd_root, _ = inspect_governed_root(Path(path))
                 for linked_root in linked_roots:
